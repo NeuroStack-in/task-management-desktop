@@ -1,0 +1,23 @@
+[package]
+name = "agentd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The headless core service (Windows Service / launchd LaunchAgent / systemd unit). Boots with
+# the OS, survives logout; owns the outbox, uploader, config cache, heartbeat, timer engine, and
+# supervises per-session capture helpers. Vertical slices live under `src/features/`.
+
+[[bin]]
+name = "workpulse-agentd"
+path = "src/main.rs"
+
+[dependencies]
+agent-shared.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Real backends to add per slice (kept out of the skeleton so it builds without system libs):
+#   outbox   → rusqlite + sqlcipher   uploader → reqwest (rustls)
+#   heartbeat→ sysinfo                session_manager → interprocess/named pipes
+#   self_update → tauri-plugin-updater (driven from the tray)

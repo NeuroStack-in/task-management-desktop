@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent-shared",
+    "crates/agentd",
+    "crates/capture-helper",
+    # `tray` is a Tauri 2 app with its own toolchain (needs npm + tauri CLI); it lives at
+    # `tray/src-tauri` and depends on `agent-shared` by path. It is intentionally NOT a
+    # workspace member so `cargo check` on the core stays fast and toolchain-free.
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3", features = ["serde", "formatting"] }
+thiserror = "1"
+
+agent-shared = { path = "crates/agent-shared" }
+
+# The shared agent↔backend contract lives in its OWN git repo. The backend `ingest` crate
+# depends on the *same* crate, so the envelope can't drift between the two repos.
+#
+# NOW (before the contract repo is published): a path dep to the sibling checkout — clone the
+# repos side by side (`.../desktop`, `.../wp-agent-contract`). CI checks out both.
+wp-agent-contract = { path = "../wp-agent-contract" }
+#
+# AFTER publishing `wp-agent-contract` to its own repo, switch BOTH consumers to a tag-pinned
+# git dep and use a local [patch] for side-by-side dev:
+#   wp-agent-contract = { git = "https://github.com/<org>/wp-agent-contract.git", tag = "v0.1.0" }
+#   [patch."https://github.com/<org>/wp-agent-contract.git"]
+#   wp-agent-contract = { path = "../wp-agent-contract" }   # local dev override
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

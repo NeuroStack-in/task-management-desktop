@@ -1,0 +1,22 @@
+[package]
+name = "capture-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Per-user, in-session capture helper (spawned by the core into each interactive session).
+# Captures counts + metadata only, shrinks/dedups screenshots at the edge, and hands everything
+# to the core's outbox over IPC. Vertical slices under `src/features/`.
+
+[[bin]]
+name = "workpulse-capture-helper"
+path = "src/main.rs"
+
+[dependencies]
+agent-shared.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Real capture backends to add per slice (kept out of the skeleton so it builds without system
+# libs): screenshot → xcap + image/webp;  input_counts → rdev;  focus_tracker → active-win-pos-rs;
+# idle_detector → user-idle.

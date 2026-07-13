@@ -1,0 +1,13 @@
+[package]
+name = "agent-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Cross-crate contracts for the agent's three processes (core / capture-helper / tray).
+# Re-exports the SHARED agent↔backend wire contract (`wp-agent-contract`) and adds the
+# agent-internal IPC message types (which never cross to the backend).
+
+[dependencies]
+wp-agent-contract.workspace = true
+serde.workspace = true

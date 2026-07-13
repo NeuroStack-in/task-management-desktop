@@ -1,0 +1,32 @@
+[package]
+name = "workpulse-tray"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+description = "WorkPulse tray — the employee-facing surface of the agent (consent, capture indicator, timer, pause)."
+
+# NOTE: this crate is intentionally NOT a member of the desktop cargo workspace. Tauri 2 needs the
+# `tauri-cli` + a JS toolchain to build the webview bundle, so `cargo check` on the core stays fast
+# and toolchain-free. Build the tray from `desktop/tray/` with `cargo tauri dev` / `cargo tauri build`.
+
+[lib]
+# Tauri 2 puts the app logic in a lib so the mobile targets can share it; the desktop bin is a thin shim.
+name = "workpulse_tray_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The tray shares the same IPC + contract types as the core. Path dep to the sibling crate; when the
+# contract graduates to a git dep (see desktop/Cargo.toml), this follows transitively via agent-shared.
+agent-shared = { path = "../../crates/agent-shared" }
+
+[features]
+# this feature is used for production builds where `devUrl` is unset
+custom-protocol = ["tauri/custom-protocol"]
