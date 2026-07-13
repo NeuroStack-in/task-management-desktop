@@ -22,22 +22,22 @@ Data flow: `capture-helper` → (IPC) → `agentd` outbox → `POST /v1/agent/ba
 backend. Screenshots go S3-direct via presigned URLs the batch ack returns. Config and category
 rules flow the other way, applied live without a restart.
 
-## The wire contract is a separate repo
+## The wire contract lives in the backend repo
 
-The agent↔backend envelope lives in **`wp-agent-contract`** — its own git repository, a sibling to
-`desktop/` and `backend/`. Both the agent and the backend `ingest` binary depend on the *same* crate
-so the wire format can't drift. During local development it's consumed as a **path dependency** to
-the side-by-side checkout; once published it becomes a **tag-pinned git dependency** (with a local
-`[patch]` for dev). See the note in [Cargo.toml](Cargo.toml).
+The agent↔backend envelope is the crate **`wp-agent-contract`**, owned by the **backend** repo
+(`backend/crates/wp-agent-contract`) — the API authority. The backend `ingest` binary depends on it
+by path (workspace member); the desktop agent compiles the *same* crate, so the wire format can't
+drift. Locally it's a **path dependency** to the side-by-side backend checkout; cross-repo (CI /
+release) it's a **tag-pinned git dependency into the backend repo** (with a local `[patch]` for dev).
+See the note in [Cargo.toml](Cargo.toml).
 
 ```
 parent-dir/
-├─ desktop/            (this repo)
-├─ backend/            (its own repo — the ingest binary shares the contract)
-└─ wp-agent-contract/  (its own repo — the shared envelope)
+├─ desktop/   (this repo)
+└─ backend/   (its own repo; owns crates/wp-agent-contract — the shared envelope)
 ```
 
-Clone all three side by side before building.
+Clone `backend/` beside `desktop/` before building.
 
 ## Build & test
 
@@ -60,11 +60,12 @@ just tray-dev   # or: cd tray/src-tauri && cargo tauri dev
 
 ## Status
 
-Scaffold. The core workspace (`agent-shared`, `agentd`, `capture-helper`) compiles and its unit
-tests pass; the slices are structured skeletons — OS capture (`xcap`, `active-win-pos-rs`,
-`user-idle`, `rdev`), the SQLCipher outbox, real HTTP upload, device enrollment, and the tray↔core
-IPC channel are marked with `TODO(...)` and are the implementation work ahead. Capture/upload logic
-is stubbed; the privacy shape (counts-not-keys) is already enforced by the types.
+Scaffold, all three processes **compile**. The core workspace (`agent-shared`, `agentd`,
+`capture-helper`) passes its unit tests, and the `tray` builds with `cargo check` (clippy + fmt
+clean). The slices are structured skeletons — OS capture (`xcap`, `active-win-pos-rs`, `user-idle`,
+`rdev`), the SQLCipher outbox, real HTTP upload, device enrollment, and the tray↔core IPC channel
+are marked with `TODO(...)` and are the implementation work ahead. Capture/upload logic is stubbed;
+the privacy shape (counts-not-keys) is already enforced by the types.
 
 ## Two-developer split
 

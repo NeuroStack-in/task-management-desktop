@@ -17,5 +17,9 @@ pub struct CaptureState {
 #[tauri::command]
 pub fn capture_state() -> CaptureState {
     // TODO(ipc): subscribe to the core's capture state; this is the last pushed value.
-    CaptureState { capturing: false, screenshots: false, next_cycle_secs: 0 }
+    CaptureState {
+        capturing: false,
+        screenshots: false,
+        next_cycle_secs: 0,
+    }
 }

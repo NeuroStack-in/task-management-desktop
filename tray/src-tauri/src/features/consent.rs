@@ -29,12 +29,20 @@ fn disclosure() -> Vec<&'static str> {
 #[tauri::command]
 pub fn get_consent_state() -> ConsentState {
     // TODO(ipc): read the persisted consent record from the core.
-    ConsentState { granted: false, policy_version: 1, captured: disclosure() }
+    ConsentState {
+        granted: false,
+        policy_version: 1,
+        captured: disclosure(),
+    }
 }
 
 #[tauri::command]
 pub fn grant_consent(policy_version: u32) -> ConsentState {
     // TODO(ipc): send TrayCommand::ConsentGranted to the core, which persists the acknowledged
     // policy_version and unblocks capture. Returned state reflects the acknowledgement.
-    ConsentState { granted: true, policy_version, captured: disclosure() }
+    ConsentState {
+        granted: true,
+        policy_version,
+        captured: disclosure(),
+    }
 }

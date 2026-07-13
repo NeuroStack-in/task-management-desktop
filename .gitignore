@@ -2,11 +2,9 @@
 /target
 **/target
 
-# Tauri build output + generated icons/schemas (regenerate with `cargo tauri icon` / build)
+# Tauri generated schemas (regenerated on build). The icons/ assets ARE committed — the build
+# needs them; regenerate with `cargo tauri icon <logo>` if the brand mark changes.
 /tray/src-tauri/gen
-/tray/src-tauri/icons/*.png
-/tray/src-tauri/icons/*.ico
-/tray/src-tauri/icons/*.icns
 
 # SQLCipher outbox / local agent state (never commit runtime data)
 *.db

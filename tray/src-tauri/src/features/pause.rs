@@ -19,5 +19,9 @@ pub fn request_pause(requested_secs: u64) -> PauseGrant {
     // TODO(ipc): send TrayCommand::Pause; the core clamps to policy, suspends capture (SetPaused to
     // helpers), emits an audit event, and returns the actual grant. Resume via TrayCommand::Resume.
     let _ = requested_secs;
-    PauseGrant { granted: false, granted_secs: 0, remaining_budget_secs: 0 }
+    PauseGrant {
+        granted: false,
+        granted_secs: 0,
+        remaining_budget_secs: 0,
+    }
 }

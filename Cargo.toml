@@ -20,18 +20,19 @@ thiserror = "1"
 
 agent-shared = { path = "crates/agent-shared" }
 
-# The shared agent↔backend contract lives in its OWN git repo. The backend `ingest` crate
-# depends on the *same* crate, so the envelope can't drift between the two repos.
+# The shared agent↔backend contract is OWNED BY THE BACKEND REPO (the API authority):
+# `backend/crates/wp-agent-contract`. The backend `ingest` binary depends on it by path (workspace
+# member); the desktop agent compiles the *same* crate, so the wire envelope can't drift.
 #
-# NOW (before the contract repo is published): a path dep to the sibling checkout — clone the
-# repos side by side (`.../desktop`, `.../wp-agent-contract`). CI checks out both.
-wp-agent-contract = { path = "../wp-agent-contract" }
+# NOW (local dev): a path dep to the sibling backend checkout — clone the repos side by side
+# (`.../backend`, `.../desktop`). CI checks out the backend repo alongside.
+wp-agent-contract = { path = "../backend/crates/wp-agent-contract" }
 #
-# AFTER publishing `wp-agent-contract` to its own repo, switch BOTH consumers to a tag-pinned
-# git dep and use a local [patch] for side-by-side dev:
-#   wp-agent-contract = { git = "https://github.com/<org>/wp-agent-contract.git", tag = "v0.1.0" }
-#   [patch."https://github.com/<org>/wp-agent-contract.git"]
-#   wp-agent-contract = { path = "../wp-agent-contract" }   # local dev override
+# CROSS-REPO (CI / release): the backend repo is the source; git-dep into it and pin a tag. Cargo
+# picks the `wp-agent-contract` package out of the backend workspace. Keep a local [patch] for dev:
+#   wp-agent-contract = { git = "https://github.com/<org>/backend.git", tag = "agent-contract-v0.1.0" }
+#   [patch."https://github.com/<org>/backend.git"]
+#   wp-agent-contract = { path = "../backend/crates/wp-agent-contract" }
 
 [workspace.package]
 version = "0.1.0"

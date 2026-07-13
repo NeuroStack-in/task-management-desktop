@@ -18,18 +18,30 @@ pub struct TimerState {
 #[tauri::command]
 pub fn timer_state() -> TimerState {
     // TODO(ipc): last timer state pushed by the core.
-    TimerState { running: false, task_id: None, elapsed_secs: 0 }
+    TimerState {
+        running: false,
+        task_id: None,
+        elapsed_secs: 0,
+    }
 }
 
 #[tauri::command]
 pub fn start_timer(task_id: Option<String>) -> TimerState {
     // TODO(ipc): send TrayCommand::StartTimer{task_id, project_id, description}; the core's
     // timer_engine transitions and emits AgentEvent::TimerStarted. Returned state echoes the core.
-    TimerState { running: true, task_id, elapsed_secs: 0 }
+    TimerState {
+        running: true,
+        task_id,
+        elapsed_secs: 0,
+    }
 }
 
 #[tauri::command]
 pub fn stop_timer() -> TimerState {
     // TODO(ipc): send TrayCommand::StopTimer; the core emits AgentEvent::TimerStopped{reason: User}.
-    TimerState { running: false, task_id: None, elapsed_secs: 0 }
+    TimerState {
+        running: false,
+        task_id: None,
+        elapsed_secs: 0,
+    }
 }

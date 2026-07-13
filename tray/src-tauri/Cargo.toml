@@ -1,3 +1,8 @@
+# The tray is its own build (Tauri toolchain), separate from the desktop core workspace. An empty
+# [workspace] table makes this crate its own workspace root so cargo doesn't try to fold it into
+# ../../Cargo.toml.
+[workspace]
+
 [package]
 name = "workpulse-tray"
 version = "0.1.0"

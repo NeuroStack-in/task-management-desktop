@@ -34,13 +34,18 @@ tray/
 ## Prerequisites
 
 - Rust (see `../rust-toolchain.toml`) and the platform webview deps Tauri lists for your OS.
-- `cargo install tauri-cli --version '^2'` (provides `cargo tauri`).
-- Generate icons once: `cargo tauri icon <logo.png>` (see [src-tauri/icons/README.md](src-tauri/icons/README.md)).
+- For the packaged bundle only: `cargo install tauri-cli --version '^2'` (provides `cargo tauri`).
+- Icons are already committed under [src-tauri/icons/](src-tauri/icons); regenerate with
+  `cargo tauri icon <logo.png>` only if the brand mark changes.
 
-## Develop
+## Build
+
+`cargo check` / `cargo build` work with just the Rust toolchain (verified). The full packaged app
+uses the Tauri CLI:
 
 ```sh
 cd desktop/tray/src-tauri
+cargo check          # compiles today (icons committed, no CLI needed)
 cargo tauri dev      # launches the tray + panel against the static ui/
 cargo tauri build    # produces the platform bundle
 ```
