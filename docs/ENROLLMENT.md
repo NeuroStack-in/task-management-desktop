@@ -4,9 +4,13 @@
 > a fresh install to a trusted, tenant-scoped, revocable identity — and **closes the gap
 > that the backend today issues only user JWTs, with no device identity model.**
 >
-> **Status: proposed — requires backend sign-off.** [AUTH-RBAC.md](../../backend/docs/AUTH-RBAC.md)
+> **Status: DEFERRED (proposed).** For now the agent **reuses the user's Cognito login** — the same
+> token the web app uses — so `POST /v1/agent/batch` is a normal user-JWT route and each batch is
+> attributed to the logged-in user. That fits the current model (monitoring runs while the user is
+> logged in and the timer is on). This per-device credential is a **future upgrade** for headless /
+> independently-revocable operation, not yet ratified. [AUTH-RBAC.md](../../backend/docs/AUTH-RBAC.md)
 > has Cognito user pools, `custom:orgId`/`custom:roleId` claims, and groups, but **no
-> machine/device credential**. This document specifies the missing piece for the backend to ratify.
+> machine/device credential**; this document specifies that missing piece for the backend to ratify.
 
 ---
 

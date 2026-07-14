@@ -23,7 +23,7 @@
 | Capture content | **Counts + metadata only** — app/URL *names*, keystroke/click *counts*, idle/active. Never keystroke content, clipboard, or audio (SPEC §2.4) |
 | Backend write path | Agent **never writes DynamoDB directly** — presigned S3 PUT for screenshots, idempotent batch POST for activity, server-side workers persist (BACKEND §6) |
 | Offline behaviour | **Offline-first** — embedded SQLite spool, retry with backoff, exactly-once via `Idempotency-Key` (CONCURRENCY §1) |
-| Identity | **Per-device credential** derived from an admin-issued enrollment token — *proposed*, requires backend sign-off (see [ENROLLMENT.md](ENROLLMENT.md)) |
+| Identity | **User Cognito login** for now — the agent authenticates as the logged-in user (same token as the web), so uploads are a normal user-JWT route. A per-device credential ([ENROLLMENT.md](ENROLLMENT.md)) is a **deferred** future upgrade. |
 | Real-time | **Polling over REST** — no WebSocket, matching the backend (BACKEND §1) |
 | Deliverable | **Design only** — no code, no CI, no installers built yet |
 
@@ -160,9 +160,10 @@ Two output streams; full field mapping in [INGESTION.md](INGESTION.md).
 The backend docs cover **admin management** of agents but not the **agent's own data path**.
 Two additions are required; both are specced as proposals here, not assumed:
 
-1. **Device identity / auth.** [AUTH-RBAC.md](../../backend/docs/AUTH-RBAC.md) issues only
-   *user* Cognito JWTs. The agent needs a long-lived, revocable **per-device credential**.
-   Proposal + token model in [ENROLLMENT.md](ENROLLMENT.md).
+1. **Device identity / auth.** *For now the agent reuses the **user's Cognito JWT*** (same as the
+   web) — uploads authenticate as the logged-in user and are attributed to them; no separate
+   credential. A long-lived, revocable **per-device credential** ([ENROLLMENT.md](ENROLLMENT.md)) is
+   a **deferred** upgrade for headless/independently-revocable operation.
 2. **Ingestion endpoints.** [API.md](../../backend/docs/API.md) §28 exposes only
    `agents:view` / `agents:manage` admin routes. The agent needs (names proposed):
    `POST /agents/enroll`, `POST /agents/heartbeat`, `POST /screenshots/upload-url`,
