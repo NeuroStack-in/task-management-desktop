@@ -37,22 +37,37 @@ cached ruleset yields so offline samples are still classifiable; the server may 
 
 ## 2. Sampling model
 
-Two independent cadences, both jittered to avoid lockstep and to honour the "randomized threshold"
-control in wireframe §11.8:
+> ⚠️ **Corrected 2026-07-16.** Capture-while-timer-running is **not** an option — it is **the
+> product decision**. And `Cadence` no longer means "how often we capture": it means **screenshot
+> cadence only**.
 
-- **Activity sample** — default **every 60 s**. Emits one activity record: current app/URL,
-  active/idle, and the keystroke/click counts accumulated since the last sample. Counters reset each window.
-- **Screenshot** — default **every 10 min** with **± up to the configured jitter** (wireframe
-  §11.8 default ±3 min). Options from the same control: `Off / 15m / 10m / 5m`.
+**The timer is the master gate.** No timer → **no sampling, no screenshots, no enforcement. Ever.**
+This is enforced in code (`monitor::reflect()` starts/stops on `TimerEngine::is_running()`), not by
+configuration, and it is the product's privacy stance made structural.
 
-Both are gated by:
-- **Quiet hours** (e.g. 22:00–06:00) — no capture (wireframe §12.7).
-- **Capture only while timer running** — if enabled, screenshots (and optionally activity) are
-  only taken while the user's WorkPulse time-tracking timer is active (wireframe §11.8).
-- **Silent mode / consent** — see [PRIVACY.md](PRIVACY.md); capture never starts without an active consent policy.
+While the timer runs, three loops:
 
-Idle threshold (default **5 min**, wireframe §12.1) determines the active/idle flip and can
-**auto-pause the timer** and/or **prompt the user** per config.
+- **The 1 s tick** (a dedicated OS thread — blocking/`!Send` handles must stay off the async
+  reactor). Reads idle seconds (`user-idle`) and **cumulative** keyboard/mouse counters
+  (`device_query`), and every **5th** tick samples the foreground app (`x-win`).
+- **Per-minute fold.** Ticks accumulate into a `MinuteBucket` keyed `epoch_ms / 60_000` → one
+  **`ActivityRollup`** per minute (`keystrokes`, `mouse`, `active_sec`, `idle_sec`, `top_apps`
+  capped at 30). Each tick adds a second to `active_sec` **or** `idle_sec`, so the invariant is
+  **`active_sec + idle_sec ≤ 60`**. Buckets seal on the minute boundary, on timer-stop, and on a
+  screenshot early-flush.
+- **Screenshot** — every `Cadence::interval_secs()` (`Off / 3m / 5m / 10m`) **± up to 60 s of
+  jitter**, so the timing isn't predictable or gameable. `Off` means the loop doesn't run at all.
+
+**`device_query` is a 1 s sampler, not a low-level hook.** It polls rather than intercepting — which
+is deliberate (it avoids `rdev`'s blocking listener and its macOS main-thread/run-loop requirement),
+but it has a real consequence: **fast bursts are missed and `SPIKE_CAP: 1000` silently truncates**.
+The counts are an **estimate**. Never present them in a UI or a report as an exact "keystroke count".
+
+Idle threshold (default **5 min**) drives the "still working?" prompt, and a **hard auto-stop at 15
+min** ends the session. Two seconds without input marks a tick idle (`IDLE_THRESHOLD_SECS: 2`).
+
+**Exceptions carve-out:** if the focused app/site is in `exceptions`, the screenshot **and** the span
+are suppressed — nothing about that window is recorded.
 
 All cadence/threshold values are policy, pulled from the server and cached locally — see [CONFIG.md](CONFIG.md).
 The agent uses a monotonic clock for scheduling (no dependence on wall-clock jumps from sleep/resume).

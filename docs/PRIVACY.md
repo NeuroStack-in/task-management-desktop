@@ -18,8 +18,10 @@ These are properties of the agent, not configurable away:
 2. **No capture without an active consent policy.** If the org's consent policy is disabled, the
    agent collects nothing — including in silent mode (silent mode *requires* consent enabled,
    wireframe §12.7).
-3. **Tenant isolation.** Data is scoped to the bound `orgId`/`userId` from the verified credential
-   ([ENROLLMENT.md](ENROLLMENT.md)); the agent cannot address another person or tenant.
+3. **Tenant isolation.** Data is scoped to `tenant_id` from the **verified Cognito ID token**
+   ([ENROLLMENT.md](ENROLLMENT.md)) — never from local config or the request body. The agent cannot
+   address another person or tenant. (The claim is `tenant_id`; `custom:orgId` is only the Cognito
+   attribute name.)
 4. **Transparency on demand.** The tray exposes a "what is being collected" view so the monitored
    person can always see the agent's current behaviour (status, what's captured, when).
 
@@ -36,8 +38,9 @@ These are properties of the agent, not configurable away:
 | **Quiet hours** (§12.7, e.g. 22:00–06:00) | No capture during the window — screenshots, activity, and input counts all suspended. |
 | **Idle thresholds + "prompt user on idle" / "auto-pause timer on idle"** (§12.1) | Idle flips active→inactive after the threshold; optionally prompts and/or pauses the time-tracking timer. |
 | **Blur sensitive content** (§11.8) | On-device redaction *before* the image is spooled — see §3. |
-| **Capture only while timer running** (§11.8) | Screenshots (and optionally activity) only while the user's WorkPulse timer is active. |
-| **Randomized threshold / jitter** (§11.8) | Capture cadence jittered ± the configured minutes so timing isn't predictable/gameable. |
+| **Capture only while the timer runs** (**the product decision, not an option**) | **No timer → no screenshots, no activity sampling, no enforcement. Ever.** Enforced in code (`monitor::reflect()` binds to `TimerEngine::is_running()`), not by configuration — this is the privacy stance made structural. |
+| **Randomized threshold / jitter** | Screenshot cadence jittered ± up to 60 s so timing isn't predictable or gameable. |
+| **Exceptions carve-out** | A focused app/site in `exceptions` suppresses the screenshot **and** the activity span — nothing about that window is recorded. |
 | **Monitoring exceptions** (§13.7: who · what's exempt · reason · expiry) | The agent honours per-user/per-team exemptions in its cached policy: an exempt signal (screenshots / apps / urls) is **not captured at all** while the exception is active; expiry re-enables it. |
 | **Anonymize toggle** (§12.6) | When set, the agent omits window titles and reduces screenshot fidelity/redacts aggressively; identity still flows for attribution but content is minimized. |
 | **Data retention period** (§12.6) | Enforced server-side (S3 lifecycle, BACKEND §6); the agent keeps only what's needed to upload, then deletes from the local spool. |
@@ -68,6 +71,8 @@ sensitive-data detection.
 ## 4. Data minimization
 
 - Host-only URLs (never path/query), app names (never file contents), input **counts** (never values).
+- The counts come from a **1 s sampler (`device_query`), not a keyboard hook** — bursts are missed and
+  a spike cap truncates. They are an **estimate**, and must never be presented as an exact count.
 - Screenshots downscaled/compressed to the minimum useful fidelity ([CAPTURE.md](CAPTURE.md) §4).
 - Local spool holds data only until uploaded, then deletes; it is encrypted at rest
   ([UPDATES-SECURITY.md](UPDATES-SECURITY.md)).

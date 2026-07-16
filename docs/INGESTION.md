@@ -69,64 +69,99 @@ and re-runnable when rules change.
 
 ---
 
-## 2. Upload protocol
+## 2. Upload protocol — **one call per cycle**
 
-### 2.1 Activity batches — `POST /activity/ingest`  *(proposed; perm `monitoring:submit`)*
-- Body: `{ samples: ActivitySample[] }` (batched from the spool, typically 1–N minutes' worth).
-- Header **`Idempotency-Key: <uuid>`** per batch. The backend stores the key
-  (`PK = ORG#<o>#IDEMP#<key>`, TTL ~24 h, `attribute_not_exists` write — CONCURRENCY §1); a retried
-  batch returns the stored result instead of re-applying. Each sample also carries a stable
-  `clientSampleId` so partial-batch dedup is possible.
-- Response: per-sample accept/reject so the agent can drop accepted rows from the spool.
+> ⚠️ **Corrected 2026-07-16.** This section previously described `POST /activity/ingest`, an
+> `Idempotency-Key: <uuid>` header, a two-step `POST /screenshots/upload-url`, and a separate
+> `POST /agents/heartbeat`. **None of those exist.** The real contract is a single combined endpoint,
+> deployed and live. What follows is `wp-agent-contract` as it actually ships.
 
-### 2.2 Screenshots — presigned PUT (two steps)
-1. **`POST /screenshots/upload-url`** *(proposed; perm `monitoring:submit`)* →
-   `{ uploadUrl, objectKey, screenshotId }`. The server pre-computes the key
-   (`org/<orgId>/user/<userId>/<date>/<screenshotId>.jpg`) and writes the pending `screenshot`
-   meta item.
-2. **`PUT <uploadUrl>`** — agent uploads the JPEG bytes directly to S3 (no API Gateway payload limits).
-   The S3 PUT is naturally idempotent (same key = overwrite). The S3 `ObjectCreated` event triggers
-   the thumbnail + scoring worker, which finalizes the meta item (BACKEND §6). A redelivered S3 event
-   is safe — the worker conditions on not-already-done (CONCURRENCY §4).
+### 2.1 The one endpoint — `POST /v1/agent/batch`
 
-Posting the screenshot **metadata** is folded into step 1 (server writes the pending item), so there
-is no separate metadata POST and no window where an S3 object exists without a DynamoDB row.
+Every **300 s** the agent sends **one** `BatchEnvelope`. Activity, events, heartbeat and screenshot
+*metadata* all ride it — there are no other agent endpoints and no extra calls per cycle.
 
-### 2.3 Heartbeat — `POST /agents/heartbeat`  *(proposed; perm `monitoring:submit`)*
-- Sent every ~60 s with the §1c payload. Updates the `agent` item; server recomputes `status`.
-- Doubles as the **config-pull trigger**: the response may include a `policyVersion`; if it differs
-  from the cached one, the agent fetches fresh policy (see [CONFIG.md](CONFIG.md)). Polling-only,
-  matching the backend's no-WebSocket stance (BACKEND §1).
+```jsonc
+{ "agent_id": "<per-install UUID>",   // from the keyring — NOT env, NOT hostname
+  "batch_seq": 42,                    // monotonic per agent
+  "captured_at": 1721030400000,       // epoch ms, server-offset clock
+  "config_version": 7,
+  "heartbeat":   { "hostname": …, "os": …, "os_version": …, "agent_version": …,
+                   "ip": …, "cpu_pct": …, "mem_pct": …, "outbox_mb": …, "idle": false },
+  "activity":    [ /* 0–5 ActivityRollup, one per minute — EMPTY when the timer is off */ ],
+  "events":      [ /* TimerStarted/Stopped, attendance, PolicyViolation */ ],
+  "screenshots": [ /* ScreenshotMeta only — never bytes */ ] }
+```
+
+**Idempotency is `(agent_id, batch_seq)` in the body — there is no `Idempotency-Key` header.** The
+server does a conditional put on that pair; a replayed `batch_seq` is a no-op that returns the same
+ack.
+
+**Response — `BatchAck`:**
+
+| Field | The agent must |
+|---|---|
+| `watermark_seq` | **prune the outbox up to it** — the highest seq durably accepted |
+| `config_version` | pull fresh config (ETag) if it differs from the local one |
+| `upload_urls[]` | PUT the bytes for each pending screenshot |
+
+### 2.2 Screenshots — S3-direct, via the ack
+
+No presign endpoint. The agent declares `ScreenshotMeta` in the batch; the **ack returns a presigned
+URL per shot**; the agent PUTs the bytes straight to S3 (bytes never transit Lambda).
+
+- **Upload-host pinning:** refuse any URL that isn't `https` + `amazonaws.com`. A compromised backend
+  must not be able to redirect a frame of the user's screen.
+- A failed PUT keeps the local file and **re-declares the meta next cycle** — the client-generated
+  `ScreenshotMeta.id` makes that idempotent. Cap the attempts, then drop and delete.
+
+### 2.3 Heartbeat — a field, not an endpoint
+
+The heartbeat is a **field of the envelope**, never a separate call. It is the **only signal that
+folds today** (→ `AgentDevice` at `TENANT#<id> / DEVICE#<agent_id>`, GSI6); activity, timer and
+screenshot folds are deferred seams (Phase 2/3).
+
+The 300 s cycle is **not** timer-gated (it is auth-gated) — the fleet table must stay honest about an
+agent that is online but not tracking. When the timer is off the envelope simply carries
+`activity: []` and `events: []`.
+
+Config propagates on the ack: `config_version` differs → ETag pull (see [CONFIG.md](CONFIG.md)). No
+WebSocket.
 
 ---
 
-## 3. Offline-first spool
+## 3. Offline-first outbox
 
 A laptop offline must lose nothing and double-count nothing.
 
-- **Embedded SQLite** WAL queue holds pending activity samples and screenshot jobs (blob + metadata).
-  Survives restart, sleep, crash. Encrypted at rest (see [UPDATES-SECURITY.md](UPDATES-SECURITY.md)).
-- Each item has a stable client id and a generated `Idempotency-Key`, assigned **at capture time**,
-  so a retry after an ambiguous network failure reuses the same key → exactly-once server-side.
-- **Flush loop:** drain oldest-first; on success delete from spool; on failure keep and back off.
-- **Backoff:** exponential with jitter, capped (e.g. 1s → … → 5 min). Distinguish retryable
-  (5xx, network, throttling) from terminal (4xx auth/validation → surface, don't infinitely retry).
-- **Bounded spool:** cap total on-disk size / age; when exceeded, drop **oldest activity samples
-  first** (screenshots and health preserved longer) and **log the drop** so it's never a silent gap —
-  it should surface as a missing-capture window, consistent with [CAPTURE.md](CAPTURE.md) §3.
-- **Ordering:** activity samples are independent (each is a self-contained window), so strict order
-  isn't required; the server keys by `capturedAt`. Screenshots likewise.
+- **`queue/batches.jsonl`** — an append-only file; the sealed envelope is persisted **before** send.
+  (**Not SQLite, not SQLCipher** — earlier drafts of this doc said otherwise.) Screenshot bytes sit
+  beside it as `queue/screenshots/<id>.webp`.
+- **Idempotency is the sequence**, assigned when the cycle is sealed: `(agent_id, batch_seq)`. A retry
+  after an ambiguous failure re-sends the same seq → the server no-ops.
+- **Drain oldest-first**, in order. On ack, `prune_to(watermark_seq)`; on failure keep and back off
+  (exponential + jitter, capped). Distinguish retryable (5xx/network/throttle) from terminal
+  (4xx auth/validation → surface, don't loop forever).
+- **Bounded:** ≥72 h buffer, ~1 GB cap, **oldest-first eviction** beyond it, and **log the drop** — it
+  must surface as a missing-capture window, never a silent gap.
+- **`agent_id` and the sequence are born together.** They live in the same store: delete it and the seq
+  restarts at 1, so every batch is silently rejected as a duplicate. They reset **together or not at
+  all**.
 
 ---
 
 ## 4. Auth & tenancy on every call
 
-- All requests carry `Authorization: Bearer <token>` from the device credential
-  ([ENROLLMENT.md](ENROLLMENT.md)). `orgId`/`userId` are taken from the **verified token claims**,
-  never from the body — same rule as the backend (AUTH-RBAC §13). A body that disagrees is rejected.
-- TLS only; certificate validation on; optional pinning for the API host.
-- The proposed `monitoring:submit` permission lets a device write activity/screenshots/heartbeat
-  **without** inheriting a human's full role — least privilege for an unattended credential.
+- The agent authenticates **as the logged-in user** — `Authorization: Bearer <Cognito ID token>`. The
+  claims ride the **ID token**, not the access token. There is **no device credential**: the per-device
+  identity in [ENROLLMENT.md](ENROLLMENT.md) is **deferred**, and there is no `monitoring:submit`
+  permission.
+- **`tenant_id` comes from the verified token claims, never the body** (the claim is `tenant_id` — not
+  `orgId`; `custom:orgId` is only the Cognito *attribute* name). A body that disagrees is rejected.
+- `agent_id` is a **self-declared payload string** with no cryptographic backing — it identifies the
+  install, it does not authenticate it. (Server-side hardening: bind `agent_id → user_id` on first
+  sight and reject mismatches, or a spoofed id clobbers another device's row.)
+- TLS only; certificate validation on.
 
 ---
 

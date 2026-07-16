@@ -4,44 +4,55 @@
 > a fresh install to a trusted, tenant-scoped, revocable identity — and **closes the gap
 > that the backend today issues only user JWTs, with no device identity model.**
 >
-> **Status: DEFERRED (proposed).** For now the agent **reuses the user's Cognito login** — the same
-> token the web app uses — so `POST /v1/agent/batch` is a normal user-JWT route and each batch is
-> attributed to the logged-in user. That fits the current model (monitoring runs while the user is
-> logged in and the timer is on). This per-device credential is a **future upgrade** for headless /
-> independently-revocable operation, not yet ratified. [AUTH-RBAC.md](../../backend/docs/AUTH-RBAC.md)
-> has Cognito user pools, `custom:orgId`/`custom:roleId` claims, and groups, but **no
-> machine/device credential**; this document specifies that missing piece for the backend to ratify.
+> **Status: DEFERRED (proposed) — and the case for it got weaker, not stronger.**
+>
+> **What actually ships:** the agent **signs in as the user** with the same Cognito login the web app
+> uses, and sends the **ID token** (the claims ride the ID token, not the access token). Tokens live in
+> the **OS keyring**; refresh is automatic and de-duplicated; a 401 tears the session down. So
+> `POST /v1/agent/batch` is a normal user-JWT route and each batch is attributed to `auth.user_id`.
+> **There is no device credential and no `monitoring:submit` permission.**
+>
+> **`agent_id` is not a credential.** It is a **per-install UUIDv4**, generated once at first boot and
+> persisted next to the outbox sequence. It *identifies* the install; it does not *authenticate* it.
+> It must be born and die with the sequence — delete one and `batch_seq` restarts at 1, so every batch
+> is silently rejected as a duplicate.
+>
+> ⚠️ **Server-side hardening this implies:** `agent_id` is a self-declared payload string and
+> `AgentDevice` is keyed `DEVICE#<agent_id>` under the tenant — so a spoofed id **clobbers another
+> device's row**. The server should bind `agent_id → user_id` on first sight and reject mismatches.
 
 ---
 
-## 1. The gap
+## 1. The gap — restated (2026-07-16)
 
-- The backend authenticates **humans**: Cognito issues a user JWT (`sub`, `custom:orgId`,
-  `custom:roleId`); the API authorizer validates it (BACKEND §4).
-- An agent is **unattended**. It cannot interactively sign in, complete MFA, or hold a short-lived
-  SPA access token the way the web app does. It needs a **long-lived, revocable, per-device
-  credential** that is scoped to one user in one org and can write only monitoring data.
-- The frontend already implies this flow: [`mock-agents.ts`](../../frontend/src/lib/mock-agents.ts)
-  ships an `AGENT_ENROLLMENT_TOKEN` (`"wp_agent_…"`) and per-OS installers; the `/agents` UI is the
-  place an admin would issue/revoke. The design just makes that real.
+- The backend authenticates **humans**: Cognito issues a user JWT; the API Gateway JWT authorizer
+  validates it ([AUTH-RBAC.md](../../backend/docs/AUTH-RBAC.md)). The tenant claim is **`tenant_id`** —
+  *not* `orgId`; `custom:orgId` is only the Cognito **attribute** name.
+- **The agent is no longer unattended.** Capture is **timer-gated** — no timer, no capture — so a
+  human is signed in and present whenever anything is recorded. The original premise of this document
+  ("an agent cannot interactively sign in") **no longer holds**: it can, because it only ever runs
+  while someone did.
+- That removes the *need* for a long-lived machine credential. It remains a **future upgrade** for
+  headless / independently-revocable operation — e.g. if tamper-resistance or capture-without-a-user
+  is ever required (see [AGENT.md](AGENT.md) §0, which records what the 1-process model gives up).
 
 ---
 
-## 2. Proposed identity model
+## 2. Proposed identity model *(deferred — for the backend to ratify if revived)*
 
-A **device** is a first-class, org-scoped entity bound to exactly one user.
+A **device** as a first-class, tenant-scoped entity bound to one user.
 
-- **DynamoDB item** (fits the single-table model, mirrors the existing `agent` item —
-  [DATA-MODEL.md](../../backend/docs/DATA-MODEL.md)):
+- **DynamoDB item** — keys corrected to the real single-table shape
+  ([DATA-MODEL.md](../../backend/docs/DATA-MODEL.md)); the live `AgentDevice` item already uses these:
   ```
-  PK = ORG#<orgId>
-  SK = DEVICE#<deviceId>
-  GSI1 = ORG#<orgId>#AGSTATUS / <status>#<deviceId>   (reuses the agent status index)
-  data = { deviceId, userId, hostname, os, osVersion, agentVersion,
-           enrolledAt, lastSeenAt, status, revoked, credentialRef }
+  PK    = TENANT#<tenant_id>            # NOT ORG#<orgId>
+  SK    = DEVICE#<agent_id>
+  GSI6  = TENANT#<tenant_id>#FLEET / HB#<last_heartbeat:020>   # the fleet/stale index
+  attrs = { user_id, hostname, os, agent_version, last_heartbeat,
+            idle_flag, cpu_pct, mem_pct, outbox_mb, status }
   ```
-  The `agent` management item (`SK=AGENT#<aid>`) and this `DEVICE#` item describe the same physical
-  agent; keep `deviceId == agentId` so `/agents` management and the device credential line up.
+  There is one item per agent — `DEVICE#<agent_id>` **is** the fleet item (§18); there is no separate
+  `AGENT#<aid>` record. A revived credential would hang off this item, not a parallel one.
 - **Credential.** Two acceptable implementations, to be chosen with the backend:
   1. **Cognito device / per-device refresh token** — a confidential, machine-scoped Cognito identity
      whose pre-token-generation trigger injects `custom:orgId`, `custom:userId`, and a
@@ -117,8 +128,9 @@ Admin (/agents UI)                 Employee machine                 Backend
 - The agent trusts the **server's policy** (signed responses / TLS) over any local config; a user
   cannot widen their own monitoring or escape allow/block lists by editing local files
   (see [CONFIG.md](CONFIG.md), [UPDATES-SECURITY.md](UPDATES-SECURITY.md)).
-- Tenancy is always from the verified token, never asserted by the agent — a device can only ever
-  write data for its bound `orgId`/`userId`.
+- Tenancy is always from the verified token, never asserted by the agent — a device could only ever
+  write data for its bound `tenant_id`/`user_id`. *(This holds today too: the agent sends the user's
+  Cognito ID token and the server reads `tenant_id` from the claims, never from the body.)*
 
 ---
 

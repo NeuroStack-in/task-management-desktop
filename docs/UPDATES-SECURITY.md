@@ -50,10 +50,14 @@ so a compromised mirror cannot push a malicious update.
 ## 4. Endpoint security
 
 ### 4.1 Secrets & data at rest
-- **Device refresh secret** lives in the OS keychain (Keychain / Windows Credential Manager / Secret
+- **The Cognito refresh token** lives in the OS keyring (Keychain / Windows Credential Manager / Secret
   Service), never in a config file or log ([ENROLLMENT.md](ENROLLMENT.md)).
-- **Local spool (SQLite)** is **encrypted at rest**; it holds queued samples + un-uploaded screenshot
-  blobs only until upload, then deletes ([INGESTION.md](INGESTION.md) §3, [PRIVACY.md](PRIVACY.md) §4).
+- **The outbox is `queue/batches.jsonl`** (append-only) + `queue/screenshots/<id>.webp`, in the
+  app-data dir. It holds sealed batches until the ack prunes them, and screenshot bytes only until
+  upload. (**Not SQLite, not SQLCipher** — earlier drafts said otherwise.)
+- **Upload-host pinning:** the agent refuses any presigned URL that isn't `https` + `amazonaws.com`,
+  so a compromised backend cannot redirect a frame of the user's screen.
+- **Dashboard-URL sanitization:** http(s) only, no userinfo, before the URL ever reaches a shell open. ([INGESTION.md](INGESTION.md) §3, [PRIVACY.md](PRIVACY.md) §4).
 - **Logs** record events, never captured content; titles/URLs are scrubbed to host-only.
 
 ### 4.2 Transport
@@ -85,7 +89,7 @@ so a compromised mirror cannot push a malicious update.
 | Threat | Mitigation |
 |--------|------------|
 | Malicious update / mirror compromise | independent updater signature verification + signed installers |
-| Stolen device credential | keychain storage, short-lived access tokens, server-side revoke ([ENROLLMENT.md](ENROLLMENT.md)) |
+| Stolen token | keyring storage, short-lived ID token, Cognito-side revoke; a 401 tears the session down ([ENROLLMENT.md](ENROLLMENT.md)) |
 | Local tampering to evade monitoring | server-authoritative policy, fail-closed without policy, visible offline/paused state |
 | Data exfiltration from spool | encryption at rest, minimal retention, content-free logs |
 | Privilege escalation | runs unelevated, least-privilege OS grants |

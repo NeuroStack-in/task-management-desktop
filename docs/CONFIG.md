@@ -24,7 +24,7 @@ The agent assembles its effective policy from existing admin-configured areas:
 | Source (existing) | Provides |
 |-------------------|----------|
 | `GET /agents/settings` (`AgentSettings` — [`mock-agents.ts`](../../frontend/src/lib/mock-agents.ts)) | `autoUpdate`, `updateChannel` (stable/beta), `offlineAlertMins`, `screenshotUpload` |
-| `GET /agents/config` (wireframe §28.5) | capture intervals, idle threshold, upload cadence, proxy, update channel |
+| **`GET /v1/agent/config`** (**live**) | `AgentConfig { version, tracking, rules }` — the one config endpoint. ETag-conditional (304 on match). |
 | `GET /agents/policies` (wireframe §28.6) | named policies applied to teams/roles/device-groups |
 | `/settings/monitoring` (wireframe §12) | idle thresholds, screenshot thresholds, productivity thresholds, work-hour rules, alert thresholds, monitoring policies, silent settings |
 | `/settings/tracking-rules` (wireframe §13) | app/URL tracking, allow/block lists, categories, scoring rules, exceptions |
@@ -39,8 +39,12 @@ a `policyVersion`. Marked **proposed** (needs backend sign-off), consistent with
 
 ## 3. Sync model (polling)
 
-- The **heartbeat response** carries the current `policyVersion` ([INGESTION.md](INGESTION.md) §2.3).
-- If it differs from the cached version, the agent fetches the merged policy and atomically swaps it in.
+- The **batch ack** (`BatchAck.config_version`) carries the current version ([INGESTION.md](INGESTION.md) §2.1).
+- If it differs from the cached one, the agent does an **ETag-conditional `GET /v1/agent/config`** and
+  swaps the config in atomically — **live, no restart**.
+- The token is a **sum** of the tracking + rules versions, deliberately: a `max()` would miss a
+  rules-only bump while tracking is ahead, and using `tracking.version` alone — the original bug —
+  means an admin's app/URL rules **never reach any agent**.
 - No WebSocket (matches BACKEND §1). Effective propagation delay ≈ one heartbeat interval (~60 s) —
   fast enough for "live permission reactivity" the way the frontend expects.
 - The agent **caches the last-known policy** (encrypted, in the spool DB) so it keeps enforcing correct
@@ -51,18 +55,27 @@ a `policyVersion`. Marked **proposed** (needs backend sign-off), consistent with
 
 ## 4. Effective settings the agent holds
 
+> ⚠️ **`Cadence` is redefined (2026-07-16).** It no longer means "how often we capture" — **the timer
+> gate decides that**. `Cadence` is now **screenshot cadence while the timer runs, and nothing else**.
+> It does not drive the batch cycle either (that is a fixed 300 s). `Off` = zero screenshots.
+
+**`TrackingConfig`** (from `CONFIG#TRACK`) and **`AppUrlRules`** (from `CONFIG#RULES`) are the two
+real items; `AgentConfig` bundles them behind one version token.
+
 | Setting | Default | Source | Used by |
 |---------|---------|--------|---------|
-| Screenshot frequency | 10 min | §11.8 / `/agents/config` | [CAPTURE.md](CAPTURE.md) scheduler |
-| Capture jitter | ±3 min | §11.8 | scheduler (randomized threshold) |
-| Capture only while timer running | off | §11.8 | scheduler gate |
-| Blur sensitive content | per org | §11.8 / §12.2 | [CAPTURE.md](CAPTURE.md)/[PRIVACY.md](PRIVACY.md) redaction |
-| Idle threshold | 5 min | §12.1 | active/idle flip, timer auto-pause |
-| Quiet hours | per org | §12.7 | scheduler gate |
-| Silent mode | off | §12.7 | indicator/prompt suppression (consent-gated) |
-| `screenshotUpload` | true | `AgentSettings` | enables/disables the screenshot stream |
-| `offlineAlertMins` | 30 | `AgentSettings` | server status derivation (agent reports heartbeats) |
-| `autoUpdate` / `updateChannel` | true / stable | `AgentSettings` | [UPDATES-SECURITY.md](UPDATES-SECURITY.md) |
+| `cadence` — **screenshot** interval, timer-gated | `Min5` (`Off / 3m / 5m / 10m`) | `TrackingConfig` | [CAPTURE.md](CAPTURE.md) screenshot loop |
+| Screenshot jitter | ±60 s (fixed, not configurable) | code | anti-evasion |
+| `blur_level` | 0 | `TrackingConfig` | on-device blur before upload |
+| `retention_days` | 90 | `TrackingConfig` | server-side lifecycle |
+| `silent` | false | `TrackingConfig` | **suppresses the tray capture indicator** — an admin policy on a privacy surface, so get it right |
+| **`auto_update`** *(contract PR)* | true | `TrackingConfig` | [UPDATES-SECURITY.md](UPDATES-SECURITY.md) — org-level only, no per-device targeting |
+| Idle threshold | 5 min (prompt), **15 min hard auto-stop** | user setting | idle prompt / session end |
+| App/URL categories, `blocked`, `exceptions` | per org | `AppUrlRules` | local classification + enforcement |
+| **`tasks_version`** *(contract PR)* | — | `BatchAck` | change token → `GET /v1/agent/tasks` (ETag), mirroring `config_version` |
+
+**Capture-only-while-the-timer-runs is not a setting.** It is the product decision, enforced in code —
+see [CAPTURE.md](CAPTURE.md) §2 and [PRIVACY.md](PRIVACY.md).
 | Productivity thresholds / scoring | per org | §12.3 / §13.6 | **server-side scoring** (agent supplies raw context only) |
 | App/URL categories + allow/block | per org | §13 | local enforcement (§5) |
 | Monitoring exceptions | per user/team | §13.7 | per-signal suppression ([PRIVACY.md](PRIVACY.md)) |
