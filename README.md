@@ -39,6 +39,36 @@ parent-dir/
 
 Clone `backend/` beside `desktop/` before building.
 
+## First-time setup
+
+**Prerequisites:** Rust stable (see [rust-toolchain.toml](rust-toolchain.toml)), **Node + npm** (the
+tray panel is a Vite/React app), and your OS's webview deps — Windows 10/11 already ship WebView2.
+
+```sh
+# 1. Lay the repos out side by side. The folder MUST be named `backend`: Cargo.toml resolves
+#    `../backend/crates/wp-agent-contract`, so a clone on its own will NOT build.
+mkdir workpulse && cd workpulse
+git clone <backend-repo-url> backend
+git clone <this-repo-url> desktop
+cd desktop
+
+# 2. Tauri CLI — global, one-off. Skip if `cargo tauri --version` already answers.
+cargo install tauri-cli --version '^2'
+
+# 3. The panel's JS deps — once per clone. `node_modules` is not committed, and
+#    `cargo tauri dev` shells out to npm, so this is not optional.
+cd tray/ui && npm ci && cd ../..
+
+# 4. Run it.
+cd tray/src-tauri && cargo tauri dev
+```
+
+The app starts **hidden** — click the tray icon to open the panel (left-click toggles it,
+right-click opens the menu). The first build takes a few minutes; later ones are seconds.
+
+Getting `failed to load source for dependency wp-agent-contract`? Step 1 is wrong — there's no
+`backend/` beside this repo.
+
 ## Build & test
 
 Uses [`just`](https://github.com/casey/just) (`cargo install just`), but every recipe is a plain
@@ -51,12 +81,16 @@ just ci         # fmt + clippy (-D warnings) + test — what CI runs on the core
 just run-core   # run agentd locally
 ```
 
-The **tray** builds separately (it needs the Tauri CLI) and is intentionally not a workspace member:
+The **tray** builds separately (Tauri CLI + Node) and is intentionally not a workspace member —
+see [First-time setup](#first-time-setup) above, then:
 
 ```sh
-cargo install tauri-cli --version '^2'
-just tray-dev   # or: cd tray/src-tauri && cargo tauri dev
+just tray-dev    # or: cd tray/src-tauri && cargo tauri dev
+just tray-build  # packaged installer (runs `npm run build` first)
 ```
+
+[tray/README.md](tray/README.md) covers the panel itself, including the browser-only loop
+(`npm run dev` → localhost:1420) that needs no Rust rebuild.
 
 ## Status
 
@@ -66,6 +100,12 @@ clean). The slices are structured skeletons — OS capture (`xcap`, `active-win-
 `rdev`), the SQLCipher outbox, real HTTP upload, device enrollment, and the tray↔core IPC channel
 are marked with `TODO(...)` and are the implementation work ahead. Capture/upload logic is stubbed;
 the privacy shape (counts-not-keys) is already enforced by the types.
+
+The **tray panel UI is built** (React/TS on the web app's design system — see
+[tray/README.md](tray/README.md)), but it draws a core that isn't there yet: every `#[command]` is
+still a `TODO(ipc)` stub returning a frozen constant. In `dev` the panel runs against a mock core so
+it can be designed and reviewed; **a production build shows zeros on every card**. Wiring the tray↔core
+IPC is what makes it real.
 
 ## Two-developer split
 
