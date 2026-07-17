@@ -28,6 +28,11 @@ base64 = "0.22"
 device_query = "2"
 user-idle = "0.6"
 x-win = "2"
+# Screenshots (M5)
+xcap = "0.4"
+image = "0.25"
+webp = "0.3"
+image_hasher = "2"
 
 # The agent↔backend wire contract is OWNED BY THE BACKEND REPO (the API authority):
 # `backend/crates/wp-agent-contract`. The backend `ingest` binary depends on it too, so the wire

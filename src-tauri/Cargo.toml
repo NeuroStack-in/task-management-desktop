@@ -36,6 +36,10 @@ base64 = { workspace = true }
 device_query = { workspace = true }
 user-idle = { workspace = true }
 x-win = { workspace = true }
+xcap = { workspace = true }
+image = { workspace = true }
+webp = { workspace = true }
+image_hasher = { workspace = true }
 wp-agent-contract = { workspace = true }
 
 # Real OS/IO backends are added with their milestones (kept out of M0 so the tree builds without

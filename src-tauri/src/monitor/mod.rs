@@ -33,10 +33,73 @@ const WINDOW_SAMPLE_EVERY: u64 = 5;
 const IDLE_PROMPT_SECS: u64 = 300;
 /// Hard-stop the timer after this much continuous idle (no productive time is invented).
 const AUTO_STOP_SECS: u64 = 900;
+/// Anti-evasion jitter around the screenshot cadence (BUILD-PLAN §4).
+const SCREENSHOT_JITTER_SECS: i64 = 60;
 
 /// Spawn Thread A. Runs for the app's lifetime; capture is gated internally on `timer.is_running()`.
 pub fn spawn(app: AppHandle) {
     thread::spawn(move || run(app));
+}
+
+/// Spawn **Thread C** — the jittered screenshot loop (BUILD-PLAN §4, timer + consent + cadence gated,
+/// fails closed). Runs on the async runtime; the blocking grab/encode goes to `spawn_blocking`.
+pub fn spawn_screenshots(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let interval = {
+                let state = app.state::<AppState>();
+                let cadence = state.config.lock().unwrap().get().tracking.cadence;
+                cadence.interval_secs()
+            };
+            let Some(base) = interval.map(|s| s as i64) else {
+                // Cadence::Off → no screenshots; re-check in a minute.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            };
+            let now = clock::now_epoch_ms();
+            let jitter = (now % (2 * SCREENSHOT_JITTER_SECS + 1)) - SCREENSHOT_JITTER_SECS;
+            tokio::time::sleep(Duration::from_secs((base + jitter).max(1) as u64)).await;
+
+            // Gates (scoped so `state` isn't held across the blocking capture).
+            let (go, blur) = {
+                let state = app.state::<AppState>();
+                let running = state.timer.lock().unwrap().is_running();
+                let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
+                let cfg = state.config.lock().unwrap();
+                let t = &cfg.get().tracking;
+                let on = !matches!(t.cadence, wp_agent_contract::Cadence::Off);
+                (running && consented && on, t.blur_level)
+            };
+            if !go {
+                continue;
+            }
+
+            let app_name = active_window::current().map(|f| f.app).unwrap_or_default();
+            let cap_ts = clock::now_epoch_ms();
+            let shot =
+                tokio::task::spawn_blocking(move || screenshot::capture(&app_name, blur, cap_ts))
+                    .await
+                    .ok()
+                    .flatten();
+
+            match shot {
+                Some((meta, path)) => {
+                    app.state::<AppState>().screenshots.lock().unwrap().insert(
+                        meta.id.clone(),
+                        crate::state::PendingShot {
+                            meta,
+                            path,
+                            attempts: 0,
+                        },
+                    );
+                }
+                // Capture failed where it shouldn't (e.g. macOS grant denied) — surface, not silence.
+                None => {
+                    let _ = app.emit(events::SCREENSHOT_UNAVAILABLE, ());
+                }
+            }
+        }
+    });
 }
 
 fn run(app: AppHandle) {
@@ -50,8 +113,11 @@ fn run(app: AppHandle) {
         thread::sleep(Duration::from_secs(1));
         let state = app.state::<AppState>();
 
+        // Capture only while the timer runs **and** monitoring consent is granted (PRIVACY.md —
+        // consent-gated, fails closed). Time tracking can run without consent; activity capture can't.
         let running = state.timer.lock().unwrap().is_running();
-        if running {
+        let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
+        if running && consented {
             let now = clock::now_epoch_ms();
             let idle = idle::idle_seconds();
             let (kb, mouse) = sampler.sample();

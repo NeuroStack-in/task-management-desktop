@@ -9,3 +9,7 @@ pub const IDLE_PROMPT: &str = "monitor:idle-prompt";
 
 /// Tracking state changed (started/stopped) → refresh the indicator.
 pub const TRACKING_CHANGED: &str = "monitor:tracking-changed";
+
+/// A screenshot capture failed where it should have worked (e.g. macOS Screen-Recording denied) →
+/// the UI surfaces a "grant permission" state instead of silence (M5, risk #5).
+pub const SCREENSHOT_UNAVAILABLE: &str = "monitor:screenshot-unavailable";

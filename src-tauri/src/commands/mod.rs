@@ -47,6 +47,22 @@ pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
     state.auth.status()
 }
 
+// ---- consent (M5 / PRIVACY.md) ----
+
+/// Grant or revoke monitoring consent. Capture (activity + screenshots) is gated on this and
+/// **defaults off** — so nothing is captured until the user consents.
+#[tauri::command]
+pub fn set_consent(state: State<'_, AppState>, granted: bool) {
+    state
+        .consent
+        .store(granted, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn consent_status(state: State<'_, AppState>) -> bool {
+    state.consent.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ---- timer (M0) ----
 
 /// Start the timer. M3 threads `description` + optional `task_id`/`project_id` (meeting mode) once

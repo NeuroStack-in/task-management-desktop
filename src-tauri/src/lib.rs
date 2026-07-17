@@ -52,6 +52,8 @@ pub fn run() {
             commands::auth_complete_new_password,
             commands::auth_logout,
             commands::auth_status,
+            commands::set_consent,
+            commands::consent_status,
             commands::timer_start,
             commands::timer_stop,
             commands::timer_status,
@@ -68,6 +70,8 @@ pub fn run() {
 
             // Thread A: the 1 s activity monitor (timer-gated internally).
             monitor::spawn(app.handle().clone());
+            // Thread C: the jittered screenshot loop (timer + consent + cadence gated).
+            monitor::spawn_screenshots(app.handle().clone());
 
             // Tray: menu + tooltip. M6 makes the tooltip reflect tracking/idle and adds
             // minimize-to-tray + auto-sign-out on quit.
