@@ -66,6 +66,9 @@ pub fn run() {
             });
             api::spawn_sender(app.handle().clone());
 
+            // Thread A: the 1 s activity monitor (timer-gated internally).
+            monitor::spawn(app.handle().clone());
+
             // Tray: menu + tooltip. M6 makes the tooltip reflect tracking/idle and adds
             // minimize-to-tray + auto-sign-out on quit.
             let show = MenuItem::with_id(app, "show", "Show WorkPulse", true, None::<&str>)?;

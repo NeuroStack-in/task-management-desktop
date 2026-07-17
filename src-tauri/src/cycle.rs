@@ -12,9 +12,11 @@ use crate::state::AppState;
 /// prune land with `api::batch`.
 pub fn assemble_and_enqueue(state: &AppState) -> u64 {
     let events = std::mem::take(&mut *state.pending_events.lock().unwrap());
+    let activity = std::mem::take(&mut *state.pending_activity.lock().unwrap());
     let config_version = state.config.lock().unwrap().version();
     let mut outbox = state.outbox.lock().unwrap();
     let outbox_mb = outbox.backlog_bytes() as f32 / (1024.0 * 1024.0);
     let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), outbox_mb, false);
-    outbox.enqueue_cycle(now_epoch_ms(), config_version, hb, vec![], events, vec![])
+    // `screenshots` fill in at M5.
+    outbox.enqueue_cycle(now_epoch_ms(), config_version, hb, activity, events, vec![])
 }

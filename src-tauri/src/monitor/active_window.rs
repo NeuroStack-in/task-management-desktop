@@ -1,8 +1,9 @@
-//! Foreground window → app / title / url. M4: `x-win` (`active-win-pos-rs`), sampled every 5th tick
-//! (`WINDOW_SAMPLE_EVERY: 5`), classified via `rules::classify` into an `AppSpan`. Partial on
-//! Wayland (risk #4); needs Accessibility for titles on macOS (risk #5).
+//! Foreground window → app / title via `x-win`, sampled every `WINDOW_SAMPLE_EVERY`th tick and
+//! classified into an `AppSpan` (BUILD-PLAN §4). Partial on Wayland (risk #4); needs Accessibility
+//! for titles on macOS (risk #5). `x-win` reports no URL, so `url` is `None` — browser-URL
+//! extraction is a later refinement.
 
-/// A foreground focus observation. Serialized to the UI later with camelCase (BUILD-PLAN §3).
+/// A foreground focus observation.
 #[derive(Clone, Debug, Default)]
 pub struct Focus {
     pub app: String,
@@ -10,7 +11,20 @@ pub struct Focus {
     pub url: Option<String>,
 }
 
-/// The current foreground window. `None` until M4 wires `x-win` (and where the OS forbids it).
+/// The current foreground window, or `None` when the OS forbids it / nothing is focused.
 pub fn current() -> Option<Focus> {
-    None // TODO(M4): active-win-pos-rs
+    let w = x_win::get_active_window().ok()?;
+    let app = if !w.info.exec_name.is_empty() {
+        w.info.exec_name
+    } else {
+        w.info.name
+    };
+    if app.is_empty() {
+        return None;
+    }
+    Some(Focus {
+        app,
+        title: (!w.title.is_empty()).then_some(w.title),
+        url: None,
+    })
 }
