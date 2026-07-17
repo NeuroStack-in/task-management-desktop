@@ -20,11 +20,14 @@ pub fn timer_start(
     project_id: String,
 ) -> Result<(), String> {
     let ts = now_epoch_ms();
-    let mut timer = state.timer.lock().unwrap();
-    let _event = timer
-        .start(session_id, task_id, project_id, ts)
-        .map_err(|e| format!("timer:{e}"))?;
-    // M2: enqueue `_event` into the outbox's next cycle (activity/events drain).
+    let event = {
+        let mut timer = state.timer.lock().unwrap();
+        timer
+            .start(session_id, task_id, project_id, ts)
+            .map_err(|e| format!("timer:{e}"))?
+    };
+    // Buffered for the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4).
+    state.pending_events.lock().unwrap().push(event);
     Ok(())
 }
 
@@ -32,9 +35,10 @@ pub fn timer_start(
 #[tauri::command]
 pub fn timer_stop(state: State<'_, AppState>) -> Result<(), String> {
     let ts = now_epoch_ms();
-    let mut timer = state.timer.lock().unwrap();
-    let _event = timer.stop(ts, StopReason::User);
-    // M2: enqueue `_event` into the outbox's next cycle.
+    let event = { state.timer.lock().unwrap().stop(ts, StopReason::User) };
+    if let Some(ev) = event {
+        state.pending_events.lock().unwrap().push(ev);
+    }
     Ok(())
 }
 

@@ -3,6 +3,8 @@
 
 use std::sync::Mutex;
 
+use wp_agent_contract::AgentEvent;
+
 use crate::config::ConfigCache;
 use crate::outbox::Outbox;
 use crate::timer::TimerEngine;
@@ -11,6 +13,8 @@ pub struct AppState {
     pub timer: Mutex<TimerEngine>,
     pub outbox: Mutex<Outbox>,
     pub config: Mutex<ConfigCache>,
+    /// Timer/attendance/policy events awaiting the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4).
+    pub pending_events: Mutex<Vec<AgentEvent>>,
 }
 
 impl AppState {
@@ -19,6 +23,7 @@ impl AppState {
             timer: Mutex::new(TimerEngine::default()),
             outbox: Mutex::new(Outbox::new()),
             config: Mutex::new(ConfigCache::default()),
+            pending_events: Mutex::new(Vec::new()),
         }
     }
 }

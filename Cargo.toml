@@ -19,6 +19,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", features = ["serde", "formatting"] }
 thiserror = "1"
 uuid = { version = "1", features = ["v4"] }
+sysinfo = "0.32"
+local-ip-address = "0.6"
 
 # The agent↔backend wire contract is OWNED BY THE BACKEND REPO (the API authority):
 # `backend/crates/wp-agent-contract`. The backend `ingest` binary depends on it too, so the wire
