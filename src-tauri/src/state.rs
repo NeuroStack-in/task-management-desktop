@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use wp_agent_contract::AgentEvent;
 
+use crate::auth::AuthManager;
 use crate::config::ConfigCache;
 use crate::outbox::Outbox;
 use crate::timer::TimerEngine;
@@ -15,6 +16,8 @@ pub struct AppState {
     pub config: Mutex<ConfigCache>,
     /// Timer/attendance/policy events awaiting the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4).
     pub pending_events: Mutex<Vec<AgentEvent>>,
+    /// Cognito session + single-flight refresh (interior mutability — not behind the outer Mutex).
+    pub auth: AuthManager,
 }
 
 impl AppState {
@@ -24,6 +27,7 @@ impl AppState {
             outbox: Mutex::new(Outbox::new()),
             config: Mutex::new(ConfigCache::default()),
             pending_events: Mutex::new(Vec::new()),
+            auth: AuthManager::new(),
         }
     }
 }

@@ -7,8 +7,47 @@
 use tauri::State;
 use wp_agent_contract::StopReason;
 
+use crate::auth::AuthStatus;
 use crate::clock::now_epoch_ms;
 use crate::state::AppState;
+
+// ---- auth (M1) ----
+
+/// Sign in with Cognito `USER_PASSWORD_AUTH`. May return a `newPasswordSession` if the account was
+/// admin-created and must set a password (then call `auth_complete_new_password`).
+#[tauri::command]
+pub async fn auth_login(
+    state: State<'_, AppState>,
+    username: String,
+    password: String,
+) -> Result<AuthStatus, String> {
+    state.auth.login(&username, &password).await
+}
+
+#[tauri::command]
+pub async fn auth_complete_new_password(
+    state: State<'_, AppState>,
+    username: String,
+    new_password: String,
+    session: String,
+) -> Result<AuthStatus, String> {
+    state
+        .auth
+        .complete_new_password(&username, &new_password, &session)
+        .await
+}
+
+#[tauri::command]
+pub fn auth_logout(state: State<'_, AppState>) {
+    state.auth.logout();
+}
+
+#[tauri::command]
+pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
+    state.auth.status()
+}
+
+// ---- timer (M0) ----
 
 /// Start the timer. M3 threads `description` + optional `task_id`/`project_id` (meeting mode) once
 /// the contract PR lands (§6); today they are required, matching the deployed contract.

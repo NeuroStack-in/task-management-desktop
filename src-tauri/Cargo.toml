@@ -30,6 +30,9 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 sysinfo = { workspace = true }
 local-ip-address = { workspace = true }
+reqwest = { workspace = true }
+keyring = { workspace = true }
+base64 = { workspace = true }
 wp-agent-contract = { workspace = true }
 
 # Real OS/IO backends are added with their milestones (kept out of M0 so the tree builds without

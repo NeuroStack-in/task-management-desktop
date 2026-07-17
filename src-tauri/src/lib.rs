@@ -48,12 +48,24 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
+            commands::auth_login,
+            commands::auth_complete_new_password,
+            commands::auth_logout,
+            commands::auth_status,
             commands::timer_start,
             commands::timer_stop,
             commands::timer_status,
             commands::agent_id,
         ])
         .setup(|app| {
+            // Try to resume a session from the keyring, then start the 300 s sender loop (Thread B).
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let restored = handle.state::<AppState>().auth.restore().await;
+                tracing::info!("auth restore at startup: {restored}");
+            });
+            api::spawn_sender(app.handle().clone());
+
             // Tray: menu + tooltip. M6 makes the tooltip reflect tracking/idle and adds
             // minimize-to-tray + auto-sign-out on quit.
             let show = MenuItem::with_id(app, "show", "Show WorkPulse", true, None::<&str>)?;
