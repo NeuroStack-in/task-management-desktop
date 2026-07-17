@@ -15,6 +15,9 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-autostart = "2"
+# Updater (M7)
+tauri-plugin-updater = "2"
+url = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -63,6 +63,18 @@ pub fn consent_status(state: State<'_, AppState>) -> bool {
     state.consent.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// ---- updater (M7) ----
+
+/// Manually check for a newer signed release (respects `auto_update` for whether it installs).
+#[tauri::command]
+pub async fn check_for_updates(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let auto = state.config.lock().unwrap().get().tracking.auto_update;
+    crate::updater::check_and_maybe_install(&app, auto).await
+}
+
 // ---- timer (M0) ----
 
 /// Start the timer. M3 threads `description` + optional `task_id`/`project_id` (meeting mode) once

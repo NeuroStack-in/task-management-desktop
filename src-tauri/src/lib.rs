@@ -65,6 +65,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::auth_login,
@@ -77,6 +78,7 @@ pub fn run() {
             commands::timer_stop,
             commands::timer_status,
             commands::agent_id,
+            commands::check_for_updates,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {
@@ -101,6 +103,25 @@ pub fn run() {
             if std::env::var_os("WP_NO_AUTOSTART").is_none() {
                 use tauri_plugin_autostart::ManagerExt;
                 let _ = app.autolaunch().enable();
+            }
+
+            // M7: check for a signed update at startup (no-op without a pubkey; `WP_NO_UPDATE` skips).
+            if std::env::var_os("WP_NO_UPDATE").is_none() {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let auto = h
+                        .state::<AppState>()
+                        .config
+                        .lock()
+                        .unwrap()
+                        .get()
+                        .tracking
+                        .auto_update;
+                    match updater::check_and_maybe_install(&h, auto).await {
+                        Ok(available) => tracing::info!("update check: available={available}"),
+                        Err(e) => tracing::info!("update check skipped/failed: {e}"),
+                    }
+                });
             }
 
             // Tray: menu + a tooltip the monitor keeps in sync with tracking state.
