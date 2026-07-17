@@ -45,8 +45,15 @@ a `policyVersion`. Marked **proposed** (needs backend sign-off), consistent with
 - The token is a **sum** of the tracking + rules versions, deliberately: a `max()` would miss a
   rules-only bump while tracking is ahead, and using `tracking.version` alone — the original bug —
   means an admin's app/URL rules **never reach any agent**.
-- No WebSocket (matches BACKEND §1). Effective propagation delay ≈ one heartbeat interval (~60 s) —
-  fast enough for "live permission reactivity" the way the frontend expects.
+- **No WebSocket — and that is now the whole product, not a local choice.** WebSocket is **deferred**
+  project-wide (2026-07-17, `backend/WorkPulse-HLD.md` §3 *Freshness*); the browser polls too. Nothing
+  pushes to anything **today**, and a future push channel would be **server→browser first** — the
+  agent's config-on-`BatchAck` rail is not what the migration is for.
+- Effective propagation delay ≈ **one batch cycle (~300 s / 5 min)**, since config rides the
+  `BatchAck`. ⚠️ *Corrected 2026-07-17: this line read "~60 s", which never matched
+  [`AGENT.md`](AGENT.md) §4's 300 s cycle.* If "live permission reactivity" is read as **seconds**,
+  the agent does not deliver it and never did — an admin's rule change lands **within ~5 minutes**.
+  Set that expectation in the UI rather than implying instant.
 - The agent **caches the last-known policy** (encrypted, in the spool DB) so it keeps enforcing correct
   rules while offline. A brand-new agent with no cache and no network captures nothing until it can pull
   policy + confirm consent (fail-closed).

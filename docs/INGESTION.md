@@ -125,8 +125,10 @@ The 300 s cycle is **not** timer-gated (it is auth-gated) — the fleet table mu
 agent that is online but not tracking. When the timer is off the envelope simply carries
 `activity: []` and `events: []`.
 
-Config propagates on the ack: `config_version` differs → ETag pull (see [CONFIG.md](CONFIG.md)). No
-WebSocket.
+Config propagates on the ack: `config_version` differs → ETag pull (see [CONFIG.md](CONFIG.md)). **No
+WebSocket** — none exists anywhere in the product; it is **deferred** to a future migration
+(`backend/WorkPulse-HLD.md` §3 *Freshness*). The agent polls by batching; the browser polls with
+`If-None-Match`.
 
 ---
 

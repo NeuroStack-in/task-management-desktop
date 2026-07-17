@@ -1,10 +1,32 @@
 # Cloud-Native Desktop Agent — Reference Architecture
 
+> # ⛔ SUPERSEDED — HISTORICAL ESSAY, NOT A PLAN
+>
+> **This document is not authoritative and describes a system we are not building.** It predates the
+> real design and was written before any code existed. It is kept only as a record of the thinking.
+> `docs/BUILD-PLAN.md` §1 marks it for archival.
+>
+> **Do not implement anything from this file.** Specifically, it is wrong about:
+>
+> - **A WebSocket control channel** (§13 *"WebSocket — for real-time control"*, config push, remote
+>   commands, force-sync, restart). WebSocket is **deferred** product-wide — see
+>   [`../backend/WorkPulse-HLD.md`](../backend/WorkPulse-HLD.md) §3 *Freshness*. **Nothing here is the
+>   plan even when that migration happens:** it is scoped **server→browser** (dashboard freshness),
+>   **not** a control channel to the agent. There is no remote-command surface, deferred or otherwise.
+>   Config rides the **`BatchAck`** and is pulled by **ETag**; see [`docs/CONFIG.md`](docs/CONFIG.md).
+> - **Remote control of the agent generally** — the LLD makes the web timer a **read-only** indicator
+>   (§4). No restart, no force-sync, no remote sessions (Remote Support Center: **CUT**).
+> - **The process model** — [`docs/AGENT.md`](docs/AGENT.md) §0 builds **one Tauri process**.
+>
+> **Where the truth lives:** [`docs/AGENT.md`](docs/AGENT.md) (agent SSOT) ·
+> [`../backend/WorkPulse-HLD.md`](../backend/WorkPulse-HLD.md) +
+> [`../backend/WorkPulse-LLD.md`](../backend/WorkPulse-LLD.md) (canon).
+
 ## Enterprise Activity Tracking & Task Management Platform
 
 **Version:** 2.0
 **Last Updated:** July 2026
-**Status:** Architecture Baseline
+**Status:** ⛔ **SUPERSEDED 2026-07-17** *(previously, and misleadingly, "Architecture Baseline")*
 **Scope:** Windows · macOS · Linux · AWS Backend
 
 ---

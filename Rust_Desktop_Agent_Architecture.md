@@ -1,9 +1,33 @@
 # Cloud-Native Desktop Agent — Rust Implementation Architecture
 
+> # ⛔ SUPERSEDED — HISTORICAL ESSAY, NOT A PLAN
+>
+> **This document is not authoritative and describes a system we are not building.** It predates the
+> real design. `docs/BUILD-PLAN.md` §1 marks it for archival. Kept only as a record of the thinking.
+>
+> **Do not implement anything from this file.** Specifically, it is wrong about:
+>
+> - **§13 "Communication Layer (REST + WebSocket)" and `tokio-tungstenite`.** WebSocket is **deferred**
+>   product-wide ([`../backend/WorkPulse-HLD.md`](../backend/WorkPulse-HLD.md) §3 *Freshness*), and even
+>   that migration is **server→browser only** — **the agent is not part of it.** **Do not add
+>   `tokio-tungstenite`**: there is no server endpoint to connect to, and none is planned for the agent.
+>   The agent's whole server conversation is `POST /v1/agent/batch` every ~300 s plus an ETag config
+>   pull ([`docs/INGESTION.md`](docs/INGESTION.md), [`docs/CONFIG.md`](docs/CONFIG.md)).
+> - **Live config push, remote commands, force-sync, restart, WebSocket ping liveness.** None exist.
+>   Config propagates on the **`BatchAck`**; liveness is the **heartbeat** (LLD §18: online =
+>   heartbeat within ~10 min).
+> - **The 3-process split and the crate tree** (`agent-transport/` etc.) —
+>   [`docs/AGENT.md`](docs/AGENT.md) §0 builds **one Tauri process**;
+>   [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md) §1 has the real module layout.
+>
+> **Where the truth lives:** [`docs/AGENT.md`](docs/AGENT.md) (agent SSOT) ·
+> [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md) (what to build, in order).
+
 ## Enterprise Activity Tracking & Task Management Platform
 
 **Version:** 1.0
 **Last Updated:** July 2026
+**Status:** ⛔ **SUPERSEDED 2026-07-17**
 **Language:** Rust (2021 edition)
 **UI Shell:** Tauri 2.x
 **Targets:** Windows · macOS · Linux
