@@ -172,5 +172,17 @@ fn run(app: AppHandle) {
         if !sealed.is_empty() {
             state.pending_activity.lock().unwrap().extend(sealed);
         }
+
+        // Keep the tray tooltip in sync with tracking state (M6).
+        if let Some(tray) = app.tray_by_id("main") {
+            let tip = if running && consented {
+                "WorkPulse — tracking"
+            } else if running {
+                "WorkPulse — consent required"
+            } else {
+                "WorkPulse — idle"
+            };
+            let _ = tray.set_tooltip(Some(tip));
+        }
     }
 }

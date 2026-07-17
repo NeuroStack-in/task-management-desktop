@@ -27,14 +27,23 @@ pub mod rules;
 pub mod state;
 pub mod timer;
 pub mod updater;
+pub mod util;
 pub mod window_size;
 
 use state::AppState;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager,
+    Manager, RunEvent, WindowEvent,
 };
+use wp_agent_contract::StopReason;
+
+fn focus_panel<M: Manager<tauri::Wry>>(app: &M) {
+    if let Some(w) = app.get_webview_window("panel") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
 
 /// Build and run the Tauri app.
 pub fn run() {
@@ -44,8 +53,18 @@ pub fn run() {
         )
         .init();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // single-instance must be registered first: a second launch focuses the running one.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            focus_panel(app);
+        }))
         .plugin(tauri_plugin_shell::init())
+        // Persists + restores the panel window size/position (debounced) — M6 window-size.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::auth_login,
@@ -59,22 +78,32 @@ pub fn run() {
             commands::timer_status,
             commands::agent_id,
         ])
+        // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
-            // Try to resume a session from the keyring, then start the 300 s sender loop (Thread B).
+            // Resume a keyring session, then start the sender (Thread B) + monitor (A) + screenshots (C).
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let restored = handle.state::<AppState>().auth.restore().await;
                 tracing::info!("auth restore at startup: {restored}");
             });
             api::spawn_sender(app.handle().clone());
-
-            // Thread A: the 1 s activity monitor (timer-gated internally).
             monitor::spawn(app.handle().clone());
-            // Thread C: the jittered screenshot loop (timer + consent + cadence gated).
             monitor::spawn_screenshots(app.handle().clone());
 
-            // Tray: menu + tooltip. M6 makes the tooltip reflect tracking/idle and adds
-            // minimize-to-tray + auto-sign-out on quit.
+            // Register autostart (agent should relaunch at login). `WP_NO_AUTOSTART` opts out in dev.
+            #[cfg(desktop)]
+            if std::env::var_os("WP_NO_AUTOSTART").is_none() {
+                use tauri_plugin_autostart::ManagerExt;
+                let _ = app.autolaunch().enable();
+            }
+
+            // Tray: menu + a tooltip the monitor keeps in sync with tracking state.
             let show = MenuItem::with_id(app, "show", "Show WorkPulse", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -87,18 +116,26 @@ pub fn run() {
             }
             tray.on_menu_event(|app, event| match event.id.as_ref() {
                 "quit" => app.exit(0),
-                "show" => {
-                    if let Some(w) = app.get_webview_window("panel") {
-                        let _ = w.show();
-                        let _ = w.set_focus();
-                    }
-                }
+                "show" => focus_panel(app),
                 _ => {}
             })
             .build(app)?;
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the WorkPulse agent");
+        .build(tauri::generate_context!())
+        .expect("error while building the WorkPulse agent");
+
+    app.run(|app_handle, event| {
+        // Auto-sign-out on quit (tray Quit / Ctrl-C / SIGTERM all funnel to ExitRequested). Bounded:
+        // stop the timer with `Shutdown` and clear the session/keyring. Idempotent.
+        if let RunEvent::ExitRequested { .. } = event {
+            let state = app_handle.state::<AppState>();
+            let ts = clock::now_epoch_ms();
+            if let Some(ev) = state.timer.lock().unwrap().stop(ts, StopReason::Shutdown) {
+                state.pending_events.lock().unwrap().push(ev);
+            }
+            state.auth.logout();
+        }
+    });
 }
