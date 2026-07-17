@@ -2,19 +2,20 @@
 /target
 **/target
 
-# Tray panel UI (Vite/React)
+# Webview (Preact/Vite)
 node_modules/
-/tray/ui/dist
+/ui/dist
 
 # Tauri generated schemas (regenerated on build). The icons/ assets ARE committed — the build
 # needs them; regenerate with `cargo tauri icon <logo>` if the brand mark changes.
-/tray/src-tauri/gen
+/src-tauri/gen
 
-# SQLCipher outbox / local agent state (never commit runtime data)
+# Local agent state / jsonl outbox (never commit runtime data)
 *.db
 *.db-shm
 *.db-wal
 /.agent-state
+/src-tauri/.agent-state
 
 # Env / secrets
 .env

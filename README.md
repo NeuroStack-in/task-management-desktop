@@ -4,32 +4,54 @@ The third leg of WorkPulse (alongside `frontend/` and `backend/`). It runs on em
 captures activity **counts and metadata only** (never keystrokes, clipboard, or audio — the privacy
 invariant is structural), classifies at the edge, and ships one batch per cycle to the backend.
 
-Built in **Rust** with a **Tauri 2** tray. The single source of truth is the LLD
-([../backend/WorkPulse-LLD.md](../backend/WorkPulse-LLD.md), Appendix A) and the design docs under
-[docs/](docs/) (`AGENT.md`, `CAPTURE.md`, `INGESTION.md`, `CONFIG.md`, `ENROLLMENT.md`,
-`PRIVACY.md`, `UPDATES-SECURITY.md`).
+Built in **Rust** with a **Tauri 2** shell + a **Preact** webview. The authority is
+[docs/BUILD-PLAN.md](docs/BUILD-PLAN.md) and [docs/AGENT.md](docs/AGENT.md) (which **amend LLD
+Appendix A** — see below), plus the companion docs under [docs/](docs/) (`CAPTURE.md`, `INGESTION.md`,
+`CONFIG.md`, `ENROLLMENT.md`, `PRIVACY.md`, `UPDATES-SECURITY.md`).
 
-## Three processes, one agent
+## One process (amends LLD Appendix A)
 
-| Process | Crate | Role |
-|---|---|---|
-| **`agentd`** | [`crates/agentd`](crates/agentd) | Headless core service. Owns the outbox, config cache, timer state machine, and the **only** network egress (`uploader`). Supervises helpers; funnels everything through the outbox. |
-| **`capture-helper`** | [`crates/capture-helper`](crates/capture-helper) | Per-user, in-session. The only process that touches pixels/input. Produces per-minute rollups + screenshot metadata; hands them to the core over IPC. **No HTTP capability.** |
-| **`tray`** | [`tray/`](tray) | The user-facing Tauri 2 app: consent, live capture indicator, timer, bounded pause. Thin remote control — no capture, no egress. |
-| *shared* | [`crates/agent-shared`](crates/agent-shared) | Internal IPC message shapes + a re-export of the wire contract. |
+LLD Appendix A specified **three** processes (a headless `agentd` service + a per-user
+`capture-helper` + a tray). **BUILD-PLAN §0 amends that to ONE Tauri process**, because capture is
+**timer-gated** — the user is always present, so the split's only benefits (capture with no user
+present, survive-logout, Session-0) don't apply, and it costs a service installer + an IPC surface +
+per-OS session plumbing. The tradeoff on the record: **no tamper-resistance** (the user can kill the
+process and tracking stops). `monitor/` is kept **free of Tauri types** so a daemon can be split back
+out later without a rewrite.
 
-Data flow: `capture-helper` → (IPC) → `agentd` outbox → `POST /v1/agent/batch` (one call/cycle) →
-backend. Screenshots go S3-direct via presigned URLs the batch ack returns. Config and category
-rules flow the other way, applied live without a restart.
+```
+desktop/
+├─ Cargo.toml            # workspace, members = ["src-tauri"]
+├─ ui/                   # Preact + Vite + Tailwind + TS webview
+└─ src-tauri/
+   └─ src/
+      ├─ lib.rs main.rs  # lib split so integration tests can link the core
+      ├─ clock.rs error.rs events.rs lifecycle.rs window_size.rs
+      ├─ state.rs        # Tauri-managed AppState (timer · outbox · config)
+      ├─ config/         # AgentConfig cache; ETag pull on version mismatch
+      ├─ auth/           # M1 — Cognito USER_PASSWORD_AUTH + OS keyring
+      ├─ api/            # M2 — reqwest: POST /v1/agent/batch, config pull, S3 PUT
+      ├─ commands/       # the webview's #[command] surface
+      ├─ timer/engine.rs # one running session max; carries started_at
+      ├─ outbox/         # in-memory now → queue/batches.jsonl (M2); per-install agent_id
+      ├─ monitor/        # input (counts-only) + idle/active_window/screenshot/session/bucket seams
+      ├─ rules/          # on-device app/URL classifier
+      └─ updater/        # M7 — signed GitHub-Releases self-update
+```
+
+Data flow: `monitor` (timer-gated) → per-minute `ActivityRollup`s + events → `outbox` →
+`POST /v1/agent/batch` (one call / 300 s cycle) → backend. Screenshots go S3-direct via presigned
+URLs the batch ack returns. Config + category rules flow back on the ack's `config_version` → ETag
+pull, applied live without a restart.
 
 ## The wire contract lives in the backend repo
 
 The agent↔backend envelope is the crate **`wp-agent-contract`**, owned by the **backend** repo
 (`backend/crates/wp-agent-contract`) — the API authority. The backend `ingest` binary depends on it
-by path (workspace member); the desktop agent compiles the *same* crate, so the wire format can't
-drift. Locally it's a **path dependency** to the side-by-side backend checkout; cross-repo (CI /
-release) it's a **tag-pinned git dependency into the backend repo** (with a local `[patch]` for dev).
-See the note in [Cargo.toml](Cargo.toml).
+too, so the wire format **can't drift**. Locally it's a **path dependency** to the side-by-side
+backend checkout; CI/release **pins a tag** (git dep + a local `[patch]` for dev). See the note in
+[Cargo.toml](Cargo.toml) — pinning it is non-negotiable (an unpinned path-dep silently drifted once
+already).
 
 ```
 parent-dir/
@@ -37,85 +59,55 @@ parent-dir/
 └─ backend/   (its own repo; owns crates/wp-agent-contract — the shared envelope)
 ```
 
-Clone `backend/` beside `desktop/` before building.
+Clone `backend/` beside `desktop/` before building — the folder **must** be named `backend`.
 
 ## First-time setup
 
 **Prerequisites:** Rust stable (see [rust-toolchain.toml](rust-toolchain.toml)), **Node + npm** (the
-tray panel is a Vite/React app), and your OS's webview deps — Windows 10/11 already ship WebView2.
+webview is a Vite/Preact app), and your OS's webview deps — Windows 10/11 already ship WebView2.
 
 ```sh
-# 1. Lay the repos out side by side. The folder MUST be named `backend`: Cargo.toml resolves
-#    `../backend/crates/wp-agent-contract`, so a clone on its own will NOT build.
 mkdir workpulse && cd workpulse
-git clone <backend-repo-url> backend
+git clone <backend-repo-url> backend      # folder MUST be named `backend`
 git clone <this-repo-url> desktop
 cd desktop
 
-# 2. Tauri CLI — global, one-off. Skip if `cargo tauri --version` already answers.
-cargo install tauri-cli --version '^2'
-
-# 3. The panel's JS deps — once per clone. `node_modules` is not committed, and
-#    `cargo tauri dev` shells out to npm, so this is not optional.
-cd tray/ui && npm ci && cd ../..
-
-# 4. Run it.
-cd tray/src-tauri && cargo tauri dev
+cargo install tauri-cli --version '^2'    # one-off; skip if `cargo tauri --version` answers
+just ui-install                           # webview deps (node_modules is not committed)
+just dev                                  # cargo tauri dev
 ```
 
-The app starts **hidden** — click the tray icon to open the panel (left-click toggles it,
-right-click opens the menu). The first build takes a few minutes; later ones are seconds.
-
-Getting `failed to load source for dependency wp-agent-contract`? Step 1 is wrong — there's no
-`backend/` beside this repo.
+Getting `failed to load source for dependency wp-agent-contract`? There's no `backend/` beside this
+repo (the folder name matters).
 
 ## Build & test
 
-Uses [`just`](https://github.com/casey/just) (`cargo install just`), but every recipe is a plain
-cargo command.
+Uses [`just`](https://github.com/casey/just), but every recipe is a plain cargo/npm command.
 
 ```sh
-just check      # cargo check --workspace --all-targets
-just test       # cargo test --workspace
-just ci         # fmt + clippy (-D warnings) + test — what CI runs on the core
-just run-core   # run agentd locally
+just check   # cargo check --workspace --all-targets
+just test    # cargo test --workspace
+just ci      # fmt + clippy (-D warnings) + test — what CI runs on the Rust core
+just dev     # run the app (Tauri CLI + ui/ deps required)
+just build   # packaged installer
 ```
 
-The **tray** builds separately (Tauri CLI + Node) and is intentionally not a workspace member —
-see [First-time setup](#first-time-setup) above, then:
+## Status — M0 complete
 
-```sh
-just tray-dev    # or: cd tray/src-tauri && cargo tauri dev
-just tray-build  # packaged installer (runs `npm run build` first)
-```
+The single-process workspace **compiles** (`cargo check --workspace`) and its **unit tests pass**
+(the four migrated real slices — `outbox`, `timer::engine`, `monitor::input`, `rules::classifier` —
+plus `config`). The privacy shape (counts-not-keys) is enforced by the types.
 
-[tray/README.md](tray/README.md) covers the panel itself, including the browser-only loop
-(`npm run dev` → localhost:1420) that needs no Rust rebuild.
+Everything else is a documented seam. The build-out is milestoned in
+[docs/BUILD-PLAN.md](docs/BUILD-PLAN.md):
 
-## Status
+- **M1** Auth — Cognito `USER_PASSWORD_AUTH` (hand-rolled over `reqwest`) + chunked OS-keyring tokens.
+- **M2** Heartbeat rail — cycle + jsonl outbox + `POST /v1/agent/batch` (the one milestone the live backend confirms today).
+- **M3** Timer + project→task selector (mandatory description, meeting mode) — gated on the §6 contract PR.
+- **M4** Monitor — 1 s thread (`device_query` / `user-idle` / `x-win`), per-minute buckets, idle prompt + hard auto-stop.
+- **M5** Screenshots — `xcap` → 768 WebP + blur + pHash → host-pinned S3 PUT (+ macOS permission UX).
+- **M6** Shell — tray reflection, minimize-to-tray, auto-sign-out, autostart, single-instance, Wayland probe + DTO field-name tests.
+- **M7** Updater — signed GitHub Releases (SHA-256 + Ed25519).
+- **M8** Tests + CI — envelope goldens, bucket rotation (incl. midnight), outbox replay, classifier precedence, cross-platform matrix.
 
-Scaffold, all three processes **compile**. The core workspace (`agent-shared`, `agentd`,
-`capture-helper`) passes its unit tests, and the `tray` builds with `cargo check` (clippy + fmt
-clean). The slices are structured skeletons — OS capture (`xcap`, `active-win-pos-rs`, `user-idle`,
-`rdev`), the SQLCipher outbox, real HTTP upload, device enrollment, and the tray↔core IPC channel
-are marked with `TODO(...)` and are the implementation work ahead. Capture/upload logic is stubbed;
-the privacy shape (counts-not-keys) is already enforced by the types.
-
-The **tray panel UI is built** (React/TS on the web app's design system — see
-[tray/README.md](tray/README.md)), but it draws a core that isn't there yet: every `#[command]` is
-still a `TODO(ipc)` stub returning a frozen constant. In `dev` the panel runs against a mock core so
-it can be designed and reviewed; **a production build shows zeros on every card**. Wiring the tray↔core
-IPC is what makes it real.
-
-## Two-developer split
-
-The backend split (see [../backend/README.md](../backend/README.md)) has the agent as a **third
-track** that both backend developers depend on through the shared `wp-agent-contract`:
-
-- **Core track** — `agentd` (outbox, uploader, config sync, timer, supervision) + `capture-helper`
-  (screenshot, input counts, focus, idle, classification). Pairs with backend **Dev A**
-  (ingest / fleet / device auth), which consumes the same batch envelope.
-- **UX track** — the `tray` app (consent, indicator, timer UI, pause) + enrollment/onboarding flow.
-
-Both tracks share `agent-shared` + `wp-agent-contract`, jointly owned via PR review — the same rule
-as the backend's shared foundation.
+Live dev backend: `https://oqlla6l5oc.execute-api.ap-south-1.amazonaws.com` (pool `ap-south-1_0ep998OVt`).
