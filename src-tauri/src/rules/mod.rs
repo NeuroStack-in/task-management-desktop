@@ -36,3 +36,46 @@ pub fn is_untracked(app: &str, rules: &AppUrlRules) -> bool {
         .iter()
         .any(|r| !r.tracked && a.contains(&r.process_name.to_lowercase()))
 }
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use wp_agent_contract::{AppRule, UrlRule};
+
+    fn rules() -> AppUrlRules {
+        AppUrlRules {
+            apps: vec![AppRule {
+                process_name: "chrome".into(),
+                display_name: None,
+                category: Category::Neutral,
+                tracked: true,
+            }],
+            urls: vec![UrlRule {
+                domain: "youtube.com".into(),
+                category: Category::Distracting,
+                tracked: true,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn url_rule_beats_app_rule() {
+        let r = rules();
+        // Matches both the app ("chrome") and the URL ("youtube.com") → URL wins (LLD §14).
+        assert_eq!(
+            classify_focus("chrome youtube.com", &r),
+            Category::Distracting
+        );
+        assert_eq!(classify_focus("chrome", &r), Category::Neutral); // app-only
+        assert_eq!(classify_focus("code", &r), Category::Neutral); // no match
+    }
+
+    #[test]
+    fn untracked_app_is_dropped() {
+        let mut r = rules();
+        r.apps[0].tracked = false;
+        assert!(is_untracked("chrome", &r));
+        assert!(!is_untracked("code", &r));
+    }
+}

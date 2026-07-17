@@ -208,3 +208,24 @@ impl AuthStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// UI-read DTO: the serialized names must be camelCase (the boundary the TS side reads).
+    #[test]
+    fn auth_status_serializes_camelcase() {
+        let s = AuthStatus {
+            signed_in: true,
+            tenant_id: Some("t1".into()),
+            username: Some("u".into()),
+            new_password_session: None,
+        };
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j.get("signedIn"), Some(&serde_json::json!(true)));
+        assert!(j.get("tenantId").is_some());
+        assert!(j.get("signed_in").is_none());
+        assert!(j.get("newPasswordSession").is_none()); // None → skipped
+    }
+}

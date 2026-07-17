@@ -45,6 +45,38 @@ fn focus_panel<M: Manager<tauri::Wry>>(app: &M) {
     }
 }
 
+/// `--dump-cycle` (BUILD-PLAN M8): feed the bucketer 5 synthetic minutes, print the resulting cycle
+/// (heartbeat + rollups) as JSON, and assert the `active_sec + idle_sec ≤ 60` invariant. Headless.
+pub fn dump_cycle() {
+    use monitor::bucket::Bucketer;
+
+    let mut b = Bucketer::new();
+    let base: i64 = 1_700_000_000_000; // fixed epoch ms for a stable dump
+    for m in 0..5i64 {
+        for s in 0..60i64 {
+            let now = base + (m * 60 + s) * 1000;
+            let idle = if s < 45 { 0 } else { 5 }; // 45 active + 15 idle seconds
+            b.tick(now, idle, 1, 1);
+        }
+    }
+    b.seal();
+    let rollups = b.take_sealed();
+    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), 0.0, false);
+
+    let cycle = serde_json::json!({ "heartbeat": hb, "activity": rollups });
+    println!("{}", serde_json::to_string_pretty(&cycle).unwrap());
+
+    for r in &rollups {
+        assert!(
+            r.active_sec + r.idle_sec <= 60,
+            "invariant violated: {} + {}",
+            r.active_sec,
+            r.idle_sec
+        );
+    }
+    eprintln!("dump-cycle: {} rollups, active+idle ≤ 60 ✓", rollups.len());
+}
+
 /// Build and run the Tauri app.
 pub fn run() {
     tracing_subscriber::fmt()

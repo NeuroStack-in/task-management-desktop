@@ -235,4 +235,19 @@ mod tests {
         assert_eq!(sealed.len(), 2);
         assert_eq!(sealed[0].minute + 1, sealed[1].minute);
     }
+
+    #[test]
+    fn midnight_is_just_another_minute_boundary() {
+        // Ticks straddling UTC midnight (day 0 23:59:30 → day 1 00:00:30) must seal two consecutive
+        // minutes — buckets key on epoch minute, so midnight isn't special (BUILD-PLAN M8).
+        let midnight_ms: i64 = 86_400_000; // 1970-01-02 00:00:00 UTC
+        let mut b = Bucketer::new();
+        b.tick(midnight_ms - 30_000, 0, 1, 0); // 23:59:30 (day 0)
+        b.tick(midnight_ms + 30_000, 0, 1, 0); // 00:00:30 (day 1) → seals the previous minute
+        b.seal();
+        let sealed = b.take_sealed();
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[0].minute + 1, sealed[1].minute);
+        assert_eq!(sealed[1].minute, midnight_ms / 60_000);
+    }
 }
