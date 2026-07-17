@@ -19,15 +19,18 @@ struct Running {
     task_id: String,
     project_id: String,
     started_at: i64,
+    description: String,
 }
 
 impl TimerEngine {
     /// Start a session. Returns the event to enqueue, or `Err` if one is already running.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         session_id: String,
         task_id: String,
         project_id: String,
+        description: String,
         ts: i64,
     ) -> Result<AgentEvent, &'static str> {
         if self.running.is_some() {
@@ -38,12 +41,14 @@ impl TimerEngine {
             task_id: task_id.clone(),
             project_id: project_id.clone(),
             started_at: ts,
+            description: description.clone(),
         });
         Ok(AgentEvent::TimerStarted {
             session_id,
             task_id,
             project_id,
             ts,
+            description,
         })
     }
 
@@ -69,10 +74,16 @@ mod tests {
     #[test]
     fn only_one_session_at_a_time() {
         let mut t = TimerEngine::default();
-        assert!(t.start("s1".into(), "k1".into(), "p1".into(), 0).is_ok());
-        assert!(t.start("s2".into(), "k2".into(), "p1".into(), 1).is_err());
+        assert!(t
+            .start("s1".into(), "k1".into(), "p1".into(), "d1".into(), 0)
+            .is_ok());
+        assert!(t
+            .start("s2".into(), "k2".into(), "p1".into(), "d2".into(), 1)
+            .is_err());
         assert!(t.stop(2, StopReason::User).is_some());
         assert!(!t.is_running());
-        assert!(t.start("s3".into(), "k3".into(), "p1".into(), 3).is_ok());
+        assert!(t
+            .start("s3".into(), "k3".into(), "p1".into(), "d3".into(), 3)
+            .is_ok());
     }
 }

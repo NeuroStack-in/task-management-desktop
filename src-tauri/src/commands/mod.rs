@@ -57,12 +57,13 @@ pub fn timer_start(
     session_id: String,
     task_id: String,
     project_id: String,
+    description: String,
 ) -> Result<(), String> {
     let ts = now_epoch_ms();
     let event = {
         let mut timer = state.timer.lock().unwrap();
         timer
-            .start(session_id, task_id, project_id, ts)
+            .start(session_id, task_id, project_id, description, ts)
             .map_err(|e| format!("timer:{e}"))?
     };
     // Buffered for the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4).
