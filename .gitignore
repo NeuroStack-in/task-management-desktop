@@ -2,6 +2,10 @@
 /target
 **/target
 
+# Tray panel UI (Vite/React)
+node_modules/
+/tray/ui/dist
+
 # Tauri generated schemas (regenerated on build). The icons/ assets ARE committed — the build
 # needs them; regenerate with `cargo tauri icon <logo>` if the brand mark changes.
 /tray/src-tauri/gen

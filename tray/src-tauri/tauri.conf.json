@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.workpulse.agent",
   "build": {
-    "frontendDist": "../ui",
+    "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -15,22 +15,18 @@
       {
         "label": "panel",
         "title": "WorkPulse",
-        "width": 380,
-        "height": 560,
+        "width": 620,
+        "height": 590,
         "resizable": false,
+        "maximizable": false,
         "decorations": true,
         "visible": false,
         "skipTaskbar": true
       }
     ],
-    "trayIcon": {
-      "id": "main",
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "tooltip": "WorkPulse"
-    },
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      "devCsp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://localhost:1420 http://localhost:1420"
     }
   },
   "bundle": {
