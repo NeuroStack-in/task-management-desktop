@@ -3,8 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as agent from "@/lib/agent";
 import type { AgentSnapshot, Project, Session, Task } from "@/lib/types";
 
-/** The timer/consent/capture read cadence — fast, because these are in-process reads (no network). */
-const LOCAL_POLL_MS = 1000;
+/**
+ * Local state is **not** polled every second — the timer runs locally (the recording numerals tick
+ * from an anchor), and a start/stop reads immediately. This slow interval only exists to notice a
+ * *core-side* change the UI didn't initiate: an idle auto-stop, or the capture indicator flipping.
+ */
+const LOCAL_POLL_MS = 15_000;
 /** Today's sessions come from the backend, so they refresh slowly (+ eagerly after start/stop). */
 const SESSIONS_POLL_MS = 20_000;
 
