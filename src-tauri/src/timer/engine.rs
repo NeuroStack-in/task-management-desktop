@@ -66,21 +66,38 @@ impl TimerEngine {
         self.running.is_some()
     }
 
-    /// `(running, task_id, elapsed_secs)` for the panel's `timer_state` command. `task_id` is `None`
-    /// when stopped or in meeting mode (empty task); `elapsed_secs` is the current session's length.
-    pub fn snapshot(&self, now_ms: i64) -> (bool, Option<String>, u64) {
+    /// The running session's shape for the panel's `timer_state` command. `task_id`/`project_id` are
+    /// `None` when stopped or when that field is empty (meeting/ad-hoc mode); `elapsed_secs` is the
+    /// current session's length. `description` is what the user typed ("what are you working on?").
+    pub fn snapshot(&self, now_ms: i64) -> TimerSnapshot {
         match &self.running {
-            None => (false, None, 0),
-            Some(r) => {
-                let task = if r.task_id.is_empty() {
-                    None
-                } else {
-                    Some(r.task_id.clone())
-                };
-                let elapsed = ((now_ms - r.started_at).max(0) / 1000) as u64;
-                (true, task, elapsed)
-            }
+            None => TimerSnapshot::default(),
+            Some(r) => TimerSnapshot {
+                running: true,
+                task_id: none_if_empty(&r.task_id),
+                project_id: none_if_empty(&r.project_id),
+                description: r.description.clone(),
+                elapsed_secs: ((now_ms - r.started_at).max(0) / 1000) as u64,
+            },
         }
+    }
+}
+
+/// A snapshot of the running session for the UI (`timer_state`).
+#[derive(Default)]
+pub struct TimerSnapshot {
+    pub running: bool,
+    pub task_id: Option<String>,
+    pub project_id: Option<String>,
+    pub description: String,
+    pub elapsed_secs: u64,
+}
+
+fn none_if_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
     }
 }
 

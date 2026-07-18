@@ -42,7 +42,23 @@ export interface PauseGrant {
 export interface TimerState {
   running: boolean;
   task_id: string | null;
+  /** The project the running session is attributed to (null in a task-only/legacy session). */
+  project_id: string | null;
+  /** What the user typed they're working on ("what are you working on?"). */
+  description: string;
   elapsed_secs: number;
+}
+
+/**
+ * A project the timer can be attributed to — the "Select project" picker's rows.
+ *
+ * Real: `list_projects` fetches `GET /v1/projects` with the user's JWT (id/name/billable). Mock:
+ * derived from the demo task list. `billable` is display-only on the agent side.
+ */
+export interface Project {
+  id: string;
+  name: string;
+  billable: boolean;
 }
 
 /**
@@ -86,7 +102,9 @@ export type ActivitySeries = number[];
  * it needs a `sessions_today()` command to expose the roll-up.
  */
 export interface Session {
-  task_id: string;
+  project_id: string;
+  /** What was worked on (the free-text description); the session's human label. */
+  description: string;
   secs: number;
 }
 
@@ -116,6 +134,8 @@ export interface AgentSnapshot {
   capture: CaptureState;
   config: TrackingConfig;
   timer: TimerState;
+  /** The user's projects for the picker — real, from `GET /v1/projects`. */
+  projects: Project[];
   /** Empty until the proposed commands above exist. */
   tasks: Task[];
   activity: ActivitySeries;

@@ -13,9 +13,9 @@ export interface Agent {
   /** Set when the core refused the last pause request (budget spent, or admin-disabled). */
   pauseRefused: boolean;
   grantConsent: () => void;
-  /** `taskId` attributes a fresh start; ignored when stopping. */
-  toggleTimer: (taskId?: string | null) => void;
-  setTask: (taskId: string) => void;
+  /** Start a session against a project + description — or switch to it if one is already running. */
+  start: (projectId: string, description: string) => void;
+  stop: () => void;
   requestPause: (secs: number) => void;
 }
 
@@ -68,26 +68,19 @@ export function useAgent(): Agent {
     }
   }, [snapshot, refresh]);
 
-  const toggleTimer = useCallback(
-    (taskId?: string | null) => {
+  const start = useCallback(
+    (projectId: string, description: string) => {
       if (!snapshot) return;
-      const action = snapshot.timer.running
-        ? agent.stopTimer()
-        : // Prefer the caller's pick: the core's last-known task is stale once the user
-          // has chosen a different one in the picker without starting yet.
-          agent.startTimer(taskId ?? snapshot.timer.task_id);
-      void action.then(refresh);
+      // Start when idle, switch when running — one call either way.
+      void agent.switchSession(projectId, description, snapshot.timer.running).then(refresh);
     },
     [snapshot, refresh],
   );
 
-  const setTask = useCallback(
-    (taskId: string) => {
-      if (!snapshot) return;
-      void agent.setTask(taskId, snapshot.timer.running).then(refresh);
-    },
-    [snapshot, refresh],
-  );
+  const stop = useCallback(() => {
+    if (!snapshot) return;
+    void agent.stopTimer().then(refresh);
+  }, [snapshot, refresh]);
 
   const requestPause = useCallback(
     (secs: number) => {
@@ -106,8 +99,8 @@ export function useAgent(): Agent {
     pauseSecs,
     pauseRefused,
     grantConsent,
-    toggleTimer,
-    setTask,
+    start,
+    stop,
     requestPause,
   };
 }

@@ -121,6 +121,7 @@ pub fn run() {
             commands::panel::stop_timer,
             commands::panel::request_pause,
             commands::panel::identity,
+            commands::panel::list_projects,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {

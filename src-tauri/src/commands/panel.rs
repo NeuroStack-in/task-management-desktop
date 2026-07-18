@@ -104,15 +104,19 @@ pub fn effective_config(state: State<'_, AppState>) -> TrackingConfig {
 pub struct TimerStateDto {
     pub running: bool,
     pub task_id: Option<String>,
+    pub project_id: Option<String>,
+    pub description: String,
     pub elapsed_secs: u64,
 }
 
 fn read_timer(state: &AppState) -> TimerStateDto {
-    let (running, task_id, elapsed_secs) = state.timer.lock().unwrap().snapshot(now_ms());
+    let s = state.timer.lock().unwrap().snapshot(now_ms());
     TimerStateDto {
-        running,
-        task_id,
-        elapsed_secs,
+        running: s.running,
+        task_id: s.task_id,
+        project_id: s.project_id,
+        description: s.description,
+        elapsed_secs: s.elapsed_secs,
     }
 }
 
@@ -121,17 +125,28 @@ pub fn timer_state(state: State<'_, AppState>) -> TimerStateDto {
     read_timer(&state)
 }
 
+/// Start a session against a project, with the user's free-text description ("what are you working
+/// on?"). `task_id` is optional — omitted for the project/ad-hoc flow the panel uses; when present it
+/// attributes to a specific task. The emitted `TimerStarted` carries all three to the backend fold.
 #[tauri::command]
-pub fn start_timer(state: State<'_, AppState>, task_id: Option<String>) -> TimerStateDto {
+pub fn start_timer(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    description: Option<String>,
+    task_id: Option<String>,
+) -> TimerStateDto {
     let ts = now_ms();
     let session_id = uuid::Uuid::new_v4().to_string();
-    // The panel supplies only a task id; project/description are unknown here (meeting mode when the
-    // task is absent). The full project→task→description flow rides the richer command later.
-    let tid = task_id.unwrap_or_default();
     let ev = {
         let mut t = state.timer.lock().unwrap();
-        t.start(session_id, tid, String::new(), String::new(), ts)
-            .ok()
+        t.start(
+            session_id,
+            task_id.unwrap_or_default(),
+            project_id.unwrap_or_default(),
+            description.unwrap_or_default(),
+            ts,
+        )
+        .ok()
     };
     if let Some(e) = ev {
         state.pending_events.lock().unwrap().push(e);
@@ -170,6 +185,22 @@ pub fn request_pause(state: State<'_, AppState>, requested_secs: u64) -> PauseGr
         granted_secs,
         remaining_budget_secs,
     }
+}
+
+// ── projects (backend-fed) ───────────────────────────────────────────────────
+
+/// The signed-in user's projects for the "Select project" picker — fetched live from
+/// `GET /v1/projects`. Empty (not an error) when signed out, so the panel just shows no projects.
+#[tauri::command]
+pub async fn list_projects(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::api::projects::ProjectDto>, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Ok(Vec::new());
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    crate::api::projects::fetch_projects(&client, &ingest_url, &id_token).await
 }
 
 // ── identity ─────────────────────────────────────────────────────────────────

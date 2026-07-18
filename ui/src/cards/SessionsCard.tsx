@@ -3,25 +3,26 @@ import { ListChecks } from "lucide-react";
 import { CardTitleRow, PanelCard } from "@/components/panel";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { formatElapsed } from "@/lib/format";
-import type { Session, Task, TimerState } from "@/lib/types";
+import type { Project, Session, TimerState } from "@/lib/types";
 
 /**
- * Today's per-task totals. The running task's live segment is folded in by the core-facing
- * layer, so its row ticks alongside the hero clock rather than looking frozen.
+ * Today's sessions — one row per (project + description) worked, with the running one's live segment
+ * folded in so it ticks alongside the hero clock.
  *
- * PROPOSED data — see `Session` in types.ts. Degrades to an empty state against the real
- * core rather than inventing rows.
+ * Real data has no read-back command yet (see `Session` in types.ts), so against the core this
+ * degrades to an empty state rather than inventing rows.
  */
 export function SessionsCard({
   sessions,
-  tasks,
+  projects,
   timer,
 }: {
   sessions: Session[];
-  tasks: Task[];
+  projects: Project[];
   timer: TimerState;
 }) {
   const total = sessions.reduce((s, x) => s + x.secs, 0);
+  const nameOf = (id: string) => projects.find((p) => p.id === id)?.name ?? "Project";
 
   return (
     <PanelCard className="flex-1">
@@ -32,7 +33,7 @@ export function SessionsCard({
           action={
             sessions.length > 0 ? (
               <span className="text-[11px] text-muted-foreground">
-                {sessions.length} {sessions.length === 1 ? "task" : "tasks"}
+                {sessions.length} {sessions.length === 1 ? "session" : "sessions"}
               </span>
             ) : undefined
           }
@@ -41,18 +42,21 @@ export function SessionsCard({
       <CardContent>
         {sessions.length === 0 ? (
           <p className="py-6 text-center text-[11px] text-muted-foreground">
-            Nothing tracked yet today. Start a timer to log time against a task.
+            Nothing tracked yet today. Start a timer against a project to log time.
           </p>
         ) : (
           <>
-            {/* Capped, not unbounded: the panel is a fixed height and a real day can hold many
-                tasks. The list scrolls inside its own box so the card never pushes the panel. */}
             <ul className="max-h-[104px] space-y-1.5 overflow-y-auto pr-1">
-              {sessions.map((s) => {
-                const task = tasks.find((t) => t.id === s.task_id);
-                const running = timer.running && timer.task_id === s.task_id;
+              {sessions.map((s, i) => {
+                const running =
+                  timer.running &&
+                  timer.project_id === s.project_id &&
+                  timer.description.trim() === s.description;
                 return (
-                  <li key={s.task_id} className="flex items-center gap-2">
+                  <li
+                    key={`${s.project_id}:${s.description}:${i}`}
+                    className="flex items-center gap-2"
+                  >
                     <span
                       aria-hidden
                       className={
@@ -71,10 +75,10 @@ export function SessionsCard({
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12px] font-medium">
-                        {task?.title ?? s.task_id}
+                        {s.description || "Untitled session"}
                       </span>
                       <span className="block truncate text-[10px] text-muted-foreground">
-                        {task ? `${task.project_name} · ${task.id}` : "Unknown task"}
+                        {nameOf(s.project_id)}
                       </span>
                     </span>
                     <span

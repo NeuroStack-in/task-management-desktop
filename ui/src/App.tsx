@@ -72,7 +72,7 @@ export default function App() {
 }
 
 function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => void }) {
-  const { snapshot, error, grantConsent, toggleTimer, setTask } = useAgent();
+  const { snapshot, error, grantConsent, start, stop } = useAgent();
   const { theme, toggle: toggleTheme } = useTheme();
 
   if (error && !snapshot) {
@@ -94,7 +94,7 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
     );
   }
 
-  const { consent, capture, config, timer, tasks, sessions, identity } = snapshot;
+  const { consent, capture, config, timer, projects, sessions, identity } = snapshot;
 
   // Consent gates the whole panel: nothing else is actionable until it's acknowledged.
   // The dev chips still render, or there'd be no way back out of the First run preview.
@@ -109,12 +109,8 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
 
   // Silent mode suppresses the capture indicator by policy — the disclosure already covered it.
   const showLive = capture.capturing && !config.silent;
-  const currentTask = tasks.find((t) => t.id === timer.task_id) ?? null;
   const todayHours = sessions.reduce((s, x) => s + x.secs, 0) / 3600;
   const name = identity?.name ?? "You";
-
-  // Start when idle; re-attribute (switch) when already running — no stopping in between.
-  const startOrSwitch = (taskId: string) => (timer.running ? setTask(taskId) : toggleTimer(taskId));
 
   return (
     <>
@@ -171,14 +167,9 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
           clipping the last row. `min-h-0` is what lets that valve work at all: without it the
           flex child refuses to shrink and overflows the panel instead. */}
       <div className="wp-enter flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-        <RecordingCard
-          timer={timer}
-          task={currentTask}
-          sessions={sessions}
-          onStop={() => toggleTimer()}
-        />
-        <SessionsCard sessions={sessions} tasks={tasks} timer={timer} />
-        <SwitchTaskCard tasks={tasks} running={timer.running} onStart={startOrSwitch} />
+        <RecordingCard timer={timer} projects={projects} sessions={sessions} onStop={stop} />
+        <SessionsCard sessions={sessions} projects={projects} timer={timer} />
+        <SwitchTaskCard projects={projects} running={timer.running} onStart={start} />
       </div>
 
       <footer className="mt-3 flex shrink-0 items-center justify-between text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">

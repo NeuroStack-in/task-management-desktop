@@ -148,7 +148,14 @@ mod tests {
         );
         assert_eq!(
             keys(&v["activity"][0]),
-            ["active_sec", "idle_sec", "keystrokes", "minute", "mouse", "top_apps"]
+            [
+                "active_sec",
+                "idle_sec",
+                "keystrokes",
+                "minute",
+                "mouse",
+                "top_apps"
+            ]
         );
         assert_eq!(
             keys(&v["activity"][0]["top_apps"][0]),
@@ -156,7 +163,15 @@ mod tests {
         );
         assert_eq!(
             keys(&v["screenshots"][0]),
-            ["app", "blur_level", "bucket_minute", "captured_at", "display", "id", "phash"]
+            [
+                "app",
+                "blur_level",
+                "bucket_minute",
+                "captured_at",
+                "display",
+                "id",
+                "phash"
+            ]
         );
         // Events are internally tagged (`type` + variant fields).
         assert_eq!(

@@ -5,7 +5,7 @@ import { PanelCard } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
 import { formatCountdown, formatElapsed } from "@/lib/format";
-import type { Session, Task, TimerState } from "@/lib/types";
+import type { Project, Session, TimerState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -19,12 +19,12 @@ import { cn } from "@/lib/utils";
  */
 export function RecordingCard({
   timer,
-  task,
+  projects,
   sessions,
   onStop,
 }: {
   timer: TimerState;
-  task: Task | null;
+  projects: Project[];
   sessions: Session[];
   onStop: () => void;
 }) {
@@ -32,6 +32,8 @@ export function RecordingCard({
   const [hh, mm, ss] = formatElapsed(timer.elapsed_secs).split(":");
   const total = sessions.reduce((s, x) => s + x.secs, 0);
   const count = sessions.length;
+  const projectName = projects.find((p) => p.id === timer.project_id)?.name ?? null;
+  const description = timer.description.trim();
 
   return (
     <PanelCard className="overflow-hidden p-0">
@@ -59,16 +61,18 @@ export function RecordingCard({
           <Digit>{ss}</Digit>
         </div>
 
-        {task ? (
+        {running ? (
           <div className="min-w-0">
-            <p className="truncate text-[15px] font-semibold">{task.title}</p>
-            <p className="truncate text-[11px] text-muted-foreground">
-              {task.project_name} · {task.title}
+            <p className="truncate text-[15px] font-semibold">
+              {description || "Untitled session"}
             </p>
+            {projectName && (
+              <p className="truncate text-[11px] text-muted-foreground">{projectName}</p>
+            )}
           </div>
         ) : (
           <p className="text-[12px] text-muted-foreground">
-            {running ? "Untitled session" : "Pick a task below to start tracking."}
+            Pick a project below to start tracking.
           </p>
         )}
 
