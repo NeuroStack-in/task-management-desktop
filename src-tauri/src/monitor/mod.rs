@@ -127,15 +127,21 @@ pub fn spawn_screenshots(app: AppHandle) {
 
             let app_name = active_window::current().map(|f| f.app).unwrap_or_default();
             let cap_ts = clock::now_epoch_ms();
-            let shot =
-                tokio::task::spawn_blocking(move || screenshot::capture(&app_name, blur, cap_ts))
-                    .await
-                    .ok()
-                    .flatten();
+            // One shot per connected display (dual-monitor → two); all share this cycle's timestamp.
+            let shots = tokio::task::spawn_blocking(move || {
+                screenshot::capture_all(&app_name, blur, cap_ts)
+            })
+            .await
+            .unwrap_or_default();
 
-            match shot {
-                Some((meta, path)) => {
-                    app.state::<AppState>().screenshots.lock().unwrap().insert(
+            if shots.is_empty() {
+                // Capture failed where it shouldn't (e.g. macOS grant denied) — surface, not silence.
+                let _ = app.emit(events::SCREENSHOT_UNAVAILABLE, ());
+            } else {
+                let state = app.state::<AppState>();
+                let mut store = state.screenshots.lock().unwrap();
+                for (meta, path) in shots {
+                    store.insert(
                         meta.id.clone(),
                         crate::state::PendingShot {
                             meta,
@@ -143,10 +149,6 @@ pub fn spawn_screenshots(app: AppHandle) {
                             attempts: 0,
                         },
                     );
-                }
-                // Capture failed where it shouldn't (e.g. macOS grant denied) — surface, not silence.
-                None => {
-                    let _ = app.emit(events::SCREENSHOT_UNAVAILABLE, ());
                 }
             }
         }

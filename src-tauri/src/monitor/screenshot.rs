@@ -1,14 +1,16 @@
 //! Screenshot capture — timer-gated, jittered, **consent-gated, fails-closed** (BUILD-PLAN §4/§5).
-//! Pipeline: `xcap` grab → downscale to ≤768px → optional blur (`blur_level → sigma`) → **lossy WebP**
-//! (the `webp` crate; `image` 0.25's WebP encoder is lossless-only) → pHash (`image_hasher`). Bytes go
-//! to a temp file and upload **S3-direct** via the ack's presigned `upload_urls`; only the
-//! `ScreenshotMeta` rides the batch.
+//! Pipeline (per display): `xcap` grab → downscale to ≤768px → optional blur (`blur_level → sigma`) →
+//! **lossy WebP** (the `webp` crate; `image` 0.25's WebP encoder is lossless-only) → pHash
+//! (`image_hasher`). Bytes go to a temp file and upload **S3-direct** via the ack's presigned
+//! `upload_urls`; only the `ScreenshotMeta` rides the batch.
 //!
-//! Primary-display only for now (a deliberate, documented choice — the sample's limit). macOS needs a
-//! Screen-Recording (TCC) grant; a denial returns `None` and the caller surfaces a "grant permission"
-//! state rather than silently collecting nothing (risk #5).
+//! **Every connected display is captured** — a dual-monitor machine yields one shot per monitor, all
+//! sharing the same `captured_at`/`bucket_minute` so they ride the SAME batch and map to the same
+//! activity minute (each is a distinct row: unique `id` + its own pHash). macOS needs a
+//! Screen-Recording (TCC) grant; a denial yields an empty result and the caller surfaces a
+//! "grant permission" state rather than silently collecting nothing (risk #5).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
 use wp_agent_contract::ScreenshotMeta;
@@ -52,12 +54,35 @@ pub fn is_allowed_upload_host(url: &str) -> bool {
     host == "amazonaws.com" || host.ends_with(".amazonaws.com")
 }
 
-/// Capture the primary display, process to WebP, write to a temp file. Returns the metadata (with
-/// `bucket_minute` set to the capture minute) + the file path. `None` when capture is unavailable
-/// (macOS grant denied, no monitor, encode/IO error).
-pub fn capture(app: &str, blur_level: u8, captured_at: i64) -> Option<(ScreenshotMeta, PathBuf)> {
-    // Primary display only (documented limit).
-    let monitor = xcap::Monitor::all().ok()?.into_iter().next()?;
+/// Capture **every** connected display, process each to WebP, write temp files. Returns one
+/// `(ScreenshotMeta, PathBuf)` per successfully-captured monitor (dual-monitor → two entries), all
+/// sharing `captured_at`/`bucket_minute`. Empty when nothing could be captured (no monitor, macOS
+/// grant denied, encode/IO error) — the caller surfaces the "grant permission" state on empty.
+///
+/// One monitor failing to capture doesn't sink the others: each is processed independently and only
+/// its own `None` is dropped.
+pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(ScreenshotMeta, PathBuf)> {
+    let Ok(monitors) = xcap::Monitor::all() else {
+        return Vec::new();
+    };
+    let dir = screenshots_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Vec::new();
+    }
+    monitors
+        .into_iter()
+        .filter_map(|m| process_monitor(&m, app, blur_level, captured_at, &dir))
+        .collect()
+}
+
+/// Grab + process one display. `None` on capture/encode/IO failure for this monitor alone.
+fn process_monitor(
+    monitor: &xcap::Monitor,
+    app: &str,
+    blur_level: u8,
+    captured_at: i64,
+    dir: &Path,
+) -> Option<(ScreenshotMeta, PathBuf)> {
     let rgba = monitor.capture_image().ok()?;
 
     let mut img = image::DynamicImage::ImageRgba8(rgba);
@@ -81,8 +106,6 @@ pub fn capture(app: &str, blur_level: u8, captured_at: i64) -> Option<(Screensho
         webp::Encoder::from_rgba(&rgba, rgba.width(), rgba.height()).encode(WEBP_QUALITY);
 
     let id = uuid::Uuid::new_v4().to_string();
-    let dir = screenshots_dir();
-    std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{id}.webp"));
     std::fs::write(&path, &*webp_bytes).ok()?;
 
