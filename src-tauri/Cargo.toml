@@ -33,6 +33,7 @@ tracing-subscriber = { workspace = true }
 time = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+dotenvy = { workspace = true }
 sysinfo = { workspace = true }
 local-ip-address = { workspace = true }
 reqwest = { workspace = true }

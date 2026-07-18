@@ -17,9 +17,10 @@ node_modules/
 /.agent-state
 /src-tauri/.agent-state
 
-# Env / secrets
+# Env / secrets (but keep the committed example)
 .env
 .env.*
+!.env.example
 
 # OS / editor
 .DS_Store
