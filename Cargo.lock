@@ -7404,6 +7404,7 @@ dependencies = [
  "user-idle",
  "uuid",
  "webp",
+ "windows 0.57.0",
  "wp-agent-contract",
  "x-win",
  "xcap",
