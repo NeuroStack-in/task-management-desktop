@@ -130,7 +130,8 @@ pub fn start_timer(state: State<'_, AppState>, task_id: Option<String>) -> Timer
     let tid = task_id.unwrap_or_default();
     let ev = {
         let mut t = state.timer.lock().unwrap();
-        t.start(session_id, tid, String::new(), String::new(), ts).ok()
+        t.start(session_id, tid, String::new(), String::new(), ts)
+            .ok()
     };
     if let Some(e) = ev {
         state.pending_events.lock().unwrap().push(e);
@@ -159,8 +160,11 @@ pub struct PauseGrantDto {
 
 #[tauri::command]
 pub fn request_pause(state: State<'_, AppState>, requested_secs: u64) -> PauseGrantDto {
-    let (granted, granted_secs, remaining_budget_secs) =
-        state.pause.lock().unwrap().request(now_ms(), requested_secs);
+    let (granted, granted_secs, remaining_budget_secs) = state
+        .pause
+        .lock()
+        .unwrap()
+        .request(now_ms(), requested_secs);
     PauseGrantDto {
         granted,
         granted_secs,
