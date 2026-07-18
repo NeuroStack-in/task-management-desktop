@@ -70,7 +70,7 @@ export default function App() {
 }
 
 function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => void }) {
-  const { snapshot, error, grantConsent, start, stop } = useAgent();
+  const { snapshot, error, grantConsent, start, stop, refresh } = useAgent();
   const { theme, toggle: toggleTheme } = useTheme();
 
   if (error && !snapshot) {
@@ -241,7 +241,13 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
         >
           Switch Task
         </p>
-        <SwitchTaskCard projects={projects} tasks={tasks} running={running} onStart={start} />
+        <SwitchTaskCard
+          projects={projects}
+          tasks={tasks}
+          running={running}
+          onStart={start}
+          onRefresh={refresh}
+        />
       </div>
 
       {/* Footer bar. */}

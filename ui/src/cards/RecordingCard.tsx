@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+
 import { Button } from "@/components/ui/button";
 import { formatElapsed, formatWorked } from "@/lib/format";
 import type { Project, Session, Task, TimerState } from "@/lib/types";
@@ -97,9 +99,30 @@ export function RecordingCard({
   );
 }
 
-/** HH:MM:SS numerals in TaskFlow's per-digit style. Driven by the 1 s snapshot poll. */
+/**
+ * HH:MM:SS numerals. Ticks **locally** every 250 ms from an anchor (the core's elapsed_secs + the
+ * wall-clock at which we received it), and re-anchors whenever the core reports a fresh value. So the
+ * clock runs smoothly and never skips even if a poll is momentarily late, yet still self-corrects to
+ * the core's authoritative time each second — the core, not the UI, remains the source of truth.
+ */
 function Numerals({ secs }: { secs: number }) {
-  const [hh, mm, ss] = formatElapsed(secs).split(":");
+  const [display, setDisplay] = useState(secs);
+  const anchor = useRef({ secs, at: Date.now() });
+
+  useEffect(() => {
+    anchor.current = { secs, at: Date.now() };
+    setDisplay(secs);
+  }, [secs]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const { secs: base, at } = anchor.current;
+      setDisplay(base + Math.floor((Date.now() - at) / 1000));
+    }, 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const [hh, mm, ss] = formatElapsed(display).split(":");
   return (
     <span
       className="block font-mono text-[38px] font-bold leading-none tracking-[-0.02em] tabular-nums text-success"

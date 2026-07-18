@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as agent from "@/lib/agent";
-import type { AgentSnapshot } from "@/lib/types";
+import type { AgentSnapshot, Project, Session, Task } from "@/lib/types";
 
-const POLL_MS = 1000;
+/** The timer/consent/capture read cadence — fast, because these are in-process reads (no network). */
+const LOCAL_POLL_MS = 1000;
+/** Today's sessions come from the backend, so they refresh slowly (+ eagerly after start/stop). */
+const SESSIONS_POLL_MS = 20_000;
 
 export interface Agent {
   snapshot: AgentSnapshot | null;
@@ -16,30 +19,42 @@ export interface Agent {
   /** Start a session against a project (+ optional task) + description — or switch if one is running. */
   start: (projectId: string, description: string, taskId?: string) => void;
   stop: () => void;
+  /** Re-fetch projects, tasks and today's sessions (the backend-fed lists). */
+  refresh: () => void;
   requestPause: (secs: number) => void;
 }
 
 /**
- * Polls the core once a second and owns the panel's whole view state.
+ * Owns the panel's view state, split by how often each part changes and how expensive it is to read:
  *
- * Polling (rather than subscribing) matches what the core can do today; when `agentd` pushes
- * state over IPC this becomes an event listener and the interval goes away.
+ * - **Local state** (timer, consent, capture, config, identity) — in-process Rust reads, polled every
+ *   second so the timer ticks smoothly. No network on this path, which is what keeps the clock from
+ *   stuttering/skipping.
+ * - **Projects + tasks** — backend reads, fetched once on mount and on an explicit refresh.
+ * - **Today's sessions** — backend read, refreshed every 20 s and eagerly right after a start/stop.
+ *
+ * The old design fetched all three backend lists on the 1 s timer tick, so every second waited on
+ * three AWS round-trips — the poll landed irregularly and the timer jumped. This separation fixes it.
  */
 export function useAgent(): Agent {
-  const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
+  const [local, setLocal] = useState<agent.LocalState | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [pauseSecs, setPauseSecs] = useState(() => agent.initialPauseSecs());
   const [pauseRefused, setPauseRefused] = useState(false);
 
-  // Avoids a slow poll landing after a newer one and rewinding the UI.
+  // Avoids a slow local read landing after a newer one and rewinding the UI.
   const seq = useRef(0);
 
-  const refresh = useCallback(async () => {
+  // ── fast local poll (1 s, no network) ──
+  const pollLocal = useCallback(async () => {
     const id = ++seq.current;
     try {
-      const next = await agent.readSnapshot();
+      const next = await agent.readLocal();
       if (id !== seq.current) return;
-      setSnapshot(next);
+      setLocal(next);
       setError(null);
     } catch (e) {
       if (id !== seq.current) return;
@@ -48,10 +63,27 @@ export function useAgent(): Agent {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const t = setInterval(() => void refresh(), POLL_MS);
+    void pollLocal();
+    const t = setInterval(() => void pollLocal(), LOCAL_POLL_MS);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [pollLocal]);
+
+  // ── projects + tasks (on mount + refresh) ──
+  const reloadCatalog = useCallback(() => {
+    void agent.fetchProjects().then(setProjects);
+    void agent.fetchTasks().then(setTasks);
+  }, []);
+  useEffect(() => reloadCatalog(), [reloadCatalog]);
+
+  // ── today's sessions (slow poll + after start/stop) ──
+  const reloadSessions = useCallback(() => {
+    void agent.fetchSessions().then(setSessions);
+  }, []);
+  useEffect(() => {
+    reloadSessions();
+    const t = setInterval(reloadSessions, SESSIONS_POLL_MS);
+    return () => clearInterval(t);
+  }, [reloadSessions]);
 
   // Pause countdown is tracked here because the core exposes no pause-state read command.
   useEffect(() => {
@@ -60,39 +92,62 @@ export function useAgent(): Agent {
     return () => clearInterval(t);
   }, [pauseSecs > 0]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const snapshot: AgentSnapshot | null = local
+    ? {
+        ...local,
+        projects,
+        tasks,
+        activity: [],
+        // Fold the live segment in so the running session's row ticks between server refreshes.
+        sessions: agent.withLiveSession(sessions, local.timer),
+      }
+    : null;
+
   const grantConsent = useCallback(() => {
-    if (!snapshot) return;
-    void agent.grantConsent(snapshot.consent.policy_version).then(refresh).catch(setErrorMessage);
-    function setErrorMessage(e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [snapshot, refresh]);
+    if (!local) return;
+    void agent
+      .grantConsent(local.consent.policy_version)
+      .then(pollLocal)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+  }, [local, pollLocal]);
 
   const start = useCallback(
     (projectId: string, description: string, taskId?: string) => {
-      if (!snapshot) return;
-      // Start when idle, switch when running — one call either way.
-      void agent
-        .switchSession(projectId, description, snapshot.timer.running, taskId)
-        .then(refresh);
+      if (!local) return;
+      // Start when idle, switch when running. Refresh the timer immediately + reload sessions so the
+      // new row shows without waiting for the 20 s cycle.
+      void agent.switchSession(projectId, description, local.timer.running, taskId).then(() => {
+        void pollLocal();
+        reloadSessions();
+      });
     },
-    [snapshot, refresh],
+    [local, pollLocal, reloadSessions],
   );
 
   const stop = useCallback(() => {
-    if (!snapshot) return;
-    void agent.stopTimer().then(refresh);
-  }, [snapshot, refresh]);
+    if (!local) return;
+    void agent.stopTimer().then(() => {
+      void pollLocal();
+      // A stopped session becomes a completed entry once the batch folds — reload shortly after.
+      reloadSessions();
+      window.setTimeout(reloadSessions, 3000);
+    });
+  }, [local, pollLocal, reloadSessions]);
+
+  const refresh = useCallback(() => {
+    reloadCatalog();
+    reloadSessions();
+  }, [reloadCatalog, reloadSessions]);
 
   const requestPause = useCallback(
     (secs: number) => {
       void agent.requestPause(secs).then((grant) => {
         setPauseRefused(!grant.granted);
         if (grant.granted) setPauseSecs(grant.granted_secs);
-        void refresh();
+        void pollLocal();
       });
     },
-    [refresh],
+    [pollLocal],
   );
 
   return {
@@ -103,6 +158,7 @@ export function useAgent(): Agent {
     grantConsent,
     start,
     stop,
+    refresh,
     requestPause,
   };
 }

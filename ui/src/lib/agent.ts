@@ -8,7 +8,26 @@
  */
 
 import * as mock from "./mock";
-import type { AgentSnapshot, ConsentState, PauseGrant, TimerState } from "./types";
+import type {
+  AgentSnapshot,
+  ConsentState,
+  PauseGrant,
+  Project,
+  Session,
+  Task,
+  TimerState,
+} from "./types";
+
+/**
+ * The fast, **local** slice of the snapshot — read from the core every second to drive the timer.
+ * All five are in-process Rust reads (no network), so the 1 s poll stays instant and the timer ticks
+ * smoothly. Projects/tasks/sessions (which DO hit the backend) are fetched separately, on a slower
+ * cadence — see `fetchProjects`/`fetchTasks`/`fetchSessions`.
+ */
+export type LocalState = Pick<
+  AgentSnapshot,
+  "identity" | "consent" | "capture" | "config" | "timer"
+>;
 
 export const USE_MOCK = import.meta.env.DEV && import.meta.env.VITE_REAL !== "1";
 
@@ -33,47 +52,70 @@ function localDate(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/** The fast local slice — polled every second. All in-process reads; never touches the network. */
+export async function readLocal(): Promise<LocalState> {
+  if (USE_MOCK) {
+    const s = mock.read();
+    return { identity: s.identity, consent: s.consent, capture: s.capture, config: s.config, timer: s.timer };
+  }
+  const [consent, capture, config, timer, identity] = await Promise.all([
+    invoke<LocalState["consent"]>("get_consent_state"),
+    invoke<LocalState["capture"]>("capture_state"),
+    invoke<LocalState["config"]>("effective_config"),
+    invoke<LocalState["timer"]>("timer_state"),
+    invoke<LocalState["identity"]>("identity"),
+  ]);
+  return { identity, consent, capture, config, timer };
+}
+
+/** The user's projects (`GET /v1/projects`). Fetched on mount + refresh — not every second. */
+export async function fetchProjects(): Promise<Project[]> {
+  if (USE_MOCK) return mock.read().projects;
+  return invoke<Project[]>("list_projects").catch(() => []);
+}
+
+/** The user's tasks (`GET /v1/me/tasks`). Fetched on mount + refresh — not every second. */
+export async function fetchTasks(): Promise<Task[]> {
+  if (USE_MOCK) return mock.read().tasks;
+  return invoke<Task[]>("list_tasks").catch(() => []);
+}
+
+/** Today's folded sessions (`GET /v1/me/timesheet/today`). Fetched periodically + after start/stop. */
+export async function fetchSessions(): Promise<Session[]> {
+  if (USE_MOCK) return mock.read().sessions;
+  return invoke<Session[]>("list_sessions", { date: localDate() }).catch(() => []);
+}
+
+/**
+ * Fold the running session's live segment into its (project, description) row so it ticks between
+ * server refreshes. The server's completed totals exclude the still-open session (no duration yet),
+ * so this never double-counts — once it stops and folds, `timer.running` is false and the sum wins.
+ */
+export function withLiveSession(sessions: Session[], timer: TimerState): Session[] {
+  if (!timer.running || !timer.project_id) return sessions;
+  const desc = timer.description.trim();
+  const out = sessions.map((s) => ({ ...s }));
+  const row = out.find((s) => s.project_id === timer.project_id && s.description === desc);
+  if (row) row.secs += timer.elapsed_secs;
+  else out.push({ project_id: timer.project_id, description: desc, secs: timer.elapsed_secs });
+  return out;
+}
+
+/** @deprecated kept for any legacy caller — prefer `readLocal` + the `fetch*` helpers. */
 export async function readSnapshot(): Promise<AgentSnapshot> {
   if (USE_MOCK) return mock.read();
-
-  // Independent reads against the real single-process core. `list_projects` and `list_sessions` hit
-  // the backend (GET /v1/projects, GET /v1/me/timesheet/today); both fail soft to [] so a backend
-  // outage doesn't blank the panel.
-  const [consent, capture, config, timer, identity, projects, tasks, sessions] = await Promise.all([
-    invoke<AgentSnapshot["consent"]>("get_consent_state"),
-    invoke<AgentSnapshot["capture"]>("capture_state"),
-    invoke<AgentSnapshot["config"]>("effective_config"),
-    invoke<AgentSnapshot["timer"]>("timer_state"),
-    invoke<AgentSnapshot["identity"]>("identity"),
-    invoke<AgentSnapshot["projects"]>("list_projects").catch((): AgentSnapshot["projects"] => []),
-    invoke<AgentSnapshot["tasks"]>("list_tasks").catch((): AgentSnapshot["tasks"] => []),
-    invoke<AgentSnapshot["sessions"]>("list_sessions", { date: localDate() }).catch(
-      (): AgentSnapshot["sessions"] => [],
-    ),
+  const [local, projects, tasks, sessions] = await Promise.all([
+    readLocal(),
+    fetchProjects(),
+    fetchTasks(),
+    fetchSessions(),
   ]);
-
-  // Fold the running session's live segment into its (project, description) row so it ticks. The
-  // server's completed totals exclude the still-open session (no duration yet), so this never
-  // double-counts — once it stops and folds, `timer.running` is false and the sum takes over.
-  if (timer.running && timer.project_id) {
-    const desc = timer.description.trim();
-    const row = sessions.find((s) => s.project_id === timer.project_id && s.description === desc);
-    if (row) row.secs += timer.elapsed_secs;
-    else sessions.push({ project_id: timer.project_id, description: desc, secs: timer.elapsed_secs });
-  }
-
-  // `tasks` and `activity` still have no command (see types.ts) — empty. `identity` comes from the
-  // Cognito claims.
   return {
-    identity,
-    consent,
-    capture,
-    config,
-    timer,
+    ...local,
     projects,
     tasks,
     activity: [],
-    sessions,
+    sessions: withLiveSession(sessions, local.timer),
   };
 }
 
