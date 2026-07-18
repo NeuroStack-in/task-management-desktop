@@ -17,6 +17,10 @@ export const ipc = {
     }),
   authLogout: () => invoke<void>("auth_logout"),
 
+  // consent (M5 / PRIVACY) — capture is gated on this and defaults OFF
+  consentStatus: () => invoke<boolean>("consent_status"),
+  setConsent: (granted: boolean) => invoke<void>("set_consent", { granted }),
+
   // timer (M0/M3)
   timerStatus: () => invoke<boolean>("timer_status"),
   agentId: () => invoke<string>("agent_id"),

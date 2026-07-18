@@ -1,14 +1,18 @@
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "preact/hooks";
+import { ConsentCard } from "./components/ConsentCard";
 import { LoginForm } from "./components/LoginForm";
 import { TimerView } from "./components/TimerView";
 import { ipc } from "./lib/ipc";
 import type { AuthStatus } from "./lib/types";
 
-// Root: gate on auth. Signed out → LoginForm; signed in → the timer surface. Auth state is polled
-// once on mount (the core restores a keyring session at startup) and updated on login/logout.
+// Root: gate on auth, then on consent. Signed out → LoginForm. Signed in → the consent control +
+// timer. Core events (idle prompt, screenshot-permission, session-expired) surface as notices.
 export function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [agentId, setAgentId] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -18,6 +22,28 @@ export function App() {
       .catch(() => setAuth({ signedIn: false }))
       .finally(() => setReady(true));
     ipc.agentId().then(setAgentId).catch(() => {});
+    ipc.consentStatus().then(setConsent).catch(() => {});
+  }, []);
+
+  // Core → UI events (see Rust `events.rs`).
+  useEffect(() => {
+    const subs = [
+      listen("auth:expired", () => {
+        setAuth({ signedIn: false });
+        setNotice("Your session expired — please sign in again.");
+      }),
+      listen<number>("monitor:idle-prompt", (e) =>
+        setNotice(
+          `You've been idle ~${Math.round((e.payload ?? 0) / 60)} min. Tracking auto-stops at 15 min.`,
+        ),
+      ),
+      listen("monitor:screenshot-unavailable", () =>
+        setNotice("Screenshots unavailable — grant Screen Recording permission (macOS) and retry."),
+      ),
+    ];
+    return () => {
+      subs.forEach((p) => p.then((un) => un()).catch(() => {}));
+    };
   }, []);
 
   async function signOut() {
@@ -36,10 +62,22 @@ export function App() {
         )}
       </header>
 
+      {notice && (
+        <div class="flex items-start justify-between gap-3 rounded-md bg-amber-500/10 p-3 text-xs text-amber-300">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} class="text-amber-400/70 hover:text-amber-300">
+            ✕
+          </button>
+        </div>
+      )}
+
       {!ready ? (
         <p class="text-xs text-slate-500">Loading…</p>
       ) : auth?.signedIn ? (
-        <TimerView />
+        <>
+          <ConsentCard granted={consent} onChange={setConsent} />
+          <TimerView />
+        </>
       ) : (
         <LoginForm onSignedIn={setAuth} />
       )}

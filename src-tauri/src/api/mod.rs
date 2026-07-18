@@ -8,6 +8,7 @@
 
 pub mod batch;
 pub mod client;
+pub mod config;
 
 use std::path::Path;
 use std::time::Duration;
@@ -58,9 +59,25 @@ async fn drain(
         match batch::send_batch(http, ingest_url, id_token, &batch).await {
             Ok(ack) => {
                 state.outbox.lock().unwrap().prune_to(ack.watermark_seq);
-                if state.config.lock().unwrap().needs_pull(ack.config_version) {
-                    // TODO(M2): GET /v1/agent/config (ETag) → apply live.
+
+                // Config rail: the ack advertises the server version; on a mismatch, pull (ETag-conditional)
+                // and apply live — cadence/blur/silent + app/URL rules the monitor threads read each tick.
+                let (stale, etag) = {
+                    let c = state.config.lock().unwrap();
+                    (c.needs_pull(ack.config_version), c.etag())
+                };
+                if stale {
+                    match config::pull_config(http, ingest_url, id_token, etag.as_deref()).await {
+                        Ok(config::ConfigPull::Fresh { config, etag }) => {
+                            let v = config.version;
+                            state.config.lock().unwrap().apply(config, etag);
+                            tracing::info!("config applied (version {v})");
+                        }
+                        Ok(config::ConfigPull::NotModified) => {}
+                        Err(e) => tracing::warn!("config pull failed: {e}"),
+                    }
                 }
+
                 for pu in &ack.upload_urls {
                     upload_screenshot(upload, state, pu).await;
                 }
