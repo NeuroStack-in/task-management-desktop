@@ -1,16 +1,13 @@
-# WorkPulse desktop agent — task runner. Run `just` to list.
-# The core (agentd + capture-helper) and the tray build separately (see README).
+# WorkPulse desktop agent — task runner. ONE Tauri process (BUILD-PLAN §0/§1). Run `just` to list.
 
 default:
     @just --list
 
-# ---- core (headless): agentd + capture-helper + agent-shared ----
-
-# Type-check the core workspace.
+# Type-check the workspace.
 check:
     cargo check --workspace --all-targets
 
-# Run all core unit tests.
+# Run all unit tests.
 test:
     cargo test --workspace
 
@@ -24,25 +21,21 @@ fmt:
 fmt-fix:
     cargo fmt --all
 
-# Everything CI runs on the core, in order.
+# Everything CI runs on the Rust core, in order.
 ci: fmt clippy test
 
-# Run the headless core service locally.
-run-core:
-    cargo run --bin workpulse-agentd
+# Run the agent (needs the Tauri CLI + webview deps: `just ui-install` and `cargo install tauri-cli`).
+dev:
+    cargo tauri dev
 
-# Run the capture helper locally (normally spawned by the core).
-run-helper:
-    cargo run --bin workpulse-capture-helper
+# Produce the platform bundle.
+build:
+    cargo tauri build
 
-# ---- tray (Tauri 2; needs `cargo install tauri-cli`) ----
+# Install the webview (ui/) dependencies.
+ui-install:
+    npm --prefix ui install
 
-tray-dev:
-    cd tray/src-tauri && cargo tauri dev
-
-tray-build:
-    cd tray/src-tauri && cargo tauri build
-
-# Regenerate tray icons from a source logo (see tray/src-tauri/icons/README.md).
-tray-icons logo:
-    cd tray/src-tauri && cargo tauri icon {{logo}}
+# Regenerate app icons from a source logo (see src-tauri/icons/README.md).
+icons logo:
+    cargo tauri icon {{logo}}

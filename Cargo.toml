@@ -1,15 +1,23 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/agent-shared",
-    "crates/agentd",
-    "crates/capture-helper",
-    # `tray` is a Tauri 2 app with its own toolchain (needs npm + tauri CLI); it lives at
-    # `tray/src-tauri` and depends on `agent-shared` by path. It is intentionally NOT a
-    # workspace member so `cargo check` on the core stays fast and toolchain-free.
-]
+members = ["src-tauri"]
+
+# ONE Tauri process (BUILD-PLAN §0/§1 — amends LLD Appendix A's 3-process split). The former
+# `crates/agentd` + `crates/capture-helper` + `crates/agent-shared` + `tray/` are gone; their four
+# real slices moved into `src-tauri/src/`. `monitor/` stays free of Tauri types so a daemon can be
+# split back out later without a rewrite (§0).
 
 [workspace.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+# Shell polish (M6)
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-autostart = "2"
+# Updater (M7)
+tauri-plugin-updater = "2"
+url = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,22 +25,38 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", features = ["serde", "formatting"] }
 thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+dotenvy = "0.15"
+sysinfo = "0.32"
+local-ip-address = "0.6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+base64 = "0.22"
+# OS capture (M4) — real data only on a live desktop session; degrade to 0/None headless & on Wayland.
+device_query = "2"
+user-idle = "0.6"
+x-win = "2"
+# Screenshots (M5)
+xcap = "0.4"
+image = "0.25"
+webp = "0.3"
+image_hasher = "2"
 
-agent-shared = { path = "crates/agent-shared" }
-
-# The shared agent↔backend contract is OWNED BY THE BACKEND REPO (the API authority):
-# `backend/crates/wp-agent-contract`. The backend `ingest` binary depends on it by path (workspace
-# member); the desktop agent compiles the *same* crate, so the wire envelope can't drift.
+# The agent↔backend wire contract is OWNED BY THE BACKEND REPO (the API authority):
+# `backend/crates/wp-agent-contract`. The backend `ingest` binary depends on it too, so the wire
+# envelope can't drift — the whole point of a shared crate. The single process depends on it
+# DIRECTLY now (no more `agent-shared` re-export).
 #
 # NOW (local dev): a path dep to the sibling backend checkout — clone the repos side by side
-# (`.../backend`, `.../desktop`). CI checks out the backend repo alongside.
+# (`.../backend`, `.../desktop`).
 wp-agent-contract = { path = "../backend/crates/wp-agent-contract" }
 #
-# CROSS-REPO (CI / release): the backend repo is the source; git-dep into it and pin a tag. Cargo
-# picks the `wp-agent-contract` package out of the backend workspace. Keep a local [patch] for dev:
+# PIN IT (CI / release) — BUILD-PLAN §1, non-negotiable (this exact drift already bit us once):
+# git-dep into the backend repo at a tag, with a local [patch] for dev:
 #   wp-agent-contract = { git = "https://github.com/<org>/backend.git", tag = "agent-contract-v0.1.0" }
 #   [patch."https://github.com/<org>/backend.git"]
 #   wp-agent-contract = { path = "../backend/crates/wp-agent-contract" }
+# CI must also run a job that fails on contract drift (compile the agent against the pinned rev).
 
 [workspace.package]
 version = "0.1.0"
