@@ -165,6 +165,14 @@ impl AuthManager {
         let guard = self.tokens.read().unwrap();
         let t = guard.as_ref()?;
         let claims = token::decode_id_claims(&t.id_token)?;
+        // Diagnostic (presence only, not values): if the header still shows a UUID, this tells us the
+        // ID token carries no `name`/`email` claim — a Cognito app-client attribute config, not an
+        // agent bug. Falls back to the username only when both are absent.
+        tracing::info!(
+            has_name = !claims.name.trim().is_empty(),
+            has_email = !claims.email.trim().is_empty(),
+            "identity: resolving display name from ID-token claims"
+        );
         Some((claims.display_name(), claims.email.clone()))
     }
 

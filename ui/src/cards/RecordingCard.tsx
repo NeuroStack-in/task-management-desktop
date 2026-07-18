@@ -51,7 +51,7 @@ export function RecordingCard({
         </div>
 
         {/* Timer numerals — the hero */}
-        <Numerals secs={timer.elapsed_secs} />
+        <Numerals timer={timer} />
 
         <p
           className="mt-3 truncate px-2 text-[13px] font-semibold leading-tight tracking-[-0.005em] text-foreground"
@@ -100,29 +100,34 @@ export function RecordingCard({
 }
 
 /**
- * HH:MM:SS numerals. Ticks **locally** every 250 ms from an anchor (the core's elapsed_secs + the
- * wall-clock at which we received it), and re-anchors whenever the core reports a fresh value. So the
- * clock runs smoothly and never skips even if a poll is momentarily late, yet still self-corrects to
- * the core's authoritative time each second — the core, not the UI, remains the source of truth.
+ * HH:MM:SS numerals — **runs purely on the local wall-clock**, never on the poll.
+ *
+ * The session's start instant is anchored **once** (`startMs = now − core_elapsed`) and re-anchored
+ * only when the session identity changes (a new task / a switch), NOT on every poll. Elapsed is then
+ * `floor((now − startMs) / 1000)`, recomputed every 250 ms. Because the core's clock and the UI's are
+ * the same wall clock, they agree — so the display can't run fast or skip, and it survives an app
+ * relaunch mid-session (the core's elapsed seeds the anchor). This is the fix for the fast/jumping
+ * clock: nothing about the display depends on when a network poll happens to land.
  */
-function Numerals({ secs }: { secs: number }) {
-  const [display, setDisplay] = useState(secs);
-  const anchor = useRef({ secs, at: Date.now() });
+function Numerals({ timer }: { timer: TimerState }) {
+  // Session identity — changes on start/switch (which resets elapsed to ~0), so we re-anchor then.
+  const key = `${timer.project_id ?? ""}|${timer.task_id ?? ""}|${timer.description}`;
+  const anchor = useRef({ key, startMs: Date.now() - timer.elapsed_secs * 1000 });
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    anchor.current = { secs, at: Date.now() };
-    setDisplay(secs);
-  }, [secs]);
+    anchor.current = { key, startMs: Date.now() - timer.elapsed_secs * 1000 };
+    setNow(Date.now());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      const { secs: base, at } = anchor.current;
-      setDisplay(base + Math.floor((Date.now() - at) / 1000));
-    }, 250);
+    const id = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(id);
   }, []);
 
-  const [hh, mm, ss] = formatElapsed(display).split(":");
+  const secs = Math.max(0, Math.floor((now - anchor.current.startMs) / 1000));
+  const [hh, mm, ss] = formatElapsed(secs).split(":");
   return (
     <span
       className="block font-mono text-[38px] font-bold leading-none tracking-[-0.02em] tabular-nums text-success"
