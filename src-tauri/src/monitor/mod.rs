@@ -65,10 +65,12 @@ pub fn spawn_screenshots(app: AppHandle) {
                 let state = app.state::<AppState>();
                 let running = state.timer.lock().unwrap().is_running();
                 let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
+                // Privacy pause (panel PauseCard) suspends capture until the grant expires.
+                let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
                 let cfg = state.config.lock().unwrap();
                 let t = &cfg.get().tracking;
                 let on = !matches!(t.cadence, wp_agent_contract::Cadence::Off);
-                (running && consented && on, t.blur_level)
+                (running && consented && on && !paused, t.blur_level)
             };
             if !go {
                 continue;
@@ -117,7 +119,9 @@ fn run(app: AppHandle) {
         // consent-gated, fails closed). Time tracking can run without consent; activity capture can't.
         let running = state.timer.lock().unwrap().is_running();
         let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
-        if running && consented {
+        // Privacy pause (panel PauseCard) suspends activity capture until the grant expires.
+        let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
+        if running && consented && !paused {
             let now = clock::now_epoch_ms();
             let idle = idle::idle_seconds();
             let (kb, mouse) = sampler.sample();

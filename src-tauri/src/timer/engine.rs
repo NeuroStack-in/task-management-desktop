@@ -65,6 +65,23 @@ impl TimerEngine {
     pub fn is_running(&self) -> bool {
         self.running.is_some()
     }
+
+    /// `(running, task_id, elapsed_secs)` for the panel's `timer_state` command. `task_id` is `None`
+    /// when stopped or in meeting mode (empty task); `elapsed_secs` is the current session's length.
+    pub fn snapshot(&self, now_ms: i64) -> (bool, Option<String>, u64) {
+        match &self.running {
+            None => (false, None, 0),
+            Some(r) => {
+                let task = if r.task_id.is_empty() {
+                    None
+                } else {
+                    Some(r.task_id.clone())
+                };
+                let elapsed = ((now_ms - r.started_at).max(0) / 1000) as u64;
+                (true, task, elapsed)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -15,12 +15,12 @@
       {
         "label": "panel",
         "title": "WorkPulse",
-        "width": 500,
-        "height": 600,
-        "maxWidth": 550,
-        "maxHeight": 650,
-        "minWidth": 380,
-        "minHeight": 480,
+        "width": 660,
+        "height": 660,
+        "maxWidth": 760,
+        "maxHeight": 820,
+        "minWidth": 560,
+        "minHeight": 520,
         "resizable": true,
         "maximizable": false,
         "decorations": true,

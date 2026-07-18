@@ -111,6 +111,16 @@ pub fn run() {
             commands::timer_status,
             commands::agent_id,
             commands::check_for_updates,
+            // Panel (kishore's tray UI) command surface.
+            commands::panel::get_consent_state,
+            commands::panel::grant_consent,
+            commands::panel::capture_state,
+            commands::panel::effective_config,
+            commands::panel::timer_state,
+            commands::panel::start_timer,
+            commands::panel::stop_timer,
+            commands::panel::request_pause,
+            commands::panel::identity,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {

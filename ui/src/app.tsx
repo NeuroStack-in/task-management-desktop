@@ -1,95 +1,192 @@
-import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState } from "preact/hooks";
-import { ConsentCard } from "./components/ConsentCard";
-import { LoginForm } from "./components/LoginForm";
-import { WorkPulseLogo } from "./components/Logo";
-import { TimerView } from "./components/TimerView";
-import { Button } from "./components/ui/Button";
-import { ipc } from "./lib/ipc";
-import type { AuthStatus } from "./lib/types";
+import { LogOut } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 
-// Root: gate on auth, then on consent. Signed out → LoginForm (TaskFlow-styled). Signed in → the
-// consent control + timer. Core events (idle prompt, screenshot-permission, session-expired) surface
-// as notices.
-export function App() {
-  const [auth, setAuth] = useState<AuthStatus | null>(null);
-  const [consent, setConsent] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
+import { Button } from "@/components/ui/button";
+import { ConsentCard } from "@/cards/ConsentCard";
+import { PauseCard } from "@/cards/PauseCard";
+import { SessionsCard } from "@/cards/SessionsCard";
+import { StatusCard } from "@/cards/StatusCard";
+import { TimerCard } from "@/cards/TimerCard";
+import { DevBar } from "@/components/DevBar";
+import { LoginForm } from "@/components/LoginForm";
+import { IdentityChip, LiveDot, StatusBadge, ThemeToggle } from "@/components/panel";
+import { useAgent } from "@/hooks/useAgent";
+import { useTheme } from "@/hooks/useTheme";
+import { USE_MOCK } from "@/lib/agent";
+import { auth } from "@/lib/ipc";
+
+export default function App() {
+  // Remounting Panel on scenario change resets useAgent, so preview state can't drift out of
+  // sync with the fake core. Dev-only: in production `key` never changes.
+  const [scenarioKey, setScenarioKey] = useState(0);
+
+  // Auth gate. Mock/dev never has a real Cognito session, so it goes straight to the panel
+  // (the whole point of mock is to design without the core). Production starts unknown (null),
+  // resolves against a resumed keyring session, then shows login-or-panel.
+  const [authed, setAuthed] = useState<boolean | null>(USE_MOCK ? true : null);
 
   useEffect(() => {
-    ipc
-      .authStatus()
-      .then(setAuth)
-      .catch(() => setAuth({ signedIn: false }))
-      .finally(() => setReady(true));
-    ipc.consentStatus().then(setConsent).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const subs = [
-      listen("auth:expired", () => {
-        setAuth({ signedIn: false });
-        setNotice("Your session expired — please sign in again.");
-      }),
-      listen<number>("monitor:idle-prompt", (e) =>
-        setNotice(
-          `You've been idle ~${Math.round((e.payload ?? 0) / 60)} min. Tracking auto-stops at 15 min.`,
-        ),
-      ),
-      listen("monitor:screenshot-unavailable", () =>
-        setNotice("Screenshots unavailable — grant Screen Recording permission (macOS) and retry."),
-      ),
-    ];
+    if (USE_MOCK) return;
+    let live = true;
+    auth
+      .status()
+      .then((s) => live && setAuthed(!!s.signedIn))
+      .catch(() => live && setAuthed(false));
     return () => {
-      subs.forEach((p) => p.then((un) => un()).catch(() => {}));
+      live = false;
     };
   }, []);
 
-  async function signOut() {
-    await ipc.authLogout().catch(() => {});
-    setAuth({ signedIn: false });
-  }
-
-  if (!ready) {
+  if (authed === null) {
     return (
-      <div class="flex h-full items-center justify-center bg-background">
-        <div class="h-6 w-6 animate-spin rounded-full border-2 border-muted border-t-primary" />
+      <div className="flex h-full items-center justify-center bg-background">
+        <span className="text-muted-foreground/60">Starting WorkPulse…</span>
       </div>
     );
   }
 
-  if (!auth?.signedIn) {
-    return <LoginForm onSuccess={setAuth} />;
+  if (!authed) {
+    return (
+      <div className="h-full">
+        <LoginForm onSignedIn={() => setAuthed(true)} />
+      </div>
+    );
   }
 
+  // The dev chips are passed *into* Panel rather than rendered above it, so they sit under the
+  // real header. The header carries the identity chip, which must stay in the top-right corner
+  // of the shipped panel — and production has no dev row to push it down.
   return (
-    <div class="flex h-full flex-col bg-background text-foreground">
-      <header class="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <div class="flex items-center gap-2">
-          <WorkPulseLogo size={22} />
-          <span class="text-[13px] font-bold tracking-[-0.01em]">
-            Work<span class="text-primary">Pulse</span>
-          </span>
-        </div>
-        <Button variant="ghost" size="sm" class="h-7 text-muted-foreground" onClick={signOut}>
-          Sign out{auth.username ? ` · ${auth.username}` : ""}
-        </Button>
+    <div className="flex h-full flex-col p-3.5">
+      <Panel
+        key={scenarioKey}
+        devBar={USE_MOCK ? <DevBar onChange={() => setScenarioKey((k) => k + 1)} /> : null}
+        onSignOut={() => setAuthed(false)}
+      />
+    </div>
+  );
+}
+
+function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => void }) {
+  const {
+    snapshot,
+    error,
+    pauseSecs,
+    pauseRefused,
+    grantConsent,
+    toggleTimer,
+    setTask,
+    requestPause,
+  } = useAgent();
+  const { theme, toggle: toggleTheme } = useTheme();
+
+  if (error && !snapshot) {
+    return (
+      <div className="flex flex-1 items-center justify-center p-6 text-center">
+        <p className="text-muted-foreground">
+          Can't reach the WorkPulse core.
+          <span className="mt-1 block text-[11px] text-muted-foreground/60">{error}</span>
+        </p>
+      </div>
+    );
+  }
+
+  if (!snapshot) {
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <span className="text-muted-foreground/60">Connecting…</span>
+      </div>
+    );
+  }
+
+  const { consent, capture, config, timer } = snapshot;
+  const paused = pauseSecs > 0;
+
+  // Consent gates the whole panel: nothing else is actionable until it's acknowledged.
+  // The dev chips still render, or there'd be no way back out of the First run preview.
+  if (!consent.granted) {
+    return (
+      <>
+        {devBar}
+        <ConsentCard consent={consent} silent={config.silent} onGrant={grantConsent} />
+      </>
+    );
+  }
+
+  // Silent mode suppresses the capture indicator by policy — the disclosure already covered it.
+  const showLive = capture.capturing && !config.silent;
+
+  return (
+    <>
+      <header className="mb-2.5 flex shrink-0 items-center gap-2">
+        <LiveDot live={showLive} />
+        <h1 className="font-heading text-[14px] font-semibold tracking-[0.2px]">WorkPulse</h1>
+        <span className="ml-auto">
+          {paused ? (
+            <StatusBadge tone="warn">paused</StatusBadge>
+          ) : (
+            <StatusBadge tone={showLive ? "on" : "neutral"}>
+              {showLive ? "monitoring" : "idle"}
+            </StatusBadge>
+          )}
+        </span>
+        <ThemeToggle theme={theme} onToggle={toggleTheme} />
+        {/* Hidden rather than faked when the core can't say who it's bound to. */}
+        {snapshot.identity && (
+          <>
+            <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+            <IdentityChip identity={snapshot.identity} />
+          </>
+        )}
+        {onSignOut && !USE_MOCK && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Sign out"
+            aria-label="Sign out"
+            onClick={async () => {
+              try {
+                await auth.logout();
+              } finally {
+                onSignOut();
+              }
+            }}
+          >
+            <LogOut />
+          </Button>
+        )}
       </header>
 
-      {notice && (
-        <div class="mx-4 mt-3 flex items-start justify-between gap-3 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11.5px] text-amber-500">
-          <span>{notice}</span>
-          <button onClick={() => setNotice(null)} class="text-amber-500/70 hover:text-amber-500">
-            ✕
-          </button>
-        </div>
-      )}
+      {devBar}
 
-      <div class="flex-1 space-y-3 overflow-y-auto p-4">
-        <ConsentCard granted={consent} onChange={setConsent} />
-        <TimerView />
+      {/* The window is sized to this content exactly (tauri.conf.json), so nothing should ever
+          scroll. `overflow-y-auto` stays as a safety valve — if a future card pushes past the
+          fixed height, scrolling is a better failure than Card's `overflow-hidden` silently
+          clipping the last row. `min-h-0` is what lets that valve work at all: without it the
+          flex child refuses to shrink and overflows the panel instead. */}
+      <div className="wp-enter flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+        <TimerCard
+          timer={timer}
+          tasks={snapshot.tasks}
+          onToggle={toggleTimer}
+          onSelectTask={setTask}
+        />
+
+        {/* Side by side: the panel is 620 wide, and stacking these left a long dead gap
+            under the last card. `items-stretch` keeps both cards the same height. */}
+        <div className="grid grid-cols-2 items-stretch gap-3">
+          <StatusCard
+            capture={capture}
+            paused={paused}
+            activity={snapshot.activity}
+            config={config}
+            consent={consent}
+          />
+          <SessionsCard sessions={snapshot.sessions} tasks={snapshot.tasks} timer={timer} />
+        </div>
+
+        <PauseCard pauseSecs={pauseSecs} refused={pauseRefused} onRequest={requestPause} />
       </div>
-    </div>
+    </>
   );
 }

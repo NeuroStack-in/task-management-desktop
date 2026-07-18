@@ -4,6 +4,8 @@
 //! M0: timer control + identity, wired to real `AppState`. M1 adds `auth_cmds`; M3 the
 //! project→task selector + mandatory description + meeting mode; M4/M5 monitor + screenshot status.
 
+pub mod panel;
+
 use tauri::State;
 use wp_agent_contract::StopReason;
 
