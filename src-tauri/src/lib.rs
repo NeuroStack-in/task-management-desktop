@@ -21,6 +21,7 @@ pub mod error;
 pub mod events;
 pub mod heartbeat;
 pub mod lifecycle;
+pub mod location;
 pub mod monitor;
 pub mod outbox;
 pub mod rules;
@@ -61,7 +62,7 @@ pub fn dump_cycle() {
     }
     b.seal();
     let rollups = b.take_sealed();
-    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), 0.0, false);
+    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), 0.0, false, None);
 
     let cycle = serde_json::json!({ "heartbeat": hb, "activity": rollups });
     println!("{}", serde_json::to_string_pretty(&cycle).unwrap());

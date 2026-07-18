@@ -39,10 +39,29 @@ pub fn spawn_sender(app: tauri::AppHandle) {
             };
             let ingest_url = state.auth.config().ingest_url.clone();
 
+            refresh_location(&app).await;
             cycle::assemble_and_enqueue(&state);
             drain(&http, &upload, &ingest_url, &id_token, &state).await;
         }
     });
+}
+
+/// Refresh the cached device location — **consent-gated, fails closed**. With consent, capture a
+/// fresh OS fix (blocking WinRT → `spawn_blocking`) for the next heartbeat; without consent, clear any
+/// cached fix so a withdrawal takes effect on the very next cycle.
+async fn refresh_location(app: &tauri::AppHandle) {
+    let consented = app
+        .state::<AppState>()
+        .consent
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let fix = if consented {
+        tokio::task::spawn_blocking(crate::location::capture)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    *app.state::<AppState>().location.lock().unwrap() = fix;
 }
 
 /// Send oldest-first until the outbox is empty or a send fails (then retry next tick). After each ack,

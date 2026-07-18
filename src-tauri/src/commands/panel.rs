@@ -29,6 +29,7 @@ fn disclosure() -> Vec<String> {
         "Activity counts (keystroke & mouse totals — never the keys themselves)",
         "Foreground app / website category",
         "Periodic screenshots (blurred per your organization's policy)",
+        "Device location (GPS / OS positioning) while monitoring is on",
         "Attendance and timer events",
     ]
     .iter()

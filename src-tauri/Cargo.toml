@@ -48,6 +48,12 @@ webp = { workspace = true }
 image_hasher = { workspace = true }
 wp-agent-contract = { workspace = true }
 
+# Native device geolocation (precise GPS / OS positioning) for the heartbeat. Windows only for now —
+# WinRT `Windows.Devices.Geolocation`; macOS/Linux return no fix (documented gap). Reuses the `windows`
+# crate version already in the tree (tauri), just enabling the Geolocation feature modules.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.57", features = ["Devices_Geolocation", "Foundation"] }
+
 # Real OS/IO backends are added with their milestones (kept out of M0 so the tree builds without
 # system libs): M1 reqwest + keyring · M4 device_query + user-idle + x-win + sysinfo ·
 # M5 xcap + image + webp + image_hasher · M7 the updater.

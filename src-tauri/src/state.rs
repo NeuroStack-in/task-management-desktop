@@ -70,6 +70,9 @@ pub struct AppState {
     pub consent: AtomicBool,
     /// Privacy-pause window + budget (the panel's "Pause 5 min").
     pub pause: Mutex<PauseState>,
+    /// Latest device location fix, refreshed each cycle **only while consent is granted** (the sender
+    /// clears it when consent is withdrawn). `None` = no fix; it rides the next heartbeat when present.
+    pub location: Mutex<Option<wp_agent_contract::GeoLocation>>,
     /// Cognito session + single-flight refresh (interior mutability — not behind the outer Mutex).
     pub auth: AuthManager,
 }
@@ -85,6 +88,7 @@ impl AppState {
             screenshots: Mutex::new(HashMap::new()),
             consent: AtomicBool::new(false),
             pause: Mutex::new(PauseState::default()),
+            location: Mutex::new(None),
             auth: AuthManager::new(),
         }
     }

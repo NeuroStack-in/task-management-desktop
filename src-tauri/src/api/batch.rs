@@ -79,6 +79,7 @@ mod tests {
                 mem_pct: 0.0,
                 outbox_mb: 0.0,
                 idle: false,
+                location: None,
             },
             activity: vec![ActivityRollup {
                 minute: 1,
