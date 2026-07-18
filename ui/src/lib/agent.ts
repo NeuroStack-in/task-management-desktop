@@ -26,21 +26,43 @@ function invoke<T>(cmd: string, args?: unknown): Promise<T> {
   return fn<T>(cmd, args);
 }
 
+/** The client's own local date (YYYY-MM-DD) — "today" is the user's calendar, not the server's UTC. */
+function localDate(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export async function readSnapshot(): Promise<AgentSnapshot> {
   if (USE_MOCK) return mock.read();
 
-  // Independent reads against the real single-process core. `list_projects` is the one that hits
-  // the backend (GET /v1/projects); it fails soft to [] so a projects outage doesn't blank the panel.
-  const [consent, capture, config, timer, identity, projects] = await Promise.all([
+  // Independent reads against the real single-process core. `list_projects` and `list_sessions` hit
+  // the backend (GET /v1/projects, GET /v1/me/timesheet/today); both fail soft to [] so a backend
+  // outage doesn't blank the panel.
+  const [consent, capture, config, timer, identity, projects, sessions] = await Promise.all([
     invoke<AgentSnapshot["consent"]>("get_consent_state"),
     invoke<AgentSnapshot["capture"]>("capture_state"),
     invoke<AgentSnapshot["config"]>("effective_config"),
     invoke<AgentSnapshot["timer"]>("timer_state"),
     invoke<AgentSnapshot["identity"]>("identity"),
-    invoke<AgentSnapshot["projects"]>("list_projects").catch(() => []),
+    invoke<AgentSnapshot["projects"]>("list_projects").catch((): AgentSnapshot["projects"] => []),
+    invoke<AgentSnapshot["sessions"]>("list_sessions", { date: localDate() }).catch(
+      (): AgentSnapshot["sessions"] => [],
+    ),
   ]);
-  // `tasks`, `activity` and `sessions` still have no command (see types.ts) — empty, so the UI
-  // degrades rather than inventing numbers. `identity` comes from the Cognito claims.
+
+  // Fold the running session's live segment into its (project, description) row so it ticks. The
+  // server's completed totals exclude the still-open session (no duration yet), so this never
+  // double-counts — once it stops and folds, `timer.running` is false and the sum takes over.
+  if (timer.running && timer.project_id) {
+    const desc = timer.description.trim();
+    const row = sessions.find((s) => s.project_id === timer.project_id && s.description === desc);
+    if (row) row.secs += timer.elapsed_secs;
+    else sessions.push({ project_id: timer.project_id, description: desc, secs: timer.elapsed_secs });
+  }
+
+  // `tasks` and `activity` still have no command (see types.ts) — empty. `identity` comes from the
+  // Cognito claims.
   return {
     identity,
     consent,
@@ -50,7 +72,7 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
     projects,
     tasks: [],
     activity: [],
-    sessions: [],
+    sessions,
   };
 }
 

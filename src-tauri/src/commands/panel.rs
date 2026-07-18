@@ -203,6 +203,24 @@ pub async fn list_projects(
     crate::api::projects::fetch_projects(&client, &ingest_url, &id_token).await
 }
 
+// ── today's sessions (backend-fed) ───────────────────────────────────────────
+
+/// The signed-in user's folded time entries for `date` (the client's local `YYYY-MM-DD`), aggregated
+/// per (project, description) — the panel's "Today's sessions". Reads back this agent's own timer
+/// events after they fold server-side (`GET /v1/me/timesheet/today`). Empty when signed out.
+#[tauri::command]
+pub async fn list_sessions(
+    state: State<'_, AppState>,
+    date: String,
+) -> Result<Vec<crate::api::timesheet::SessionDto>, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Ok(Vec::new());
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    crate::api::timesheet::fetch_today(&client, &ingest_url, &id_token, &date).await
+}
+
 // ── identity ─────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]

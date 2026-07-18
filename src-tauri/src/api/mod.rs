@@ -10,6 +10,7 @@ pub mod batch;
 pub mod client;
 pub mod config;
 pub mod projects;
+pub mod timesheet;
 
 use std::path::Path;
 use std::time::Duration;
