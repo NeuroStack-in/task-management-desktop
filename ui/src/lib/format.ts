@@ -52,6 +52,20 @@ export function formatCountdown(secs: number): string {
   return rem === 0 ? `${m}m` : `${m}m ${String(rem).padStart(2, "0")}s`;
 }
 
+/** TaskFlow-style human duration from seconds: 9150 → "2h 32m 30s". Always shows seconds. */
+export function formatWorked(secs: number): string {
+  const s = Math.max(0, Math.round(secs));
+  if (s === 0) return "0s";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  if (ss > 0) parts.push(`${ss}s`);
+  return parts.join(" ") || "0s";
+}
+
 /** Rounded duration for budgets: "25 min", "1h 05m". */
 export function formatBudget(secs: number): string {
   const mins = Math.round(secs / 60);

@@ -1,107 +1,119 @@
-import { Square } from "lucide-react";
-import type { ReactNode } from "react";
-
-import { PanelCard } from "@/components/panel";
 import { Button } from "@/components/ui/button";
-import { CardContent } from "@/components/ui/card";
-import { formatCountdown, formatElapsed } from "@/lib/format";
+import { formatElapsed, formatWorked } from "@/lib/format";
 import type { Project, Session, TimerState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
- * The recording hero (TaskFlow layout): a RECORDING pill, the big segmented clock, the current
- * task + its project, and a full-width Stop button — with today's session count + total on a
- * footer bar. Task *switching* lives in the separate Switch-Task card below, exactly like the
- * reference, so this card is only ever about the session in progress.
+ * The live recording card — a faithful port of TaskFlow's TimerView recording hero, recoloured to
+ * the panel's present theme: TaskFlow's emerald accent maps to the `--success` token, its `--primary`
+ * stays the panel's teal. Structure, spacing and copy are TaskFlow's.
  *
- * Uses the panel's existing Slate & Teal tokens: the clock and Stop button are `--primary`
- * (teal), the live pill is `--success` (green) — no TaskFlow purple.
+ * Task switching lives in the Switch-Task strip below (App.tsx), exactly like the reference.
  */
 export function RecordingCard({
   timer,
   projects,
   sessions,
   onStop,
+  loading,
 }: {
   timer: TimerState;
   projects: Project[];
   sessions: Session[];
   onStop: () => void;
+  loading?: boolean;
 }) {
-  const running = timer.running;
-  const [hh, mm, ss] = formatElapsed(timer.elapsed_secs).split(":");
+  const title = timer.description.trim() || "Working";
+  const projectName = projects.find((p) => p.id === timer.project_id)?.name ?? "";
+  const meta = [projectName, timer.description.trim() && projectName ? `· ${timer.description.trim()}` : ""]
+    .filter(Boolean)
+    .join(" ");
   const total = sessions.reduce((s, x) => s + x.secs, 0);
-  const count = sessions.length;
-  const projectName = projects.find((p) => p.id === timer.project_id)?.name ?? null;
-  const description = timer.description.trim();
 
   return (
-    <PanelCard className="overflow-hidden p-0">
-      <CardContent className="flex flex-col items-center gap-3 px-5 py-5 text-center">
-        <span
-          className={cn(
-            "inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wider",
-            running ? "bg-success/12 text-success" : "bg-muted text-muted-foreground",
-          )}
-        >
-          <span
-            className={cn(
-              "size-1.5 rounded-full",
-              running ? "animate-pulse bg-success" : "bg-muted-foreground/50",
-            )}
-          />
-          {running ? "Recording" : "Not tracking"}
-        </span>
-
-        <div className="flex items-center font-heading tabular text-primary">
-          <Digit>{hh}</Digit>
-          <Colon />
-          <Digit>{mm}</Digit>
-          <Colon />
-          <Digit>{ss}</Digit>
+    <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-success/30 bg-gradient-to-b from-success/[0.08] to-transparent shadow-sm">
+      <div className="px-4 pb-3.5 pt-3.5 text-center">
+        {/* Recording badge — pill with pulsing dot */}
+        <div className="mb-3 inline-flex items-center gap-1.5 rounded-full border border-success/25 bg-success/12 px-2 py-0.5">
+          <span className="relative flex h-1.5 w-1.5" aria-hidden>
+            <span className="absolute h-full w-full animate-ping rounded-full bg-success opacity-70" />
+            <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
+          </span>
+          <span className="text-[9px] font-semibold uppercase tracking-[0.14em] text-success">
+            Recording
+          </span>
         </div>
 
-        {running ? (
-          <div className="min-w-0">
-            <p className="truncate text-[15px] font-semibold">
-              {description || "Untitled session"}
-            </p>
-            {projectName && (
-              <p className="truncate text-[11px] text-muted-foreground">{projectName}</p>
-            )}
-          </div>
-        ) : (
-          <p className="text-[12px] text-muted-foreground">
-            Pick a project below to start tracking.
+        {/* Timer numerals — the hero */}
+        <Numerals secs={timer.elapsed_secs} />
+
+        <p
+          className="mt-3 truncate px-2 text-[13px] font-semibold leading-tight tracking-[-0.005em] text-foreground"
+          title={title}
+        >
+          {title}
+        </p>
+        {meta && (
+          <p className="mt-0.5 truncate px-2 text-[10.5px] leading-snug text-muted-foreground" title={meta}>
+            {meta}
           </p>
         )}
 
-        {running && (
-          <Button size="lg" onClick={onStop} className="mt-1 w-full gap-2">
-            <Square className="fill-current" />
-            Stop Timer
-          </Button>
-        )}
-      </CardContent>
-
-      <div className="flex items-center justify-between border-t border-border/60 bg-muted/40 px-4 py-2.5">
-        <span className="text-[11px] text-muted-foreground">
-          {count} {count === 1 ? "session" : "sessions"} today
-        </span>
-        <span className="tabular text-[12px] font-semibold">{formatCountdown(total)}</span>
+        {/* Stop button — outline on the tinted field so the accent stays dominant. */}
+        <Button
+          className={cn(
+            "mt-3.5 h-9 w-full gap-2 text-[12.5px] font-semibold",
+            "border border-destructive/25 bg-card text-destructive hover:border-destructive/40 hover:bg-card",
+            "shadow-sm hover:shadow active:scale-[.985]",
+          )}
+          onClick={onStop}
+          disabled={loading}
+        >
+          {loading ? (
+            <span className="opacity-80">Stopping…</span>
+          ) : (
+            <>
+              <StopIcon />
+              Stop Timer
+            </>
+          )}
+        </Button>
       </div>
-    </PanelCard>
+
+      {/* Stats strip */}
+      <div className="flex items-center justify-between border-t border-success/20 bg-success/[0.05] px-4 py-2">
+        <span className="text-[10px] font-medium tracking-[0.005em] text-muted-foreground">
+          {sessions.length} session{sessions.length !== 1 ? "s" : ""} today
+        </span>
+        <span className="tabular-nums font-mono text-[11px] font-bold text-foreground/85">
+          {formatWorked(total)}
+        </span>
+      </div>
+    </div>
   );
 }
 
-function Digit({ children }: { children: ReactNode }) {
+/** HH:MM:SS numerals in TaskFlow's per-digit style. Driven by the 1 s snapshot poll. */
+function Numerals({ secs }: { secs: number }) {
+  const [hh, mm, ss] = formatElapsed(secs).split(":");
   return (
-    <span className="text-[46px] font-semibold leading-none tracking-tight">{children}</span>
+    <span
+      className="block font-mono text-[38px] font-bold leading-none tracking-[-0.02em] tabular-nums text-success"
+      aria-label={`${hh}:${mm}:${ss} elapsed`}
+    >
+      {hh}
+      <span className="opacity-60">:</span>
+      {mm}
+      <span className="opacity-60">:</span>
+      {ss}
+    </span>
   );
 }
 
-function Colon() {
+function StopIcon() {
   return (
-    <span className="px-1.5 text-[38px] font-semibold leading-none text-primary/40">:</span>
+    <svg className="h-3.5 w-3.5 fill-current" viewBox="0 0 24 24" aria-hidden>
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </svg>
   );
 }
