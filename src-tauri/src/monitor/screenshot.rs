@@ -62,16 +62,20 @@ pub fn is_allowed_upload_host(url: &str) -> bool {
 /// One monitor failing to capture doesn't sink the others: each is processed independently and only
 /// its own `None` is dropped.
 pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(ScreenshotMeta, PathBuf)> {
-    let Ok(monitors) = xcap::Monitor::all() else {
+    let Ok(mut monitors) = xcap::Monitor::all() else {
         return Vec::new();
     };
+    // Primary display first, so it is always `display = 0` ("Monitor 1"); the index is then the
+    // stable physical position (a monitor that fails to capture leaves a gap rather than renumbering).
+    monitors.sort_by_key(|m| !m.is_primary().unwrap_or(false));
     let dir = screenshots_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return Vec::new();
     }
     monitors
         .into_iter()
-        .filter_map(|m| process_monitor(&m, app, blur_level, captured_at, &dir))
+        .enumerate()
+        .filter_map(|(i, m)| process_monitor(&m, app, blur_level, captured_at, i as u8, &dir))
         .collect()
 }
 
@@ -81,6 +85,7 @@ fn process_monitor(
     app: &str,
     blur_level: u8,
     captured_at: i64,
+    display: u8,
     dir: &Path,
 ) -> Option<(ScreenshotMeta, PathBuf)> {
     let rgba = monitor.capture_image().ok()?;
@@ -116,6 +121,7 @@ fn process_monitor(
         phash,
         blur_level,
         bucket_minute: captured_at.div_euclid(60_000),
+        display,
     };
     Some((meta, path))
 }
