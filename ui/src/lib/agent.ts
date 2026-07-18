@@ -39,13 +39,14 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
   // Independent reads against the real single-process core. `list_projects` and `list_sessions` hit
   // the backend (GET /v1/projects, GET /v1/me/timesheet/today); both fail soft to [] so a backend
   // outage doesn't blank the panel.
-  const [consent, capture, config, timer, identity, projects, sessions] = await Promise.all([
+  const [consent, capture, config, timer, identity, projects, tasks, sessions] = await Promise.all([
     invoke<AgentSnapshot["consent"]>("get_consent_state"),
     invoke<AgentSnapshot["capture"]>("capture_state"),
     invoke<AgentSnapshot["config"]>("effective_config"),
     invoke<AgentSnapshot["timer"]>("timer_state"),
     invoke<AgentSnapshot["identity"]>("identity"),
     invoke<AgentSnapshot["projects"]>("list_projects").catch((): AgentSnapshot["projects"] => []),
+    invoke<AgentSnapshot["tasks"]>("list_tasks").catch((): AgentSnapshot["tasks"] => []),
     invoke<AgentSnapshot["sessions"]>("list_sessions", { date: localDate() }).catch(
       (): AgentSnapshot["sessions"] => [],
     ),
@@ -70,7 +71,7 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
     config,
     timer,
     projects,
-    tasks: [],
+    tasks,
     activity: [],
     sessions,
   };
@@ -81,14 +82,18 @@ export async function grantConsent(policyVersion: number): Promise<void> {
   await invoke<ConsentState>("grant_consent", { policyVersion });
 }
 
-/** Start a session against a project, with the user's free-text description. */
-export async function startSession(projectId: string, description: string): Promise<void> {
-  if (USE_MOCK) return mock.startSession(projectId, description);
-  await invoke<TimerState>("start_timer", { projectId, description });
+/** Start a session against a project + optional task, with the user's free-text description. */
+export async function startSession(
+  projectId: string,
+  description: string,
+  taskId?: string,
+): Promise<void> {
+  if (USE_MOCK) return mock.startSession(projectId, description, taskId);
+  await invoke<TimerState>("start_timer", { projectId, description, taskId });
 }
 
 /**
- * Re-attribute the running session to another project/description. There is no atomic `switch`
+ * Re-attribute the running session to another project/task/description. There is no atomic `switch`
  * command, so against the real core this is stop + start (as the docs describe the core doing,
  * just not atomically). When nothing is running it's a plain start.
  */
@@ -96,11 +101,12 @@ export async function switchSession(
   projectId: string,
   description: string,
   running: boolean,
+  taskId?: string,
 ): Promise<void> {
-  if (!running) return startSession(projectId, description);
-  if (USE_MOCK) return mock.switchSession(projectId, description);
+  if (!running) return startSession(projectId, description, taskId);
+  if (USE_MOCK) return mock.switchSession(projectId, description, taskId);
   await invoke<TimerState>("stop_timer");
-  await invoke<TimerState>("start_timer", { projectId, description });
+  await invoke<TimerState>("start_timer", { projectId, description, taskId });
 }
 
 export async function stopTimer(): Promise<void> {

@@ -13,8 +13,8 @@ export interface Agent {
   /** Set when the core refused the last pause request (budget spent, or admin-disabled). */
   pauseRefused: boolean;
   grantConsent: () => void;
-  /** Start a session against a project + description — or switch to it if one is already running. */
-  start: (projectId: string, description: string) => void;
+  /** Start a session against a project (+ optional task) + description — or switch if one is running. */
+  start: (projectId: string, description: string, taskId?: string) => void;
   stop: () => void;
   requestPause: (secs: number) => void;
 }
@@ -69,10 +69,12 @@ export function useAgent(): Agent {
   }, [snapshot, refresh]);
 
   const start = useCallback(
-    (projectId: string, description: string) => {
+    (projectId: string, description: string, taskId?: string) => {
       if (!snapshot) return;
       // Start when idle, switch when running — one call either way.
-      void agent.switchSession(projectId, description, snapshot.timer.running).then(refresh);
+      void agent
+        .switchSession(projectId, description, snapshot.timer.running, taskId)
+        .then(refresh);
     },
     [snapshot, refresh],
   );

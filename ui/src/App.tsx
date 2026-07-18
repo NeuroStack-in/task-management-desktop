@@ -92,7 +92,7 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
     );
   }
 
-  const { consent, capture, config, timer, projects, sessions, identity } = snapshot;
+  const { consent, capture, config, timer, projects, tasks, sessions, identity } = snapshot;
 
   // Consent gates the whole panel: nothing else is actionable until it's acknowledged.
   if (!consent.granted) {
@@ -168,6 +168,7 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
           <RecordingCard
             timer={timer}
             projects={projects}
+            tasks={tasks}
             sessions={sessions}
             onStop={stop}
           />
@@ -240,7 +241,7 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
         >
           Switch Task
         </p>
-        <SwitchTaskCard projects={projects} running={running} onStart={start} />
+        <SwitchTaskCard projects={projects} tasks={tasks} running={running} onStart={start} />
       </div>
 
       {/* Footer bar. */}

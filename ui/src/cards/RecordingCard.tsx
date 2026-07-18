@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { formatElapsed, formatWorked } from "@/lib/format";
-import type { Project, Session, TimerState } from "@/lib/types";
+import type { Project, Session, Task, TimerState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -13,21 +13,25 @@ import { cn } from "@/lib/utils";
 export function RecordingCard({
   timer,
   projects,
+  tasks,
   sessions,
   onStop,
   loading,
 }: {
   timer: TimerState;
   projects: Project[];
+  tasks: Task[];
   sessions: Session[];
   onStop: () => void;
   loading?: boolean;
 }) {
-  const title = timer.description.trim() || "Working";
+  const desc = timer.description.trim();
+  const taskTitle = tasks.find((t) => t.id === timer.task_id)?.title ?? "";
+  // Title = the task if attributed, else the free-text description. Meta = project · description
+  // (only when the description adds something beyond the title).
+  const title = taskTitle || desc || "Working";
   const projectName = projects.find((p) => p.id === timer.project_id)?.name ?? "";
-  const meta = [projectName, timer.description.trim() && projectName ? `· ${timer.description.trim()}` : ""]
-    .filter(Boolean)
-    .join(" ");
+  const meta = [projectName, desc && desc !== title ? `· ${desc}` : ""].filter(Boolean).join(" ");
   const total = sessions.reduce((s, x) => s + x.secs, 0);
 
   return (

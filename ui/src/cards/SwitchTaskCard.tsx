@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import type { Project } from "@/lib/types";
+import type { Project, Task } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -14,30 +14,42 @@ import { cn } from "@/lib/utils";
  */
 export function SwitchTaskCard({
   projects,
+  tasks,
   running,
   onStart,
   onRefresh,
   loading,
 }: {
   projects: Project[];
+  tasks: Task[];
   running: boolean;
-  onStart: (projectId: string, description: string) => void;
+  onStart: (projectId: string, description: string, taskId?: string) => void;
   onRefresh?: () => void;
   loading?: boolean;
 }) {
   const [projectId, setProjectId] = useState("");
+  const [taskId, setTaskId] = useState("");
   const [description, setDescription] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const descRef = useRef<HTMLInputElement>(null);
 
   const selected = projects.find((p) => p.id === projectId) ?? null;
+  const projectTasks = tasks.filter((t) => t.project_id === projectId);
   const canStart = description.trim().length > 0 && !!selected;
+
+  function pickTask(id: string) {
+    setTaskId(id);
+    // Autofill the description with the task title if empty — TaskFlow's behaviour.
+    const t = tasks.find((x) => x.id === id);
+    if (t && !description.trim()) setDescription(t.title);
+  }
 
   function start() {
     if (!canStart) return;
-    onStart(selected!.id, description.trim());
+    onStart(selected!.id, description.trim(), taskId || undefined);
     setDescription("");
     setProjectId("");
+    setTaskId("");
   }
 
   function refresh() {
@@ -80,8 +92,22 @@ export function SwitchTaskCard({
           icon={<ProjectIcon />}
           searchPlaceholder="Search projects…"
           options={projects.map((p) => ({ value: p.id, label: p.name, swatch: colorFor(p.name) }))}
-          onChange={setProjectId}
+          onChange={(v) => {
+            setProjectId(v);
+            setTaskId("");
+          }}
         />
+
+        {selected && projectTasks.length > 0 && (
+          <Dropdown
+            value={taskId}
+            placeholder="Select Task"
+            icon={<TaskIcon />}
+            searchPlaceholder="Search tasks…"
+            options={projectTasks.map((t) => ({ value: t.id, label: t.title }))}
+            onChange={pickTask}
+          />
+        )}
 
         <button
           type="button"
@@ -283,6 +309,14 @@ function ProjectIcon() {
   return (
     <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8" aria-hidden>
       <path strokeLinecap="round" strokeLinejoin="round" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7" />
+    </svg>
+  );
+}
+
+function TaskIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
     </svg>
   );
 }

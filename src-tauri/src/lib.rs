@@ -123,6 +123,7 @@ pub fn run() {
             commands::panel::request_pause,
             commands::panel::identity,
             commands::panel::list_projects,
+            commands::panel::list_tasks,
             commands::panel::list_sessions,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.

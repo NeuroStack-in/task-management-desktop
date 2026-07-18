@@ -204,6 +204,20 @@ pub async fn list_projects(
     crate::api::projects::fetch_projects(&client, &ingest_url, &id_token).await
 }
 
+/// The signed-in user's assigned tasks (with titles) for the task picker — `GET /v1/me/tasks`.
+/// Empty when signed out.
+#[tauri::command]
+pub async fn list_tasks(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::api::tasks::TaskDto>, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Ok(Vec::new());
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    crate::api::tasks::fetch_tasks(&client, &ingest_url, &id_token).await
+}
+
 // ── today's sessions (backend-fed) ───────────────────────────────────────────
 
 /// The signed-in user's folded time entries for `date` (the client's local `YYYY-MM-DD`), aggregated

@@ -62,23 +62,14 @@ export interface Project {
 }
 
 /**
- * A task the timer can be attributed to, with the project it belongs to.
- *
- * Field names mirror the core's IPC contract, which already carries a project:
- * `TrayCommand::StartTimer { task_id, project_id, description }`
- * (crates/agent-shared/src/ipc.rs:37). `billable` matches the web app's TaskOption
- * (mock-time.ts:23) and has no agent-side meaning — it's display only.
- *
- * PROPOSED — no command returns these yet. `start_timer(task_id)` takes an id, so the core
- * can *consume* a task selection; it can't supply the list, and its Tauri command doesn't
- * yet expose the `project_id`/`description` the IPC command underneath already accepts.
+ * A task the timer can be attributed to. Real, from `GET /v1/me/tasks` (`list_tasks`) — the assignee's
+ * tasks with titles (the backend batch-gets titles that GSI1 doesn't project). The project *name* is
+ * looked up from the `projects` list by `project_id`, so it isn't carried here.
  */
 export interface Task {
   id: string;
   title: string;
   project_id: string;
-  project_name: string;
-  billable: boolean;
 }
 
 /**
