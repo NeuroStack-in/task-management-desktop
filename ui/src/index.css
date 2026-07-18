@@ -1,3 +1,277 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/*
+ * Design tokens — shadcn/ui's HSL variable system layered on top of
+ * the pre-existing --color-* vars that earlier components use. The
+ * two sets stay in sync so a mid-migration TimerView (half old, half
+ * new) renders coherently.
+ *
+ * shadcn tokens are declared as SPACE-SEPARATED HSL triples (no
+ * surrounding hsl(), no commas) so Tailwind can combine them with
+ * opacity modifiers: bg-primary/50, text-foreground/70, etc.
+ */
+@layer base {
+  /* ── Light Theme ── */
+  :root {
+    /* shadcn tokens (new) */
+    --background:          240 9% 97%;   /* neutral-50 equiv */
+    --foreground:          240 10% 3.9%;
+    --card:                0 0% 100%;
+    --card-foreground:     240 10% 3.9%;
+    --popover:             0 0% 100%;
+    --popover-foreground:  240 10% 3.9%;
+    --primary:             239 84% 67%;  /* indigo-500 preserved */
+    --primary-foreground:  0 0% 100%;
+    --secondary:           240 5% 96%;
+    --secondary-foreground:240 6% 10%;
+    --muted:               240 5% 96%;
+    --muted-foreground:    240 4% 46%;
+    --accent:              240 5% 96%;
+    --accent-foreground:   240 6% 10%;
+    --destructive:         0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border:              240 6% 90%;
+    --input:               240 6% 90%;
+    --ring:                239 84% 67%;
+    --radius:              0.5rem;
+
+    /* legacy --color-* tokens, kept in lock-step with the shadcn
+       ones above so any component that still references them
+       renders with the same palette mid-migration. */
+    --color-bg: #f6f6f9;
+    --color-surface: #ffffff;
+    --color-surface-hover: #f9f9fc;
+    --color-surface-alt: #f0f0f5;
+    --color-border: #e8e8ee;
+    --color-border-light: #f0f0f5;
+    --color-text: #1a1a2e;
+    --color-text-secondary: #6b7194;
+    --color-text-muted: #9ca3bf;
+    --color-primary: #6366f1;
+    --color-primary-hover: #4f46e5;
+    --color-primary-light: #eef2ff;
+    --color-live: #10b981;
+    --color-live-bg: rgba(16, 185, 129, 0.08);
+    --color-live-border: rgba(16, 185, 129, 0.2);
+    --color-live-text: #059669;
+    --color-danger: #ef4444;
+    --color-danger-bg: rgba(239, 68, 68, 0.08);
+    --color-danger-border: rgba(239, 68, 68, 0.15);
+    --shadow-card: 0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.03);
+  }
+
+  /* ── Dark Theme ── */
+  .dark {
+    --background:          240 10% 3.9%;
+    --foreground:          0 0% 98%;
+    --card:                240 7% 10%;
+    --card-foreground:     0 0% 98%;
+    --popover:             240 7% 10%;
+    --popover-foreground:  0 0% 98%;
+    --primary:             234 89% 74%;  /* indigo-400 for dark */
+    --primary-foreground:  240 6% 10%;
+    --secondary:           240 4% 16%;
+    --secondary-foreground:0 0% 98%;
+    --muted:               240 4% 16%;
+    --muted-foreground:    240 5% 65%;
+    --accent:              240 4% 16%;
+    --accent-foreground:   0 0% 98%;
+    --destructive:         0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border:              240 4% 16%;
+    --input:               240 4% 16%;
+    --ring:                234 89% 74%;
+
+    /* legacy --color-* tokens (dark) */
+    --color-bg: #0f1117;
+    --color-surface: #191b24;
+    --color-surface-hover: #1f222c;
+    --color-surface-alt: #252836;
+    --color-border: #232636;
+    --color-border-light: #1c1f2a;
+    --color-text: #e4e4ec;
+    --color-text-secondary: #9ca3bf;
+    --color-text-muted: #6b7194;
+    --color-primary: #818cf8;
+    --color-primary-hover: #6366f1;
+    --color-primary-light: #1e1b4b;
+    --color-live: #34d399;
+    --color-live-bg: rgba(16, 185, 129, 0.1);
+    --color-live-border: rgba(16, 185, 129, 0.2);
+    --color-live-text: #6ee7b7;
+    --color-danger: #f87171;
+    --color-danger-bg: rgba(239, 68, 68, 0.1);
+    --color-danger-border: rgba(239, 68, 68, 0.2);
+    --shadow-card: 0 1px 3px rgba(0,0,0,0.2), 0 4px 12px rgba(0,0,0,0.15);
+    color-scheme: dark;
+  }
+
+  /* Lock the document to exactly the Wails window. Without this the
+     default 8 px body margin + an h-screen (=100vh) child spilled
+     past the window, causing the whole page to scroll and the
+     internal flex-1 overflow-y-auto region to never kick in. */
+  html, body, #app {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  /* Focus-visible ring on every interactive element — a11y win from
+     shadcn's conventions. :focus (without -visible) is noisy when
+     clicking; :focus-visible only shows on keyboard nav. */
+  *:focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  /* Don't double-up: explicit ring utility wins over the global rule. */
+  .focus-ring:focus-visible {
+    outline: none;
+    @apply ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
+}
+
+/*
+ * Legacy component classes — kept unchanged so any file that hasn't
+ * been migrated yet still works. New code imports <Button>, <Input>,
+ * <Card> etc. from src/components/ui/ instead of these.
+ */
+@layer components {
+  .btn-primary {
+    @apply px-4 py-2 rounded-xl font-semibold text-[13px] text-white transition-all
+           disabled:opacity-40 disabled:cursor-not-allowed;
+    background: var(--color-primary);
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
+
+  .btn-stop {
+    @apply px-4 py-1.5 rounded-xl text-[12px] font-bold transition-all disabled:opacity-40;
+    background: var(--color-danger-bg);
+    color: var(--color-danger);
+    border: 1px solid var(--color-danger-border);
+  }
+  .btn-stop:hover:not(:disabled) {
+    filter: brightness(1.15);
+  }
+
+  .btn-meeting {
+    @apply py-2 px-4 rounded-xl text-[13px] font-semibold transition-all disabled:opacity-40;
+    background: var(--color-surface-hover);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border);
+  }
+  .btn-meeting:hover:not(:disabled) {
+    background: var(--color-surface-alt);
+    color: var(--color-text);
+  }
+
+  .btn-ghost {
+    color: var(--color-text-muted);
+    @apply text-[12px] transition-colors;
+  }
+  .btn-ghost:hover { color: var(--color-text-secondary); }
+
+  .input {
+    @apply w-full px-3 py-2 rounded-xl text-[13px] transition-all;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+  }
+  .input::placeholder { color: var(--color-text-muted); }
+  .input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  }
+
+  .timer-display {
+    @apply font-mono font-bold tracking-tight;
+    color: var(--color-live-text);
+  }
+
+  .card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    box-shadow: var(--shadow-card);
+  }
+}
+
+
+/* ─────────────────────────────────────────────────────────────
+   Custom keyframes for delight-tier polish (P2 batch).
+   Layer-base so they sit alongside the design tokens and ship
+   with the app stylesheet, not behind a JS animation lib.
+   ───────────────────────────────────────────────────────────── */
+
+@layer base {
+  /* recording-ignite — 250ms scale + emerald glow when the timer
+     transitions stopped→active. Drives the "wow it lit up" feel
+     instead of the previous instant card-appearance. P2-16. */
+  @keyframes recording-ignite {
+    0% {
+      opacity: 0;
+      transform: scale(0.96);
+      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.0);
+    }
+    60% {
+      opacity: 1;
+      transform: scale(1.012);
+      box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.18);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1);
+      box-shadow: 0 1px 2px rgba(15, 17, 35, 0.04),
+                  0 8px 20px -12px rgba(16, 185, 129, 0.18);
+    }
+  }
+  .recording-ignite {
+    animation: recording-ignite 0.42s cubic-bezier(.2, .7, .2, 1.2) both;
+  }
+
+  /* digit-tick — used by the per-digit timer animation (P2-17).
+     Each digit slides up 100% of its own height, fading as it
+     leaves. The new digit fades in at its final position. */
+  @keyframes digit-tick {
+    0%   { opacity: 0; transform: translateY(35%); }
+    50%  { opacity: 0.65; }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  .digit-tick {
+    animation: digit-tick 0.32s cubic-bezier(.2, .8, .2, 1) both;
+  }
+
+  /* goal-pulse — sticky soft pulse on the day total when the
+     daily goal has been met. Subtle gold-into-emerald glow so it
+     reads as celebration without being a confetti cannon. P2-18. */
+  @keyframes goal-pulse {
+    0%, 100% {
+      text-shadow: 0 0 0 rgba(16, 185, 129, 0);
+    }
+    50% {
+      text-shadow: 0 0 8px rgba(16, 185, 129, 0.45);
+    }
+  }
+  .goal-pulse {
+    animation: goal-pulse 2.4s ease-in-out infinite;
+  }
+}
+

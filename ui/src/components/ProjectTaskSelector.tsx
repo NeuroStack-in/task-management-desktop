@@ -1,5 +1,9 @@
 import { useMemo, useState } from "preact/hooks";
 import { PROJECTS, TASKS } from "../lib/mock";
+import { Button } from "./ui/Button";
+import { Card } from "./ui/Card";
+import { Input } from "./ui/Input";
+import { Label } from "./ui/Label";
 
 export interface Selection {
   projectId: string;
@@ -7,9 +11,7 @@ export interface Selection {
   description: string;
 }
 
-// Project → task, with a **mandatory description** (a binding product decision, BUILD-PLAN §3). The
-// description can't be sent to the server until the §6 contract PR adds `TimerStarted.description`,
-// but the UI enforces it now so the requirement is real from day one.
+// Project → task, with a mandatory description (a binding product decision, BUILD-PLAN §3).
 export function ProjectTaskSelector({
   onStart,
   onCancel,
@@ -24,62 +26,65 @@ export function ProjectTaskSelector({
 
   function onProjectChange(id: string) {
     setProjectId(id);
-    const first = TASKS.find((t) => t.projectId === id);
-    setTaskId(first?.id ?? "");
+    setTaskId(TASKS.find((t) => t.projectId === id)?.id ?? "");
   }
 
   const canStart = projectId !== "" && taskId !== "" && description.trim().length > 0;
+  const selectCls =
+    "flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
   return (
-    <div class="flex flex-col gap-3">
-      <h2 class="text-sm font-semibold">Start a timer</h2>
+    <Card class="space-y-3 p-4">
+      <h2 class="text-[13px] font-semibold text-foreground">Start a timer</h2>
 
-      <label class="text-xs text-slate-400">Project</label>
-      <select
-        value={projectId}
-        onChange={(e) => onProjectChange((e.target as HTMLSelectElement).value)}
-        class="rounded-md bg-slate-800 px-3 py-2 text-sm outline-none"
-      >
-        {PROJECTS.map((p) => (
-          <option value={p.id}>{p.name}</option>
-        ))}
-      </select>
+      <div class="space-y-1">
+        <Label class="uppercase tracking-[0.08em] text-muted-foreground">Project</Label>
+        <select
+          value={projectId}
+          onChange={(e) => onProjectChange((e.target as HTMLSelectElement).value)}
+          class={selectCls}
+        >
+          {PROJECTS.map((p) => (
+            <option value={p.id}>{p.name}</option>
+          ))}
+        </select>
+      </div>
 
-      <label class="text-xs text-slate-400">Task</label>
-      <select
-        value={taskId}
-        onChange={(e) => setTaskId((e.target as HTMLSelectElement).value)}
-        class="rounded-md bg-slate-800 px-3 py-2 text-sm outline-none"
-      >
-        {tasks.map((t) => (
-          <option value={t.id}>{t.name}</option>
-        ))}
-      </select>
+      <div class="space-y-1">
+        <Label class="uppercase tracking-[0.08em] text-muted-foreground">Task</Label>
+        <select
+          value={taskId}
+          onChange={(e) => setTaskId((e.target as HTMLSelectElement).value)}
+          class={selectCls}
+        >
+          {tasks.map((t) => (
+            <option value={t.id}>{t.name}</option>
+          ))}
+        </select>
+      </div>
 
-      <label class="text-xs text-slate-400">Description (required)</label>
-      <input
-        type="text"
-        placeholder="What are you working on?"
-        value={description}
-        onInput={(e) => setDescription((e.target as HTMLInputElement).value)}
-        class="rounded-md bg-slate-800 px-3 py-2 text-sm outline-none placeholder:text-slate-500"
-      />
+      <div class="space-y-1">
+        <Label class="uppercase tracking-[0.08em] text-muted-foreground">Description (required)</Label>
+        <Input
+          type="text"
+          placeholder="What are you working on?"
+          value={description}
+          onInput={(e) => setDescription((e.target as HTMLInputElement).value)}
+        />
+      </div>
 
-      <div class="flex gap-2">
-        <button
+      <div class="flex gap-2 pt-1">
+        <Button
+          class="flex-1"
           disabled={!canStart}
           onClick={() => onStart({ projectId, taskId, description: description.trim() })}
-          class="flex-1 rounded-md bg-teal-600 px-4 py-2 text-sm font-medium hover:bg-teal-500 disabled:opacity-50"
         >
           Start
-        </button>
-        <button
-          onClick={onCancel}
-          class="rounded-md bg-slate-800 px-4 py-2 text-sm font-medium hover:bg-slate-700"
-        >
+        </Button>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
-    </div>
+    </Card>
   );
 }

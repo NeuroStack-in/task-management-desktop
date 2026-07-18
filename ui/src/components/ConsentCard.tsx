@@ -1,8 +1,9 @@
 import { ipc } from "../lib/ipc";
+import { Button } from "./ui/Button";
+import { Card } from "./ui/Card";
 
-// Monitoring consent — **the gate that turns capture on**. Capture (activity counts + screenshots)
-// is off by default and never runs until the user grants this (PRIVACY.md, fails closed). Without
-// this control there is no way to start monitoring from the app.
+// Monitoring consent — the gate that turns capture on. Off by default; capture (activity counts +
+// screenshots) never runs until granted (PRIVACY.md, fails closed).
 export function ConsentCard({
   granted,
   onChange,
@@ -17,37 +18,31 @@ export function ConsentCard({
   }
 
   return (
-    <div class="rounded-lg border border-slate-800 bg-slate-900 p-4">
+    <Card class="p-4">
       {granted ? (
         <>
-          <div class="flex items-center gap-2 text-sm font-medium text-teal-400">
-            <span class="h-2 w-2 rounded-full bg-teal-400" /> Monitoring is on
+          <div class="flex items-center gap-2 text-[13px] font-semibold text-emerald-500">
+            <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-500" /> Monitoring is on
           </div>
-          <p class="mt-1 text-xs text-slate-400">
+          <p class="mt-1 text-[11.5px] leading-snug text-muted-foreground">
             Activity counts and screenshots are captured <b>only while the timer runs</b>.
           </p>
-          <button
-            onClick={toggle}
-            class="mt-3 rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium hover:bg-slate-700"
-          >
+          <Button variant="secondary" size="sm" class="mt-3" onClick={toggle}>
             Turn off monitoring
-          </button>
+          </Button>
         </>
       ) : (
         <>
-          <div class="text-sm font-medium">Monitoring is off</div>
-          <p class="mt-1 text-xs text-slate-400">
+          <div class="text-[13px] font-semibold text-foreground">Monitoring is off</div>
+          <p class="mt-1 text-[11.5px] leading-snug text-muted-foreground">
             WorkPulse captures activity <b>metrics</b> (keystroke/mouse <i>counts</i> — never content)
             and screenshots while your timer runs. Nothing is captured until you turn this on.
           </p>
-          <button
-            onClick={toggle}
-            class="mt-3 rounded-md bg-teal-600 px-3 py-1.5 text-xs font-medium hover:bg-teal-500"
-          >
+          <Button size="sm" class="mt-3" onClick={toggle}>
             Turn on monitoring
-          </button>
+          </Button>
         </>
       )}
-    </div>
+    </Card>
   );
 }

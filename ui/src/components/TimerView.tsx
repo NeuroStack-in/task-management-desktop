@@ -2,6 +2,8 @@ import { useEffect, useState } from "preact/hooks";
 import { ipc } from "../lib/ipc";
 import { PROJECTS, TASKS } from "../lib/mock";
 import { ProjectTaskSelector, type Selection } from "./ProjectTaskSelector";
+import { Button } from "./ui/Button";
+import { Card } from "./ui/Card";
 
 interface Running {
   selection: Selection;
@@ -14,16 +16,13 @@ function label(id: string, list: { id: string; name: string }[]): string {
 
 function elapsed(fromMs: number): string {
   const s = Math.max(0, Math.floor((Date.now() - fromMs) / 1000));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(h)}:${pad(m)}:${pad(sec)}`;
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
 
-// The timer surface: a project→task selector that gates start, then a running card with an elapsed
-// clock. Elapsed ticks off the local clock for now; serverClock (the timer's authoritative source)
-// lands with the sender's server-offset clock (BUILD-PLAN risk #9).
+// The timer surface — a project→task selector that gates start, then a running card with a live
+// elapsed clock. Ticks off the local clock for now (serverClock lands with the sender's server-offset
+// clock, BUILD-PLAN risk #9).
 export function TimerView() {
   const [selecting, setSelecting] = useState(false);
   const [running, setRunning] = useState<Running | null>(null);
@@ -65,20 +64,22 @@ export function TimerView() {
   if (running) {
     const { selection } = running;
     return (
-      <div class="flex flex-col gap-2 rounded-lg bg-slate-900 p-4">
-        <div class="font-mono text-3xl tabular-nums">{elapsed(running.startedAt)}</div>
-        <div class="text-sm text-slate-300">{label(selection.taskId, TASKS)}</div>
-        <div class="text-xs text-slate-500">
+      <Card class="recording-ignite border-emerald-500/25 p-5">
+        <div class="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-500">
+          <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" /> Recording
+        </div>
+        <div class="timer-display mt-2 text-[40px] leading-none tabular-nums">
+          {elapsed(running.startedAt)}
+        </div>
+        <div class="mt-3 text-[13px] font-medium text-foreground">{label(selection.taskId, TASKS)}</div>
+        <div class="text-[11.5px] text-muted-foreground">
           {label(selection.projectId, PROJECTS)} · {selection.description}
         </div>
-        {error && <p class="text-xs text-rose-400">{error}</p>}
-        <button
-          onClick={stop}
-          class="mt-2 rounded-md bg-rose-600 px-4 py-2 text-sm font-medium hover:bg-rose-500"
-        >
+        {error && <p class="mt-2 text-[11.5px] text-destructive">{error}</p>}
+        <Button variant="destructive" size="sm" class="mt-4 w-full" onClick={stop}>
           Stop timer
-        </button>
-      </div>
+        </Button>
+      </Card>
     );
   }
 
@@ -87,17 +88,28 @@ export function TimerView() {
   }
 
   return (
-    <div class="flex flex-col gap-2">
-      {error && <p class="text-xs text-rose-400">{error}</p>}
-      <button
-        onClick={() => setSelecting(true)}
-        class="rounded-md bg-teal-600 px-4 py-2 text-sm font-medium hover:bg-teal-500"
-      >
+    <Card class="p-5 text-center">
+      <div class="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
+        <svg
+          class="h-5 w-5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 8v4l3 2" />
+        </svg>
+      </div>
+      {error && <p class="mb-2 text-[11.5px] text-destructive">{error}</p>}
+      <Button class="w-full" onClick={() => setSelecting(true)}>
         Start timer
-      </button>
-      <p class="text-xs text-slate-500">
+      </Button>
+      <p class="mt-2 text-[11px] text-muted-foreground">
         Activity &amp; screenshots are captured only while the timer runs.
       </p>
-    </div>
+    </Card>
   );
 }
