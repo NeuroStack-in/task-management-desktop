@@ -4,6 +4,22 @@
 export function friendlyError(err: unknown): string {
   const raw = typeof err === "string" ? err : (err as any)?.message || String(err);
 
+  // WorkPulse agent `domain:reason` codes (from the Rust core).
+  if (raw.includes("auth:not_configured"))
+    return "This build isn't set up yet — the Cognito Client ID (WP_COGNITO_CLIENT_ID) is missing. See docs/RUNBOOK.md.";
+  if (raw.includes("USER_PASSWORD_AUTH") && raw.includes("not enabled"))
+    return "Password sign-in isn't enabled on the server yet — the auth stack needs deploying.";
+  if (raw.includes("auth:network") || raw.includes("config:network"))
+    return "Can't reach the server. Check your internet connection.";
+  if (raw.includes("auth:unexpected_challenge") || raw.includes("auth:no_result"))
+    return "Unexpected response from sign-in. Please try again.";
+  if (raw.includes("auth:cognito:")) {
+    // auth:cognito:<status>:<body> — surface a clean message, not the raw AWS blob.
+    if (raw.includes("Incorrect username or password") || raw.includes("NotAuthorized"))
+      return "Wrong email or password. Please try again.";
+    return "Sign-in failed. Check your credentials and try again.";
+  }
+
   // Auth errors
   if (raw.includes("UserNotFoundException") || raw.includes("User does not exist"))
     return "Account not found. Check your email or employee ID.";
