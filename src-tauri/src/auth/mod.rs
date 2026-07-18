@@ -158,6 +158,16 @@ impl AuthManager {
         }
     }
 
+    /// The signed-in user's display name + email for the panel, from the ID-token claims. `None` when
+    /// signed out. Uses the `name`/`email` claims — **never** the Cognito `username`/`sub` UUID, which
+    /// is what made the header show a hex string.
+    pub fn identity(&self) -> Option<(String, String)> {
+        let guard = self.tokens.read().unwrap();
+        let t = guard.as_ref()?;
+        let claims = token::decode_id_claims(&t.id_token)?;
+        Some((claims.display_name(), claims.email.clone()))
+    }
+
     fn set(&self, t: Tokens) {
         let _ = token_store::store(REFRESH_KEY, t.refresh_token.as_bytes());
         *self.tokens.write().unwrap() = Some(t);

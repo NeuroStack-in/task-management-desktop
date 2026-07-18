@@ -247,50 +247,15 @@ pub struct IdentityDto {
     pub avatar_url: String,
 }
 
-/// Who this device reports as — from the Cognito ID-token claims. `None` when signed out (the panel
-/// hides the avatar rather than inventing a person).
+/// Who this device reports as — the person's name + email from the Cognito ID-token claims (the
+/// `name`/`email` claims, never the `username`/`sub` UUID). `None` when signed out (the panel hides
+/// the avatar rather than inventing a person).
 #[tauri::command]
 pub fn identity(state: State<'_, AppState>) -> Option<IdentityDto> {
-    let s = state.auth.status();
-    if !s.signed_in {
-        return None;
-    }
-    let email = s.username.clone().unwrap_or_default();
-    let name = display_name(&email);
+    let (name, email) = state.auth.identity()?;
     Some(IdentityDto {
         name,
         email,
         avatar_url: String::new(),
     })
-}
-
-/// A friendly display name from an email local-part (`alex.morgan@…` → `Alex Morgan`).
-fn display_name(email: &str) -> String {
-    let local = email.split('@').next().unwrap_or(email);
-    if local.is_empty() {
-        return email.to_string();
-    }
-    local
-        .split(['.', '_', '-'])
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            let mut c = p.chars();
-            match c.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn display_name_titlecases_the_local_part() {
-        assert_eq!(display_name("alex.morgan@acme.test"), "Alex Morgan");
-        assert_eq!(display_name("owner@acme.test"), "Owner");
-    }
 }
