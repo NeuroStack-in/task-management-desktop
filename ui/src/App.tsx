@@ -1,19 +1,23 @@
 import { LogOut } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
 import { ConsentCard } from "@/cards/ConsentCard";
-import { PauseCard } from "@/cards/PauseCard";
+import { RecordingCard } from "@/cards/RecordingCard";
 import { SessionsCard } from "@/cards/SessionsCard";
-import { StatusCard } from "@/cards/StatusCard";
-import { TimerCard } from "@/cards/TimerCard";
+import { SwitchTaskCard } from "@/cards/SwitchTaskCard";
 import { DevBar } from "@/components/DevBar";
 import { LoginForm } from "@/components/LoginForm";
-import { IdentityChip, LiveDot, StatusBadge, ThemeToggle } from "@/components/panel";
+import { LiveDot, ThemeToggle } from "@/components/panel";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
 import { useAgent } from "@/hooks/useAgent";
 import { useTheme } from "@/hooks/useTheme";
 import { USE_MOCK } from "@/lib/agent";
+import { initials, monogramGradient } from "@/lib/format";
 import { auth } from "@/lib/ipc";
+
+/** Daily tracked-hours goal shown in the header ("Xh / 4h goal"). Config-driven later. */
+const DAILY_GOAL_HOURS = 4;
 
 export default function App() {
   // Remounting Panel on scenario change resets useAgent, so preview state can't drift out of
@@ -68,16 +72,7 @@ export default function App() {
 }
 
 function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => void }) {
-  const {
-    snapshot,
-    error,
-    pauseSecs,
-    pauseRefused,
-    grantConsent,
-    toggleTimer,
-    setTask,
-    requestPause,
-  } = useAgent();
+  const { snapshot, error, grantConsent, toggleTimer, setTask } = useAgent();
   const { theme, toggle: toggleTheme } = useTheme();
 
   if (error && !snapshot) {
@@ -99,8 +94,7 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
     );
   }
 
-  const { consent, capture, config, timer } = snapshot;
-  const paused = pauseSecs > 0;
+  const { consent, capture, config, timer, tasks, sessions, identity } = snapshot;
 
   // Consent gates the whole panel: nothing else is actionable until it's acknowledged.
   // The dev chips still render, or there'd be no way back out of the First run preview.
@@ -115,46 +109,58 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
 
   // Silent mode suppresses the capture indicator by policy — the disclosure already covered it.
   const showLive = capture.capturing && !config.silent;
+  const currentTask = tasks.find((t) => t.id === timer.task_id) ?? null;
+  const todayHours = sessions.reduce((s, x) => s + x.secs, 0) / 3600;
+  const name = identity?.name ?? "You";
+
+  // Start when idle; re-attribute (switch) when already running — no stopping in between.
+  const startOrSwitch = (taskId: string) => (timer.running ? setTask(taskId) : toggleTimer(taskId));
 
   return (
     <>
-      <header className="mb-2.5 flex shrink-0 items-center gap-2">
-        <LiveDot live={showLive} />
-        <h1 className="font-heading text-[14px] font-semibold tracking-[0.2px]">WorkPulse</h1>
-        <span className="ml-auto">
-          {paused ? (
-            <StatusBadge tone="warn">paused</StatusBadge>
-          ) : (
-            <StatusBadge tone={showLive ? "on" : "neutral"}>
-              {showLive ? "monitoring" : "idle"}
-            </StatusBadge>
-          )}
-        </span>
-        <ThemeToggle theme={theme} onToggle={toggleTheme} />
-        {/* Hidden rather than faked when the core can't say who it's bound to. */}
-        {snapshot.identity && (
-          <>
-            <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-            <IdentityChip identity={snapshot.identity} />
-          </>
-        )}
-        {onSignOut && !USE_MOCK && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="Sign out"
-            aria-label="Sign out"
-            onClick={async () => {
-              try {
-                await auth.logout();
-              } finally {
-                onSignOut();
-              }
-            }}
+      <header className="mb-3 flex shrink-0 items-center gap-2.5">
+        <Avatar size="lg">
+          {identity?.avatar_url && <AvatarImage src={identity.avatar_url} alt="" />}
+          <AvatarFallback
+            className="text-[13px] font-semibold text-white"
+            style={{ background: monogramGradient(name) }}
           >
-            <LogOut />
-          </Button>
-        )}
+            {initials(name)}
+          </AvatarFallback>
+        </Avatar>
+        <div className="min-w-0">
+          <p className="truncate text-[13px] font-bold uppercase tracking-wide">{name}</p>
+          <p className="text-[11px] text-muted-foreground">
+            <span className="font-semibold text-primary">{todayHours.toFixed(1)}h</span> /{" "}
+            {DAILY_GOAL_HOURS}h goal
+          </p>
+        </div>
+
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <LiveDot live={showLive} />
+            {showLive ? "monitoring" : "idle"}
+          </span>
+          <ThemeToggle theme={theme} onToggle={toggleTheme} />
+          {onSignOut && !USE_MOCK && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              title="Sign out"
+              aria-label="Sign out"
+              className="text-muted-foreground"
+              onClick={async () => {
+                try {
+                  await auth.logout();
+                } finally {
+                  onSignOut();
+                }
+              }}
+            >
+              <LogOut />
+            </Button>
+          )}
+        </div>
       </header>
 
       {devBar}
@@ -165,28 +171,20 @@ function Panel({ devBar, onSignOut }: { devBar: ReactNode; onSignOut?: () => voi
           clipping the last row. `min-h-0` is what lets that valve work at all: without it the
           flex child refuses to shrink and overflows the panel instead. */}
       <div className="wp-enter flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-        <TimerCard
+        <RecordingCard
           timer={timer}
-          tasks={snapshot.tasks}
-          onToggle={toggleTimer}
-          onSelectTask={setTask}
+          task={currentTask}
+          sessions={sessions}
+          onStop={() => toggleTimer()}
         />
-
-        {/* Side by side: the panel is 620 wide, and stacking these left a long dead gap
-            under the last card. `items-stretch` keeps both cards the same height. */}
-        <div className="grid grid-cols-2 items-stretch gap-3">
-          <StatusCard
-            capture={capture}
-            paused={paused}
-            activity={snapshot.activity}
-            config={config}
-            consent={consent}
-          />
-          <SessionsCard sessions={snapshot.sessions} tasks={snapshot.tasks} timer={timer} />
-        </div>
-
-        <PauseCard pauseSecs={pauseSecs} refused={pauseRefused} onRequest={requestPause} />
+        <SessionsCard sessions={sessions} tasks={tasks} timer={timer} />
+        <SwitchTaskCard tasks={tasks} running={timer.running} onStart={startOrSwitch} />
       </div>
+
+      <footer className="mt-3 flex shrink-0 items-center justify-between text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+        <span className="font-semibold text-foreground/70">WorkPulse</span>
+        <span>Agent</span>
+      </footer>
     </>
   );
 }
