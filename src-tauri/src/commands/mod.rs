@@ -96,8 +96,9 @@ pub fn timer_start(
             .start(session_id, task_id, project_id, description, ts)
             .map_err(|e| format!("timer:{e}"))?
     };
-    // Buffered for the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4).
+    // Buffered for the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4), and flushed now.
     state.pending_events.lock().unwrap().push(event);
+    state.flush.notify_one(); // immediate flush — the backend learns in seconds, not ~5 min (LLD §4)
     Ok(())
 }
 
@@ -108,6 +109,7 @@ pub fn timer_stop(state: State<'_, AppState>) -> Result<(), String> {
     let event = { state.timer.lock().unwrap().stop(ts, StopReason::User) };
     if let Some(ev) = event {
         state.pending_events.lock().unwrap().push(ev);
+        state.flush.notify_one();
     }
     Ok(())
 }

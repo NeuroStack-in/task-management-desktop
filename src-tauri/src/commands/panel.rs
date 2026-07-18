@@ -151,6 +151,7 @@ pub fn start_timer(
     };
     if let Some(e) = ev {
         state.pending_events.lock().unwrap().push(e);
+        state.flush.notify_one(); // flush now — don't wait for the 300 s cycle (LLD §4)
     }
     read_timer(&state)
 }
@@ -161,6 +162,7 @@ pub fn stop_timer(state: State<'_, AppState>) -> TimerStateDto {
     let ev = state.timer.lock().unwrap().stop(ts, StopReason::User);
     if let Some(e) = ev {
         state.pending_events.lock().unwrap().push(e);
+        state.flush.notify_one(); // a stop should reflect as fast as a start
     }
     read_timer(&state)
 }

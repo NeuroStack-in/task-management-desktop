@@ -201,6 +201,7 @@ fn run(app: AppHandle) {
                 let ev = state.timer.lock().unwrap().stop(now, StopReason::Idle);
                 if let Some(e) = ev {
                     state.pending_events.lock().unwrap().push(e);
+                    state.flush.notify_one(); // an idle auto-stop should reflect as fast as a manual one
                 }
                 bucketer.seal();
                 let _ = app.emit(events::TRACKING_CHANGED, ());

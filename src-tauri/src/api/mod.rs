@@ -30,8 +30,15 @@ pub fn spawn_sender(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let http = client::api_client();
         let upload = client::upload_client();
+        // Cloned once so `select!` can await it without re-borrowing `AppState` each tick.
+        let flush = app.state::<AppState>().flush.clone();
         loop {
-            tokio::time::sleep(Duration::from_secs(CYCLE_SECS)).await;
+            // Wake on whichever comes first: the 300 s heartbeat cycle, or a timer transition asking
+            // for an immediate flush (LLD §4). Either way we assemble + drain exactly as before.
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(CYCLE_SECS)) => {}
+                _ = flush.notified() => {}
+            }
             let state = app.state::<AppState>();
 
             // Auth-gated: no token → skip (don't grow the outbox while signed out).

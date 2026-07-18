@@ -4,8 +4,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
 use wp_agent_contract::{ActivityRollup, AgentEvent, ScreenshotMeta};
 
 use crate::auth::AuthManager;
@@ -62,6 +63,10 @@ pub struct AppState {
     pub config: Mutex<ConfigCache>,
     /// Timer/attendance/policy events awaiting the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4).
     pub pending_events: Mutex<Vec<AgentEvent>>,
+    /// Signalled on any timer transition so the sender loop flushes **immediately** instead of
+    /// waiting for the 300 s cycle (LLD §4: "post TimerStarted immediately"). One permit suffices —
+    /// a burst of transitions collapses to a single extra flush.
+    pub flush: Arc<Notify>,
     /// Sealed per-minute rollups from the monitor thread, awaiting the next cycle's drain (M4).
     pub pending_activity: Mutex<Vec<ActivityRollup>>,
     /// Captured screenshots keyed by id, awaiting upload (M5).
@@ -84,6 +89,7 @@ impl AppState {
             outbox: Mutex::new(Outbox::new()),
             config: Mutex::new(ConfigCache::default()),
             pending_events: Mutex::new(Vec::new()),
+            flush: Arc::new(Notify::new()),
             pending_activity: Mutex::new(Vec::new()),
             screenshots: Mutex::new(HashMap::new()),
             consent: AtomicBool::new(false),
