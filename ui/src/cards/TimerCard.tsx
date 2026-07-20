@@ -6,6 +6,7 @@ import { PanelCard } from "@/components/panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,7 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatElapsed } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { Task, TimerState } from "@/lib/types";
+import type { Project, Task, TimerSelection, TimerState } from "@/lib/types";
 
 /**
  * The timer hero, mirroring the web app's Time Tracking hero
@@ -25,25 +26,28 @@ import type { Task, TimerState } from "@/lib/types";
  * `bg-white/15` with an inset white ring rather than keeping their semantic colour, and
  * secondary text drops to `text-feature-foreground/70..80`.
  *
- * Choosing a project filters the Task picker to that project — same as the web app
- * (`tasksForProject`). Picking a task while the timer runs switches attribution immediately,
- * so the menu is never a dead end.
+ * **A project is what a session needs; a task is optional.** That matches the core
+ * (`start_timer` takes `task_id: Option<String>`) and the server, which folds time entries per
+ * (project, description). So the project picker is fed from `list_projects` directly rather than
+ * being derived from the task list — a project with no assigned tasks is still trackable.
  */
 export function TimerCard({
   timer,
+  projects,
   tasks,
   onToggle,
-  onSelectTask,
+  onSwitch,
   onRefresh,
 }: {
   timer: TimerState;
+  projects: Project[];
   tasks: Task[];
-  onToggle: (taskId?: string | null) => void;
-  onSelectTask: (taskId: string) => void;
+  onToggle: (sel: TimerSelection) => void;
+  onSwitch: (sel: TimerSelection) => void;
   onRefresh: () => Promise<void>;
 }) {
-  // The poll already re-reads every second; this is for when the task list is visibly stale
-  // (a task added in the web app) and waiting a beat feels broken. The spin is held to a
+  // The poll already re-reads every second; this is for when the lists are visibly stale
+  // (a project added in the web app) and waiting a beat feels broken. The spin is held to a
   // minimum so a sub-100ms read still reads as "something happened".
   const [refreshing, setRefreshing] = useState(false);
 
@@ -55,50 +59,61 @@ export function TimerCard({
     );
   };
 
-  const projects = [...new Set(tasks.map((t) => t.project_name))];
-  const active = tasks.find((t) => t.id === timer.task_id) ?? null;
+  const [projectId, setProjectId] = useState<string>(() => timer.project_id ?? projects[0]?.id ?? "");
+  const [taskId, setTaskId] = useState<string | null>(() => timer.task_id);
+  const [description, setDescription] = useState(timer.description);
 
-  const [project, setProject] = useState(() => active?.project_name ?? projects[0] ?? "");
-  const [pending, setPending] = useState<Task | null>(
-    () => active ?? tasks.find((t) => t.project_name === projects[0]) ?? null,
-  );
-
-  // Keep the pickers pointed at the running task — e.g. after the core switches it, or on
-  // a remount while a timer is live.
+  // Keep the controls pointed at whatever the core is actually timing — after a switch, or on a
+  // remount while a session is live. Only while running: outside that, these are the user's
+  // in-progress choices and the poll must not stomp them every second.
   useEffect(() => {
-    if (!active) return;
-    setProject(active.project_name);
-    setPending(active);
-  }, [active?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!timer.running) return;
+    setProjectId(timer.project_id ?? "");
+    setTaskId(timer.task_id);
+    setDescription(timer.description);
+  }, [timer.running, timer.project_id, timer.task_id, timer.description]);
 
-  const inProject = tasks.filter((t) => t.project_name === project);
-  const selected = active ?? pending;
+  // Once projects arrive, adopt the first as a default rather than leaving the picker empty.
+  useEffect(() => {
+    if (!projectId && projects.length > 0) setProjectId(projects[0].id);
+  }, [projects, projectId]);
 
-  const chooseProject = (p: string) => {
-    setProject(p);
-    const first = tasks.find((t) => t.project_name === p) ?? null;
-    setPending(first);
-    // Switching project while running would silently keep timing the old task.
-    if (timer.running && first) onSelectTask(first.id);
+  const project = projects.find((p) => p.id === projectId) ?? null;
+  const inProject = tasks.filter((t) => t.project_id === projectId);
+  const task = inProject.find((t) => t.id === taskId) ?? null;
+
+  const selection = (over: Partial<TimerSelection> = {}): TimerSelection => ({
+    taskId,
+    projectId: projectId || null,
+    description: description.trim(),
+    ...over,
+  });
+
+  const chooseProject = (p: Project) => {
+    setProjectId(p.id);
+    // The old task belongs to the old project; keeping it would misattribute the session.
+    setTaskId(null);
+    if (timer.running) onSwitch(selection({ projectId: p.id, taskId: null }));
   };
 
   const chooseTask = (t: Task) => {
-    setPending(t);
-    if (timer.running) onSelectTask(t.id);
+    setTaskId(t.id);
+    if (timer.running) onSwitch(selection({ taskId: t.id }));
   };
 
-  const status = timer.running ? "Recording" : selected ? "Ready" : "No task";
+  const canStart = Boolean(projectId);
+  const status = timer.running ? "Recording" : canStart ? "Ready" : "No project";
 
   return (
     <PanelCard className="border-transparent bg-feature text-feature-foreground shadow-none">
-      <CardContent className="flex flex-col gap-3">
+      <CardContent className="flex flex-col gap-2.5">
         {/* The clock is the hero's whole point — centred and given the room. */}
         <div className="flex flex-col items-center gap-2 text-center">
           <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-feature-foreground/80">
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                timer.running ? "animate-pulse bg-white" : selected ? "bg-white/60" : "bg-white/30",
+                timer.running ? "animate-pulse bg-white" : canStart ? "bg-white/60" : "bg-white/30",
               )}
             />
             {status}
@@ -108,42 +123,64 @@ export function TimerCard({
           </span>
         </div>
 
+        {/* The server folds time entries per (project, description), so this text is the label the
+            user will see in their own timesheet — not a nicety.
+
+            While running it becomes read-only text rather than a disabled input: re-labelling a live
+            session would mean stopping and restarting it, and a locked empty box is just a dead bar
+            taking up the panel's fixed height. No description → nothing renders at all. */}
+        {timer.running ? (
+          description.trim() && (
+            <p className="truncate text-center text-[13px] text-feature-foreground/90">
+              {description}
+            </p>
+          )
+        ) : (
+          <Input
+            aria-label="What are you working on?"
+            placeholder="What are you working on?"
+            value={description}
+            onValueChange={setDescription}
+            className="h-9 border-transparent bg-white/15 px-3 text-[13px] text-feature-foreground ring-1 ring-inset ring-white/15 placeholder:text-feature-foreground/50 focus-visible:ring-2 focus-visible:ring-white/70"
+          />
+        )}
+
         <div className="flex items-center gap-2">
           <HeroPicker
             icon={FolderKanban}
-            label={project || "No project"}
+            label={project?.name ?? "No project"}
             disabled={projects.length === 0}
             width="w-56"
           >
             <p className="px-1.5 pb-1 pt-0.5 text-xs font-medium text-muted-foreground">Project</p>
             {projects.map((p) => (
               <DropdownMenuItem
-                key={p}
+                key={p.id}
                 onClick={() => chooseProject(p)}
-                className={cn("gap-2.5 rounded-lg px-1.5 py-1.5", p === project && "bg-accent/60")}
+                className={cn("gap-2.5 rounded-lg px-1.5 py-1.5", p.id === projectId && "bg-accent/60")}
               >
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                   <FolderKanban className="size-4" />
                 </span>
-                <span className="flex-1 truncate font-medium">{p}</span>
-                {p === project && <Check className="size-4 shrink-0 text-primary" />}
+                <span className="flex-1 truncate font-medium">{p.name}</span>
+                {p.id === projectId && <Check className="size-4 shrink-0 text-primary" />}
               </DropdownMenuItem>
             ))}
           </HeroPicker>
 
           <HeroPicker
             icon={ListChecks}
-            label={selected?.title ?? "Select a task"}
-            disabled={tasks.length === 0}
+            label={task?.title ?? "No task (optional)"}
+            disabled={inProject.length === 0}
             width="w-[19rem]"
           >
             <p className="flex items-center gap-1.5 px-1.5 pb-1 pt-0.5 text-xs font-medium text-muted-foreground">
               Tasks
-              <span className="font-normal text-muted-foreground/70">· {project}</span>
+              <span className="font-normal text-muted-foreground/70">· {project?.name ?? "—"}</span>
             </p>
             {inProject.map((t) => {
-              const isActive = timer.running && active?.id === t.id;
-              const isSel = !timer.running && selected?.id === t.id;
+              const isActive = timer.running && timer.task_id === t.id;
+              const isSel = !timer.running && taskId === t.id;
               return (
                 <DropdownMenuItem
                   key={t.id}
@@ -202,8 +239,8 @@ export function TimerCard({
 
           <Button
             size="sm"
-            onClick={() => onToggle(selected?.id ?? null)}
-            disabled={!selected}
+            onClick={() => onToggle(selection())}
+            disabled={!timer.running && !canStart}
             className="h-9 shrink-0 gap-1.5 rounded-xl border-transparent bg-white/15 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25"
           >
             {timer.running ? <Square className="fill-current" /> : <Play className="fill-current" />}
@@ -213,10 +250,10 @@ export function TimerCard({
 
         <p className="text-[11px] text-feature-foreground/70">
           {timer.running
-            ? "Tracking — pick another task to switch without stopping."
-            : selected
-              ? "Ready to track. Switching project changes the task list."
-              : "No tasks available from the core yet."}
+            ? "Tracking — switching project or task re-attributes without stopping the clock."
+            : projects.length === 0
+              ? "No projects yet. Ask your admin to add you to one, then hit refresh."
+              : "Pick a project and describe what you're doing. A task is optional."}
         </p>
       </CardContent>
     </PanelCard>
