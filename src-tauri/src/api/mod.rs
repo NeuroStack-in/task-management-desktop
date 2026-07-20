@@ -19,7 +19,7 @@ pub mod timesheet;
 use std::path::Path;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use wp_agent_contract::PresignedUpload;
 
 use crate::cycle::{self, SCREENSHOT_ATTEMPT_CAP};
@@ -45,6 +45,8 @@ pub fn spawn_sender(app: tauri::AppHandle) {
         let upload = client::upload_client();
         // Cloned once so `select!` can await it without re-borrowing `AppState` each tick.
         let flush = app.state::<AppState>().flush.clone();
+        // Tracks the last observed session so a sign-out can be reported once, as an edge.
+        let mut was_signed_in = false;
         loop {
             // The heartbeat interval tracks the current screenshot cadence, read fresh each cycle so a
             // policy change takes effect on the next window.
@@ -71,9 +73,20 @@ pub fn spawn_sender(app: tauri::AppHandle) {
             let state = app.state::<AppState>();
 
             // Auth-gated: no token → skip (don't grow the outbox while signed out).
+            //
+            // `id_token()` also drives the `auth:expired` edge (BUILD-PLAN.md M1: "401 →
+            // `auth:expired`"). A 401 on refresh makes `AuthManager` log itself out, so the token
+            // going from Some to None is precisely the moment the session died — as opposed to the
+            // user signing out, which lands here too but only after the UI already moved. Emitting on
+            // the edge (not every idle cycle) keeps it a one-shot the panel can act on.
             let Some(id_token) = state.auth.id_token().await else {
+                if was_signed_in {
+                    was_signed_in = false;
+                    let _ = app.emit(crate::events::AUTH_EXPIRED, ());
+                }
                 continue;
             };
+            was_signed_in = true;
             let ingest_url = state.auth.config().ingest_url.clone();
 
             refresh_location(&app).await;

@@ -121,6 +121,7 @@ pub fn run() {
             commands::panel::start_timer,
             commands::panel::stop_timer,
             commands::panel::request_pause,
+            commands::panel::pause_state,
             commands::panel::identity,
             commands::panel::list_projects,
             commands::panel::list_tasks,
@@ -194,15 +195,25 @@ pub fn run() {
         .expect("error while building the WorkPulse agent");
 
     app.run(|app_handle, event| {
-        // Auto-sign-out on quit (tray Quit / Ctrl-C / SIGTERM all funnel to ExitRequested). Bounded:
-        // stop the timer with `Shutdown` and clear the session/keyring. Idempotent.
+        // Close the running session on quit (tray Quit / Ctrl-C / SIGTERM all funnel to
+        // ExitRequested), stopping the timer with `Shutdown` so the day isn't left open
+        // (BUILD-PLAN.md:97). Idempotent.
+        //
+        // The session is deliberately **not** cleared here. Tokens live in the OS keyring and refresh
+        // is automatic (ENROLLMENT.md:11); `setup()` calls `auth.restore()` at startup for exactly
+        // this reason. Signing out on every quit made that restore dead code and forced a fresh login
+        // on each launch — for an agent that autostarts at login, that is the difference between
+        // "monitoring resumes" and "monitoring silently doesn't". Sign-out is a user action
+        // (`auth_logout`), not a side effect of closing the window.
         if let RunEvent::ExitRequested { .. } = event {
             let state = app_handle.state::<AppState>();
             let ts = clock::now_epoch_ms();
-            if let Some(ev) = state.timer.lock().unwrap().stop(ts, StopReason::Shutdown) {
+            // Bound separately so the timer's MutexGuard is dropped before `state` goes out of
+            // scope at the end of the block — an inline `if let` keeps the temporary alive too long.
+            let stopped = state.timer.lock().unwrap().stop(ts, StopReason::Shutdown);
+            if let Some(ev) = stopped {
                 state.pending_events.lock().unwrap().push(ev);
             }
-            state.auth.logout();
         }
     });
 }

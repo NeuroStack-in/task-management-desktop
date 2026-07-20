@@ -176,6 +176,38 @@ pub struct PauseGrantDto {
     pub remaining_budget_secs: u64,
 }
 
+/// The live pause window, so the panel can re-attach to a pause it didn't start.
+#[derive(Serialize)]
+pub struct PauseStateDto {
+    pub paused: bool,
+    /// Seconds left on the current pause, 0 when not paused.
+    pub remaining_secs: u64,
+    pub remaining_budget_secs: u64,
+}
+
+/// Read the current pause without consuming budget.
+///
+/// The core owns the authoritative pause window (`state.rs`), but until now only `request_pause`
+/// existed — so a webview reload lost the countdown while the core stayed paused, and the panel
+/// under-reported. The UI must never track this locally: the budget is enforced core-side.
+#[tauri::command]
+pub fn pause_state(state: State<'_, AppState>) -> PauseStateDto {
+    let now = now_ms();
+    let p = state.pause.lock().unwrap();
+    let remaining_secs = p
+        .until_ms
+        .filter(|u| *u > now)
+        // Round up: a 500 ms remainder is still a paused second, and truncating would report 0
+        // while capture is genuinely still suspended.
+        .map(|u| ((u - now) as f64 / 1000.0).ceil() as u64)
+        .unwrap_or(0);
+    PauseStateDto {
+        paused: p.is_paused(now),
+        remaining_secs,
+        remaining_budget_secs: p.budget_secs,
+    }
+}
+
 #[tauri::command]
 pub fn request_pause(state: State<'_, AppState>, requested_secs: u64) -> PauseGrantDto {
     let (granted, granted_secs, remaining_budget_secs) = state
