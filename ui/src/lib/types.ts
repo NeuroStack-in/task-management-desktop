@@ -42,34 +42,27 @@ export interface PauseGrant {
 export interface TimerState {
   running: boolean;
   task_id: string | null;
-  /** The project the running session is attributed to (null in a task-only/legacy session). */
-  project_id: string | null;
-  /** What the user typed they're working on ("what are you working on?"). */
-  description: string;
   elapsed_secs: number;
 }
 
 /**
- * A project the timer can be attributed to — the "Select project" picker's rows.
+ * A task the timer can be attributed to, with the project it belongs to.
  *
- * Real: `list_projects` fetches `GET /v1/projects` with the user's JWT (id/name/billable). Mock:
- * derived from the demo task list. `billable` is display-only on the agent side.
- */
-export interface Project {
-  id: string;
-  name: string;
-  billable: boolean;
-}
-
-/**
- * A task the timer can be attributed to. Real, from `GET /v1/me/tasks` (`list_tasks`) — the assignee's
- * tasks with titles (the backend batch-gets titles that GSI1 doesn't project). The project *name* is
- * looked up from the `projects` list by `project_id`, so it isn't carried here.
+ * Field names mirror the core's IPC contract, which already carries a project:
+ * `TrayCommand::StartTimer { task_id, project_id, description }`
+ * (crates/agent-shared/src/ipc.rs:37). `billable` matches the web app's TaskOption
+ * (mock-time.ts:23) and has no agent-side meaning — it's display only.
+ *
+ * PROPOSED — no command returns these yet. `start_timer(task_id)` takes an id, so the core
+ * can *consume* a task selection; it can't supply the list, and its Tauri command doesn't
+ * yet expose the `project_id`/`description` the IPC command underneath already accepts.
  */
 export interface Task {
   id: string;
   title: string;
   project_id: string;
+  project_name: string;
+  billable: boolean;
 }
 
 /**
@@ -93,9 +86,7 @@ export type ActivitySeries = number[];
  * it needs a `sessions_today()` command to expose the roll-up.
  */
 export interface Session {
-  project_id: string;
-  /** What was worked on (the free-text description); the session's human label. */
-  description: string;
+  task_id: string;
   secs: number;
 }
 
@@ -125,8 +116,6 @@ export interface AgentSnapshot {
   capture: CaptureState;
   config: TrackingConfig;
   timer: TimerState;
-  /** The user's projects for the picker — real, from `GET /v1/projects`. */
-  projects: Project[];
   /** Empty until the proposed commands above exist. */
   tasks: Task[];
   activity: ActivitySeries;
