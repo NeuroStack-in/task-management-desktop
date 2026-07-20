@@ -1,10 +1,25 @@
-import { invoke } from "@tauri-apps/api/core";
-import type { AuthStatus } from "./types";
+/**
+ * Typed wrappers over the core's Tauri `#[command]`s — the webview's only entry into Rust.
+ *
+ * This is the full surface registered in src-tauri/src/lib.rs (`generate_handler!`). Invoke arg
+ * keys match the Rust parameter names exactly; DTOs come back camelCase (BUILD-PLAN §3).
+ *
+ * Ported from the previous Preact UI's lib/ipc.ts — the command contract is unchanged, only the
+ * UI on top of it is new.
+ */
 
-// Typed wrappers over the Rust `#[command]`s — the webview's only entry into the core. Invoke arg
-// keys match the Rust parameter names. `description` is forwarded on timer_start already (the core
-// ignores the extra field today; it starts riding the event after the §6 contract PR lands).
-export const ipc = {
+import { invoke } from "@tauri-apps/api/core";
+
+/** Mirrors the Rust `auth::AuthStatus`. */
+export interface AuthStatus {
+  signedIn: boolean;
+  tenantId?: string;
+  username?: string;
+  /** Set when Cognito requires a new password (first admin-created login). */
+  newPasswordSession?: string;
+}
+
+export const core = {
   // auth (M1)
   authStatus: () => invoke<AuthStatus>("auth_status"),
   authLogin: (username: string, password: string) =>
@@ -17,13 +32,12 @@ export const ipc = {
     }),
   authLogout: () => invoke<void>("auth_logout"),
 
-  // consent (M5 / PRIVACY) — capture is gated on this and defaults OFF
+  // consent (M5 / PRIVACY.md) — capture is gated on this and defaults OFF
   consentStatus: () => invoke<boolean>("consent_status"),
   setConsent: (granted: boolean) => invoke<void>("set_consent", { granted }),
 
   // timer (M0/M3)
   timerStatus: () => invoke<boolean>("timer_status"),
-  agentId: () => invoke<string>("agent_id"),
   timerStop: () => invoke<void>("timer_stop"),
   timerStart: (sessionId: string, taskId: string, projectId: string, description: string) =>
     invoke<void>("timer_start", {
@@ -32,4 +46,8 @@ export const ipc = {
       project_id: projectId,
       description,
     }),
+
+  // diagnostics / updater
+  agentId: () => invoke<string>("agent_id"),
+  checkForUpdates: () => invoke<boolean>("check_for_updates"),
 };
