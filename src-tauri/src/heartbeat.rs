@@ -3,12 +3,18 @@
 //! stays honest about an agent that is online but not currently tracking (BUILD-PLAN §4, Thread B).
 
 use sysinfo::System;
-use wp_agent_contract::Heartbeat;
+use wp_agent_contract::{GeoLocation, Heartbeat};
 
 /// Snapshot host health. `cpu_pct` needs two samples to be meaningful, so the very first cycle reads
-/// ~0 (the 300 s loop refreshes across ticks). `outbox_mb` and `idle` are supplied by the caller
-/// (the outbox knows its backlog; the monitor knows idle).
-pub fn collect(agent_version: &str, outbox_mb: f32, idle: bool) -> Heartbeat {
+/// ~0 (the 300 s loop refreshes across ticks). `outbox_mb`, `idle` and `location` are supplied by the
+/// caller (the outbox knows its backlog; the monitor knows idle; the sender caches the consent-gated
+/// location fix).
+pub fn collect(
+    agent_version: &str,
+    outbox_mb: f32,
+    idle: bool,
+    location: Option<GeoLocation>,
+) -> Heartbeat {
     let mut sys = System::new();
     sys.refresh_cpu_usage();
     sys.refresh_memory();
@@ -32,6 +38,7 @@ pub fn collect(agent_version: &str, outbox_mb: f32, idle: bool) -> Heartbeat {
         mem_pct,
         outbox_mb,
         idle,
+        location,
     }
 }
 
@@ -41,11 +48,24 @@ mod tests {
 
     #[test]
     fn collect_fills_identity_and_bounded_mem() {
-        let hb = collect("9.9.9", 1.5, true);
+        let hb = collect("9.9.9", 1.5, true, None);
         assert_eq!(hb.agent_version, "9.9.9");
         assert_eq!(hb.outbox_mb, 1.5);
         assert!(hb.idle);
         assert!(!hb.os.is_empty());
         assert!((0.0..=100.0).contains(&hb.mem_pct));
+        assert!(hb.location.is_none());
+    }
+
+    #[test]
+    fn collect_carries_a_location_when_given_one() {
+        let loc = GeoLocation {
+            lat: 12.9716,
+            lon: 77.5946,
+            accuracy_m: 40.0,
+            captured_at: 1_700_000_000_000,
+        };
+        let hb = collect("9.9.9", 0.0, false, Some(loc));
+        assert_eq!(hb.location, Some(loc));
     }
 }

@@ -161,6 +161,7 @@ mod tests {
             mem_pct: 1.0,
             outbox_mb: 0.0,
             idle: false,
+            location: None,
         }
     }
 

@@ -14,3 +14,13 @@ pub fn now_epoch_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+/// Nanosecond-resolution entropy for seeding jitter — **NOT a time source**. Never key data or
+/// buckets off this; it exists only so screenshot timing can't be predicted (sub-second precision an
+/// employee can't observe). Kept here so `SystemTime::now()` still has exactly one call site.
+pub fn entropy_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}

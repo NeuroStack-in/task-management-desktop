@@ -21,6 +21,7 @@ pub mod error;
 pub mod events;
 pub mod heartbeat;
 pub mod lifecycle;
+pub mod location;
 pub mod monitor;
 pub mod outbox;
 pub mod rules;
@@ -61,7 +62,7 @@ pub fn dump_cycle() {
     }
     b.seal();
     let rollups = b.take_sealed();
-    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), 0.0, false);
+    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), 0.0, false, None);
 
     let cycle = serde_json::json!({ "heartbeat": hb, "activity": rollups });
     println!("{}", serde_json::to_string_pretty(&cycle).unwrap());
@@ -111,6 +112,19 @@ pub fn run() {
             commands::timer_status,
             commands::agent_id,
             commands::check_for_updates,
+            // Panel (kishore's tray UI) command surface.
+            commands::panel::get_consent_state,
+            commands::panel::grant_consent,
+            commands::panel::capture_state,
+            commands::panel::effective_config,
+            commands::panel::timer_state,
+            commands::panel::start_timer,
+            commands::panel::stop_timer,
+            commands::panel::request_pause,
+            commands::panel::identity,
+            commands::panel::list_projects,
+            commands::panel::list_tasks,
+            commands::panel::list_sessions,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {

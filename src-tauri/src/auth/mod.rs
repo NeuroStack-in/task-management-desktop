@@ -158,6 +158,24 @@ impl AuthManager {
         }
     }
 
+    /// The signed-in user's display name + email for the panel, from the ID-token claims. `None` when
+    /// signed out. Uses the `name`/`email` claims — **never** the Cognito `username`/`sub` UUID, which
+    /// is what made the header show a hex string.
+    pub fn identity(&self) -> Option<(String, String)> {
+        let guard = self.tokens.read().unwrap();
+        let t = guard.as_ref()?;
+        let claims = token::decode_id_claims(&t.id_token)?;
+        // Diagnostic (presence only, not values): if the header still shows a UUID, this tells us the
+        // ID token carries no `name`/`email` claim — a Cognito app-client attribute config, not an
+        // agent bug. Falls back to the username only when both are absent.
+        tracing::info!(
+            has_name = !claims.name.trim().is_empty(),
+            has_email = !claims.email.trim().is_empty(),
+            "identity: resolving display name from ID-token claims"
+        );
+        Some((claims.display_name(), claims.email.clone()))
+    }
+
     fn set(&self, t: Tokens) {
         let _ = token_store::store(REFRESH_KEY, t.refresh_token.as_bytes());
         *self.tokens.write().unwrap() = Some(t);

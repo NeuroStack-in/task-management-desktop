@@ -27,9 +27,11 @@ pub fn assemble_and_enqueue(state: &AppState) -> u64 {
             .collect::<Vec<_>>()
     };
     let config_version = state.config.lock().unwrap().version();
+    // The consent-gated location fix the sender refreshed this cycle (None when withheld/no fix).
+    let location = *state.location.lock().unwrap();
     let mut outbox = state.outbox.lock().unwrap();
     let outbox_mb = outbox.backlog_bytes() as f32 / (1024.0 * 1024.0);
-    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), outbox_mb, false);
+    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), outbox_mb, false, location);
     outbox.enqueue_cycle(
         now_epoch_ms(),
         config_version,

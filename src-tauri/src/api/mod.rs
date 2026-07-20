@@ -1,14 +1,20 @@
-//! Backend transport — the sole network egress. **Thread B** (BUILD-PLAN §4): every 300 s, if signed
-//! in, assemble one cycle and drain the outbox to `POST /v1/agent/batch`. **Auth-gated, not
+//! Backend transport — the sole network egress. **Thread B** (BUILD-PLAN §4). Two send triggers:
+//! the **heartbeat cycle** fires on the owner's **screenshot cadence** (3/5/10 min; `Off` → 5 min
+//! fallback) and carries the heartbeat + that window's activity/screenshot-meta/location; **timer
+//! transitions** fire out-of-band (a start/stop flushes immediately, seconds not minutes). Either
+//! trigger assembles one cycle and drains the outbox to `POST /v1/agent/batch`. **Auth-gated, not
 //! timer-gated**, so the fleet table stays honest about an online-but-not-tracking agent. On each ack
 //! the outbox prunes to `watermark_seq`, and screenshot bytes go **S3-direct** to the ack's
-//! host-pinned `upload_urls` (the retry/backoff *is* the 300 s tick).
+//! host-pinned `upload_urls`.
 //!
 //! Not live-verified — needs a signed-in session against the live pool.
 
 pub mod batch;
 pub mod client;
 pub mod config;
+pub mod projects;
+pub mod tasks;
+pub mod timesheet;
 
 use std::path::Path;
 use std::time::Duration;
@@ -20,15 +26,48 @@ use crate::cycle::{self, SCREENSHOT_ATTEMPT_CAP};
 use crate::monitor::screenshot::is_allowed_upload_host;
 use crate::state::AppState;
 
-const CYCLE_SECS: u64 = 300;
+/// Fallback heartbeat interval when the owner set cadence to `Off` (no screenshots) — the fleet still
+/// needs periodic heartbeats, so we don't go silent.
+const DEFAULT_CYCLE_SECS: u64 = 300;
 
 /// Spawn the sender loop on Tauri's async (tokio) runtime.
+///
+/// Two send triggers, deliberately different:
+/// - **Heartbeat cycle** — periodic, its interval **the owner's screenshot cadence** (3/5/10 min): the
+///   batch carries the heartbeat + that window's activity/screenshot-meta/location, sent at the end of
+///   the window. Cadence `Off` falls back to 5 min so fleet health still flows.
+/// - **Timer transitions** — out-of-band: a start/stop flips `flush`, so `TimerStarted`
+///   (start + project + task) / `TimerStopped` (stop time) reach the backend in seconds, not on the
+///   cycle (LLD §4).
 pub fn spawn_sender(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let http = client::api_client();
         let upload = client::upload_client();
+        // Cloned once so `select!` can await it without re-borrowing `AppState` each tick.
+        let flush = app.state::<AppState>().flush.clone();
         loop {
-            tokio::time::sleep(Duration::from_secs(CYCLE_SECS)).await;
+            // The heartbeat interval tracks the current screenshot cadence, read fresh each cycle so a
+            // policy change takes effect on the next window.
+            let cycle_secs = {
+                let cadence = app
+                    .state::<AppState>()
+                    .config
+                    .lock()
+                    .unwrap()
+                    .get()
+                    .tracking
+                    .cadence;
+                cadence
+                    .interval_secs()
+                    .map(u64::from)
+                    .unwrap_or(DEFAULT_CYCLE_SECS)
+            };
+            // Wake on whichever comes first: the cadence-aligned heartbeat cycle, or a timer transition
+            // asking for an immediate flush. Either way we assemble + drain exactly the same.
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(cycle_secs)) => {}
+                _ = flush.notified() => {}
+            }
             let state = app.state::<AppState>();
 
             // Auth-gated: no token → skip (don't grow the outbox while signed out).
@@ -37,10 +76,29 @@ pub fn spawn_sender(app: tauri::AppHandle) {
             };
             let ingest_url = state.auth.config().ingest_url.clone();
 
+            refresh_location(&app).await;
             cycle::assemble_and_enqueue(&state);
             drain(&http, &upload, &ingest_url, &id_token, &state).await;
         }
     });
+}
+
+/// Refresh the cached device location — **consent-gated, fails closed**. With consent, capture a
+/// fresh OS fix (blocking WinRT → `spawn_blocking`) for the next heartbeat; without consent, clear any
+/// cached fix so a withdrawal takes effect on the very next cycle.
+async fn refresh_location(app: &tauri::AppHandle) {
+    let consented = app
+        .state::<AppState>()
+        .consent
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let fix = if consented {
+        tokio::task::spawn_blocking(crate::location::capture)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    *app.state::<AppState>().location.lock().unwrap() = fix;
 }
 
 /// Send oldest-first until the outbox is empty or a send fails (then retry next tick). After each ack,
