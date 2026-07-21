@@ -96,29 +96,30 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
   }
 
   return (
-    // One centred column rather than brand-top / form-middle / footer-bottom. The panel is a fixed
-    // 620×590 and the form is short, so spreading those three apart left two dead bands and read as
-    // an unfinished page; grouping them lets the surrounding space frame the card instead.
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
-      {/* 380 keeps the inputs comfortably thumb-sized without stretching into web-form territory
-          at this window width. */}
-      <div className="w-full max-w-[380px]">
-        {/* Brand lockup — the panel header is hidden behind this gate, so sign-in carries it. */}
-        <div className="mb-5 flex flex-col items-center gap-2">
-          <LogoMark className="size-11 shrink-0 rounded-[14px] shadow-sm" />
-          <div className="text-center leading-tight">
-            <h1 className="font-heading text-[15px] font-semibold tracking-[0.2px]">WorkPulse</h1>
-            <p className="text-[11px] text-muted-foreground/70">Time &amp; activity agent</p>
-          </div>
+    // Fills the panel rather than floating a narrow card in it. The window is a fixed 620×590, so a
+    // 380px card left ~210px of dead width and a band of empty space top and bottom — on a surface
+    // this small that reads as a page that failed to load rather than a deliberately airy one.
+    //
+    // The card now spans the panel and *grows* to take the leftover height (`flex-1`), with the form
+    // centred inside it. So the whitespace ends up inside the card, where it looks like padding,
+    // instead of around it, where it looked like a mistake.
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/* Brand lockup — the panel header is hidden behind this gate, so sign-in carries it. */}
+      <div className="mb-3 flex shrink-0 items-center justify-center gap-2.5">
+        <LogoMark className="size-9 shrink-0 rounded-[12px] shadow-sm" />
+        <div className="leading-tight">
+          <h1 className="font-heading text-[15px] font-semibold tracking-[0.2px]">WorkPulse</h1>
+          <p className="text-[11px] text-muted-foreground/70">Time &amp; activity agent</p>
         </div>
+      </div>
 
-        {/* The card gives the form an edge to sit against — without it the inputs float on the
-            panel background and the whole screen reads as unstyled. */}
-        <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
-          <h2 className="font-heading text-[17px] font-semibold tracking-[0.2px]">
+      {/* The card gives the form an edge to sit against — without it the inputs float on the
+          panel background and the whole screen reads as unstyled. */}
+      <div className="flex min-h-0 flex-1 flex-col justify-center rounded-2xl border border-border bg-card px-7 py-6 shadow-sm">
+          <h2 className="font-heading text-[19px] font-semibold tracking-[0.2px]">
             {challenge ? "Choose a password" : "Sign in"}
           </h2>
-          <p className="mt-0.5 text-[12px] leading-[1.45] text-muted-foreground">
+          <p className="mt-1 text-[12.5px] leading-[1.45] text-muted-foreground">
             {challenge
               ? "Your account was created by an admin. Set a password to finish signing in."
               : "Use the work account your organization set up for you."}
@@ -135,7 +136,7 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
           )}
 
           {challenge ? (
-            <form onSubmit={onSetPassword} className="mt-4 space-y-3">
+            <form onSubmit={onSetPassword} className="mt-5 space-y-4">
               <Field
                 id="wp-new-password"
                 label="New password"
@@ -161,12 +162,12 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
                   setError(null);
                 }}
               />
-              <Button type="submit" className="h-10 w-full text-[13px]" disabled={pending}>
+              <Button type="submit" className="h-11 w-full text-[14px]" disabled={pending}>
                 {pending ? "Setting password…" : "Set password and sign in"}
               </Button>
             </form>
           ) : (
-            <form onSubmit={onSubmit} className="mt-4 space-y-3">
+            <form onSubmit={onSubmit} className="mt-5 space-y-4">
               <Field
                 id="wp-email"
                 label="Work email"
@@ -193,23 +194,22 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
                 reveal={reveal}
                 onToggleReveal={() => setReveal((r) => !r)}
               />
-              <Button type="submit" className="h-10 w-full text-[13px]" disabled={pending}>
+              <Button type="submit" className="h-11 w-full text-[14px]" disabled={pending}>
                 {pending ? "Signing in…" : "Sign in"}
               </Button>
             </form>
           )}
-        </div>
-
-        {/* Compact footer: one line of assurance, not a full-width rule plus two lines of prose.
-            The shield carries the "managed device" meaning the divider label used to. */}
-        <p className="mt-3.5 flex items-start justify-center gap-1.5 px-2 text-center text-[11px] leading-[1.45] text-muted-foreground/70">
-          <ShieldCheck aria-hidden className="mt-[1px] size-3.5 shrink-0" />
-          <span>
-            Nothing is recorded until you sign in and accept the monitoring notice. Forgotten your
-            password? Your workspace admin can reset it.
-          </span>
-        </p>
       </div>
+
+      {/* Compact footer: one line of assurance, not a full-width rule plus two lines of prose.
+          The shield carries the "managed device" meaning the divider label used to. */}
+      <p className="mt-3 flex shrink-0 items-start justify-center gap-1.5 px-2 text-center text-[11px] leading-[1.45] text-muted-foreground/70">
+        <ShieldCheck aria-hidden className="mt-[1px] size-3.5 shrink-0" />
+        <span>
+          Nothing is recorded until you sign in and accept the monitoring notice. Forgotten your
+          password? Your workspace admin can reset it.
+        </span>
+      </p>
     </div>
   );
 }
@@ -260,8 +260,8 @@ function Field({
   onToggleReveal?: () => void;
 }) {
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-[12px] font-medium">
+    <div className="space-y-1.5">
+      <label htmlFor={id} className="block text-[12.5px] font-medium">
         {label}
       </label>
       <div className="relative">
@@ -270,7 +270,7 @@ function Field({
           type={type}
           autoComplete={autoComplete}
           placeholder={placeholder}
-          className={onToggleReveal ? "h-10 px-3 pr-10 text-[13px]" : "h-10 px-3 text-[13px]"}
+          className={onToggleReveal ? "h-11 px-3.5 pr-11 text-[13.5px]" : "h-11 px-3.5 text-[13.5px]"}
           value={value}
           onValueChange={onChange}
         />
@@ -280,7 +280,7 @@ function Field({
             onClick={onToggleReveal}
             aria-label={reveal ? "Hide password" : "Show password"}
             aria-pressed={reveal}
-            className="absolute inset-y-0 right-0 flex w-10 cursor-pointer items-center justify-center rounded-r-md text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="absolute inset-y-0 right-0 flex w-11 cursor-pointer items-center justify-center rounded-r-md text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
             {reveal ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
           </button>

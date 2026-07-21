@@ -59,7 +59,10 @@ export function TimerCard({
     );
   };
 
-  const [projectId, setProjectId] = useState<string>(() => timer.project_id ?? projects[0]?.id ?? "");
+  // Deliberately NOT defaulted to `projects[0]`: the server folds time entries by
+  // (project, description), so a silently pre-picked project produces a real, wrongly-attributed
+  // timesheet row the moment someone hits Start without looking. Empty until chosen.
+  const [projectId, setProjectId] = useState<string>(() => timer.project_id ?? "");
   const [taskId, setTaskId] = useState<string | null>(() => timer.task_id);
   const [description, setDescription] = useState(timer.description);
 
@@ -72,11 +75,6 @@ export function TimerCard({
     setTaskId(timer.task_id);
     setDescription(timer.description);
   }, [timer.running, timer.project_id, timer.task_id, timer.description]);
-
-  // Once projects arrive, adopt the first as a default rather than leaving the picker empty.
-  useEffect(() => {
-    if (!projectId && projects.length > 0) setProjectId(projects[0].id);
-  }, [projects, projectId]);
 
   const project = projects.find((p) => p.id === projectId) ?? null;
   const inProject = tasks.filter((t) => t.project_id === projectId);
@@ -102,7 +100,7 @@ export function TimerCard({
   };
 
   const canStart = Boolean(projectId);
-  const status = timer.running ? "Recording" : canStart ? "Ready" : "No project";
+  const status = timer.running ? "Recording" : canStart ? "Ready" : "Select a project";
 
   return (
     <PanelCard className="border-transparent bg-feature text-feature-foreground shadow-none">
@@ -148,7 +146,7 @@ export function TimerCard({
         <div className="flex items-center gap-2">
           <HeroPicker
             icon={FolderKanban}
-            label={project?.name ?? "No project"}
+            label={project?.name ?? "Select project"}
             disabled={projects.length === 0}
             width="w-56"
           >
@@ -170,7 +168,7 @@ export function TimerCard({
 
           <HeroPicker
             icon={ListChecks}
-            label={task?.title ?? "No task (optional)"}
+            label={task?.title ?? "Select task (optional)"}
             disabled={inProject.length === 0}
             width="w-[19rem]"
           >

@@ -175,6 +175,17 @@
     outline-offset: 2px;
   }
 
+  /* Edge/WebView2 injects its OWN reveal ("eye") and clear ("✕") buttons into every
+     `input[type=password]`. On Windows that lands a second, differently-drawn eye beside our
+     own toggle — two controls doing the same job, one of them not ours to style. Same family
+     of problem as the scrollbar steppers below: native chrome leaking into the webview.
+
+     Ours stays, because it is the one wired to `aria-pressed` and the polite live region. */
+  input::-ms-reveal,
+  input::-ms-clear {
+    display: none;
+  }
+
   /* Slim scrollbar, copied from the web app. `::-webkit-scrollbar-button` is not optional
      here: without it Windows renders its ▲▼ stepper arrows inside a Chromium webview, which
      is the single most "generic" thing on the panel. */

@@ -29,10 +29,23 @@ impl Outbox {
     }
 
     /// Build an outbox over a specific store, **resuming** whatever is already persisted. `next_seq`
-    /// continues past the highest persisted seq so ids never repeat across restarts.
+    /// continues past the highest seq ever assigned so ids never repeat across restarts.
+    ///
+    /// The high-water mark comes from the **sidecar**, not from the queue. Deriving it from
+    /// `queue.back()` alone was a silent data-loss bug: a prune rewrites the queue to the un-acked
+    /// remainder, so a clean restart (everything acked) found an empty file and restarted at 1.
+    /// The server dedups `(agent_id, batch_seq)` and — deliberately — skips the SQS enqueue for a
+    /// seq it has already recorded while still presigning the screenshot uploads. Net effect: the
+    /// agent re-sent seq 1..n, got `200 OK` every time, uploaded image bytes to S3, and **none of
+    /// it was ever folded**. No error surfaced on either side; the day's activity, screenshots and
+    /// locations simply never appeared.
+    ///
+    /// `max` of the two so an install that predates the sidecar still resumes correctly from its
+    /// queue instead of replaying seqs the server has already seen.
     pub fn with_store(agent_id: String, store: JsonlStore) -> Self {
         let queue: VecDeque<BatchEnvelope> = store.load().into();
-        let next_seq = queue.back().map(|b| b.batch_seq + 1).unwrap_or(1);
+        let from_queue = queue.back().map(|b| b.batch_seq).unwrap_or(0);
+        let next_seq = from_queue.max(store.load_watermark()) + 1;
         Outbox {
             agent_id,
             next_seq,
@@ -64,6 +77,12 @@ impl Outbox {
     ) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
+        // Bump the durable high-water mark before the batch is even persisted: burning a seq costs
+        // nothing (the server dedups on it, gaps are fine), whereas reusing one silently discards a
+        // whole cycle server-side. See `with_store`.
+        if let Err(e) = self.store.save_watermark(seq) {
+            tracing::error!("outbox: failed to persist seq watermark {seq}: {e}");
+        }
         let env = BatchEnvelope {
             agent_id: self.agent_id.clone(),
             batch_seq: seq,
@@ -187,6 +206,30 @@ mod tests {
         assert_eq!(enqueue(&mut ob), 3);
         ob.prune_to(2); // server accepted up to seq 2
         assert_eq!(ob.next_batch().unwrap().batch_seq, 3);
+    }
+
+    /// The regression that cost a day of real data (2026-07-21).
+    ///
+    /// Fully-acked outbox → prune empties the queue file → restart. Deriving `next_seq` from the
+    /// queue alone restarted at 1, and the server dedups `(agent_id, batch_seq)`: it skips the SQS
+    /// enqueue for a seq it already holds **while still presigning the screenshot uploads**. So the
+    /// agent got `200 OK`, uploaded bytes to S3, pruned — and nothing was ever folded. Silent, on
+    /// both sides. A seq must never be reused.
+    #[test]
+    fn seq_never_restarts_after_a_full_prune() {
+        let (store, path) = temp_store();
+        let mut ob = Outbox::with_store("test-agent".into(), store);
+        enqueue(&mut ob);
+        enqueue(&mut ob);
+        let last = enqueue(&mut ob); // 1,2,3
+        ob.prune_to(last); // server acked everything → queue file is now empty
+
+        let mut resumed = Outbox::with_store("test-agent".into(), JsonlStore::new(path));
+        assert_eq!(
+            enqueue(&mut resumed),
+            4,
+            "seq restarted after a full prune — the server would silently drop this batch"
+        );
     }
 
     #[test]

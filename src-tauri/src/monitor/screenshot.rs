@@ -16,9 +16,20 @@ use image::imageops::FilterType;
 use wp_agent_contract::ScreenshotMeta;
 
 /// Max WebP width; taller shots keep aspect.
-const MAX_WIDTH: u32 = 768;
-/// Lossy WebP quality (0–100).
-const WEBP_QUALITY: f32 = 75.0;
+///
+/// **Deliberate deviation from the LLD (owner decision, 2026-07-21).** The LLD specifies 768px in
+/// three places (§33, §592, §1035) and `BUILD-PLAN.md:209` adopts it. In practice 768px is a ~40%
+/// downscale of a 1920-wide display, which leaves on-screen text unreadable — so the review grid
+/// could not answer the one question it exists to answer ("what was this person working on?").
+/// 1280px is ~67% and legible, while still well short of shipping a native-resolution frame.
+///
+/// This weakens the "minimum useful fidelity" position in `PRIVACY.md:76`; the fidelity is now
+/// *useful* rather than *minimum*. **The LLD should be amended to match** — do not silently revert
+/// this to 768 to close the gap, and do not raise it further without the same conversation.
+const MAX_WIDTH: u32 = 1280;
+/// Lossy WebP quality (0–100). Not specified by the LLD (which fixes only the width); raised from
+/// 75 alongside the width bump, since a sharper downscale is wasted on a soft encode.
+const WEBP_QUALITY: f32 = 85.0;
 
 /// Map a blur level to a Gaussian sigma. 0 = no blur.
 fn blur_sigma(blur_level: u8) -> f32 {
@@ -145,7 +156,8 @@ mod tests {
 
     #[test]
     fn scaled_dims_preserve_aspect_and_cap_width() {
-        assert_eq!(scaled_dims(1920, 1080), (768, 432));
+        assert_eq!(scaled_dims(1920, 1080), (1280, 720)); // 16:9 stays 16:9
+        assert_eq!(scaled_dims(2560, 1600), (1280, 800)); // 16:10 stays 16:10
         assert_eq!(scaled_dims(640, 480), (640, 480)); // already under cap
     }
 
