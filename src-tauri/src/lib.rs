@@ -25,11 +25,11 @@ pub mod location;
 pub mod monitor;
 pub mod outbox;
 pub mod rules;
+pub mod session_state;
 pub mod state;
 pub mod timer;
 pub mod updater;
 pub mod util;
-pub mod session_state;
 pub mod window_size;
 
 use state::AppState;
@@ -143,10 +143,14 @@ pub fn run() {
             // the first cycle) — and, worse, would race the panel into showing the notice again.
             {
                 let persisted = crate::session_state::load();
-                app.state::<AppState>()
-                    .consent
-                    .store(persisted.restore_consent(), std::sync::atomic::Ordering::Relaxed);
-                tracing::info!("consent restored at startup: {}", persisted.restore_consent());
+                app.state::<AppState>().consent.store(
+                    persisted.restore_consent(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                tracing::info!(
+                    "consent restored at startup: {}",
+                    persisted.restore_consent()
+                );
             }
 
             tauri::async_runtime::spawn(async move {

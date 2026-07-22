@@ -12,7 +12,7 @@ use crate::state::AppState;
 /// prune land with `api::batch`.
 /// Screenshots with this many failed uploads are dropped (BUILD-PLAN §5 — a permanently-failing PUT
 /// must not re-declare its meta forever).
-pub const SCREENSHOT_ATTEMPT_CAP: u8 = 5;
+pub const SCREENSHOT_ATTEMPT_CAP: u8 = 20;
 
 pub fn assemble_and_enqueue(state: &AppState) -> u64 {
     let events = std::mem::take(&mut *state.pending_events.lock().unwrap());

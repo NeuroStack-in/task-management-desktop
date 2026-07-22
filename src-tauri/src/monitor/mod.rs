@@ -140,13 +140,14 @@ pub fn spawn_screenshots(app: AppHandle) {
             } else {
                 let state = app.state::<AppState>();
                 let mut store = state.screenshots.lock().unwrap();
-                for (meta, path) in shots {
+                for (meta, path, content_sha256) in shots {
                     store.insert(
                         meta.id.clone(),
                         crate::state::PendingShot {
                             meta,
                             path,
                             attempts: 0,
+                            content_sha256,
                         },
                     );
                 }

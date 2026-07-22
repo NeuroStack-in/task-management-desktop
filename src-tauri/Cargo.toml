@@ -45,6 +45,9 @@ xcap = { workspace = true }
 image = { workspace = true }
 webp = { workspace = true }
 image_hasher = { workspace = true }
+# Cryptographic content hash for screenshot tamper-evidence (verify bytes at upload == bytes at
+# capture). Already in the tree; pinned to 0.10.
+sha2 = "0.10"
 wp-agent-contract = { workspace = true }
 
 # Native device geolocation (precise GPS / OS positioning) for the heartbeat. Windows only for now —

@@ -20,6 +20,11 @@ pub struct PendingShot {
     pub meta: ScreenshotMeta,
     pub path: PathBuf,
     pub attempts: u8,
+    /// Lowercase-hex SHA-256 of the exact WebP bytes as written at capture. The upload re-hashes the
+    /// file and **refuses to send** if it no longer matches — so a script that replaces the buffered
+    /// image on disk can't get a forged screenshot uploaded. Tamper-evidence (detected + dropped),
+    /// held only in-process so it can't be edited alongside the file.
+    pub content_sha256: String,
 }
 
 /// Privacy-pause: a bounded window during which capture is suspended, drawn from a daily budget.

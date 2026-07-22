@@ -30,6 +30,10 @@ use crate::state::AppState;
 /// needs periodic heartbeats, so we don't go silent.
 const DEFAULT_CYCLE_SECS: u64 = 300;
 
+/// Interval for `spawn_config_poller` — one conditional (ETag) config GET per minute; a 304 except
+/// in the minute after an admin changed the policy.
+const CONFIG_POLL_SECS: u64 = 60;
+
 /// Spawn the sender loop on Tauri's async (tokio) runtime.
 ///
 /// Two send triggers, deliberately different:
@@ -96,6 +100,37 @@ pub fn spawn_sender(app: tauri::AppHandle) {
     });
 }
 
+/// Spawn the fast config poller — the "reflect settings changes ASAP" rail.
+///
+/// The batch cycle already pulls config on a version mismatch, but its interval *is* the screenshot
+/// cadence, so a policy change could sit unapplied for up to 10 minutes. This loop closes that gap
+/// with a 60 s conditional pull. It is auth-gated like the sender (no token → skip quietly) and
+/// deliberately fire-and-forget: a failed poll waits for the next tick, and the batch-cycle pull
+/// remains the backstop — two readers of the same ETag'd endpoint can't disagree.
+pub fn spawn_config_poller(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let http = client::api_client();
+        loop {
+            tokio::time::sleep(Duration::from_secs(CONFIG_POLL_SECS)).await;
+            let state = app.state::<AppState>();
+            let Some(id_token) = state.auth.id_token().await else {
+                continue;
+            };
+            let ingest_url = state.auth.config().ingest_url.clone();
+            let etag = state.config.lock().unwrap().etag();
+            match config::pull_config(&http, &ingest_url, &id_token, etag.as_deref()).await {
+                Ok(config::ConfigPull::Fresh { config, etag }) => {
+                    let v = config.version;
+                    state.config.lock().unwrap().apply(config, etag);
+                    tracing::info!("config poller applied version {v}");
+                }
+                Ok(config::ConfigPull::NotModified) => {}
+                Err(e) => tracing::debug!("config poll skipped: {e}"),
+            }
+        }
+    });
+}
+
 /// Refresh the cached device location — **timer-gated, consent-gated, pause-aware; fails closed.**
 ///
 /// All three gates must hold, and any one of them failing clears the cached fix so the change takes
@@ -115,7 +150,11 @@ async fn refresh_location(app: &tauri::AppHandle) {
 
     let running = state.timer.lock().unwrap().is_running();
     let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
-    let paused = state.pause.lock().unwrap().is_paused(crate::clock::now_epoch_ms());
+    let paused = state
+        .pause
+        .lock()
+        .unwrap()
+        .is_paused(crate::clock::now_epoch_ms());
 
     let fix = if running && consented && !paused {
         tokio::task::spawn_blocking(crate::location::capture)
@@ -177,19 +216,43 @@ async fn drain(
 /// PUT one screenshot's bytes to its presigned S3 URL (host-pinned). Success deletes the local file;
 /// failure bumps the attempt count and drops the shot once it hits the cap (BUILD-PLAN §5).
 async fn upload_screenshot(upload: &reqwest::Client, state: &AppState, pu: &PresignedUpload) {
-    let path = {
+    let expected = {
         state
             .screenshots
             .lock()
             .unwrap()
             .get(&pu.screenshot_id)
-            .map(|s| s.path.clone())
+            .map(|s| (s.path.clone(), s.content_sha256.clone()))
     };
-    let Some(path) = path else { return };
+    let Some((path, expected_sha256)) = expected else {
+        return;
+    };
 
     if !is_allowed_upload_host(&pu.url) {
         tracing::warn!("rejected non-amazonaws screenshot upload host");
         return;
+    }
+
+    // Tamper-evidence: the bytes on disk must still be the bytes we captured. If a script replaced the
+    // buffered image, its SHA-256 no longer matches what we committed at capture — so we **refuse to
+    // upload the forged image** and drop it, rather than let a fabricated screenshot reach the server.
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let actual = crate::monitor::screenshot::sha256_hex(&bytes);
+            if actual != expected_sha256 {
+                tracing::warn!(
+                    id = %pu.screenshot_id,
+                    "screenshot bytes changed on disk since capture — refusing to upload (tampered)"
+                );
+                state.screenshots.lock().unwrap().remove(&pu.screenshot_id);
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(id = %pu.screenshot_id, "screenshot file unreadable, skipping: {e}");
+            return;
+        }
     }
 
     match put_bytes(upload, &pu.url, &path).await {

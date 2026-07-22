@@ -72,7 +72,11 @@ pub fn is_allowed_upload_host(url: &str) -> bool {
 ///
 /// One monitor failing to capture doesn't sink the others: each is processed independently and only
 /// its own `None` is dropped.
-pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(ScreenshotMeta, PathBuf)> {
+pub fn capture_all(
+    app: &str,
+    blur_level: u8,
+    captured_at: i64,
+) -> Vec<(ScreenshotMeta, PathBuf, String)> {
     let Ok(mut monitors) = xcap::Monitor::all() else {
         return Vec::new();
     };
@@ -90,7 +94,20 @@ pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(Screensh
         .collect()
 }
 
-/// Grab + process one display. `None` on capture/encode/IO failure for this monitor alone.
+/// Lowercase-hex SHA-256 of `bytes`. Used to bind a screenshot's captured bytes to the upload so a
+/// swapped file on disk is detected (tamper-evidence).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Grab + process one display. `None` on capture/encode/IO failure for this monitor alone. The third
+/// tuple element is the SHA-256 of the exact WebP bytes written — the tamper-evidence anchor.
 fn process_monitor(
     monitor: &xcap::Monitor,
     app: &str,
@@ -98,7 +115,7 @@ fn process_monitor(
     captured_at: i64,
     display: u8,
     dir: &Path,
-) -> Option<(ScreenshotMeta, PathBuf)> {
+) -> Option<(ScreenshotMeta, PathBuf, String)> {
     let rgba = monitor.capture_image().ok()?;
 
     let mut img = image::DynamicImage::ImageRgba8(rgba);
@@ -121,6 +138,9 @@ fn process_monitor(
     let webp_bytes =
         webp::Encoder::from_rgba(&rgba, rgba.width(), rgba.height()).encode(WEBP_QUALITY);
 
+    // Bind these exact bytes for tamper-evidence — computed here, before the file leaves our hands.
+    let content_sha256 = sha256_hex(&webp_bytes);
+
     let id = uuid::Uuid::new_v4().to_string();
     let path = dir.join(format!("{id}.webp"));
     std::fs::write(&path, &*webp_bytes).ok()?;
@@ -134,7 +154,7 @@ fn process_monitor(
         bucket_minute: captured_at.div_euclid(60_000),
         display,
     };
-    Some((meta, path))
+    Some((meta, path, content_sha256))
 }
 
 fn screenshots_dir() -> PathBuf {
@@ -159,6 +179,17 @@ mod tests {
         assert_eq!(scaled_dims(1920, 1080), (1280, 720)); // 16:9 stays 16:9
         assert_eq!(scaled_dims(2560, 1600), (1280, 800)); // 16:10 stays 16:10
         assert_eq!(scaled_dims(640, 480), (640, 480)); // already under cap
+    }
+
+    #[test]
+    fn sha256_hex_is_stable_and_detects_a_changed_byte() {
+        // Known vector: SHA-256("abc").
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // Any change flips the hash — this is what catches a swapped screenshot.
+        assert_ne!(sha256_hex(b"abc"), sha256_hex(b"abd"));
     }
 
     #[test]

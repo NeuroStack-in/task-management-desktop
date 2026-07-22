@@ -187,7 +187,9 @@ impl AuthManager {
         // far from the cause. This was `let _ = …` while every write was failing on Windows for an
         // oversized chunk (see `token_store::CHUNK`), and nothing anywhere said so.
         if let Err(e) = token_store::store(REFRESH_KEY, t.refresh_token.as_bytes()) {
-            tracing::error!("could not persist the refresh token ({e}) — sign-in will not survive a restart");
+            tracing::error!(
+                "could not persist the refresh token ({e}) — sign-in will not survive a restart"
+            );
         }
         *self.tokens.write().unwrap() = Some(t);
     }
