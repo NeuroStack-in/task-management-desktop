@@ -33,6 +33,10 @@ const WINDOW_SAMPLE_EVERY: u64 = 5;
 const IDLE_PROMPT_SECS: u64 = 300;
 /// Hard-stop the timer after this much continuous idle (no productive time is invented).
 const AUTO_STOP_SECS: u64 = 900;
+/// Re-warn (and re-report) the same restricted identifier at most once per this window. One
+/// YouTube session is one violation with one warning — not sixty per minute; a *different*
+/// restricted site during the cooldown still fires immediately (the map is per-identifier).
+const VIOLATION_COOLDOWN_MS: i64 = 5 * 60 * 1000;
 
 /// One `splitmix64` step → a uniform `f64` in `[0, 1)`. Cheap, no-dep PRNG; good enough for
 /// anti-evasion jitter (not cryptographic). Seeded per shot from `clock::entropy_seed()`.
@@ -140,14 +144,13 @@ pub fn spawn_screenshots(app: AppHandle) {
             } else {
                 let state = app.state::<AppState>();
                 let mut store = state.screenshots.lock().unwrap();
-                for (meta, path, content_sha256) in shots {
+                for (meta, path) in shots {
                     store.insert(
                         meta.id.clone(),
                         crate::state::PendingShot {
                             meta,
                             path,
                             attempts: 0,
-                            content_sha256,
                         },
                     );
                 }
@@ -162,6 +165,9 @@ fn run(app: AppHandle) {
     let mut tick: u64 = 0;
     let mut was_running = false;
     let mut idle_prompted = false;
+    // identifier → last time it was warned/reported (the violation debounce).
+    let mut last_violation: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
 
     loop {
         thread::sleep(Duration::from_secs(1));
@@ -182,6 +188,45 @@ fn run(app: AppHandle) {
             if tick.is_multiple_of(WINDOW_SAMPLE_EVERY) {
                 if let Some(f) = active_window::current() {
                     let rules = state.config.lock().unwrap().get().rules.clone();
+
+                    // Restricted-list enforcement (LLD §14) — timer-gated by this whole branch,
+                    // and checked BEFORE the untracked filter (the three rule lists are
+                    // orthogonal: an untracked app can still be restricted). URL when the
+                    // platform yields one, title as the fallback signal, process name for apps.
+                    let haystack = format!(
+                        "{} {} {}",
+                        f.app,
+                        f.title.as_deref().unwrap_or(""),
+                        f.url.as_deref().unwrap_or("")
+                    );
+                    if let Some((kind, identifier)) = crate::rules::blocked_match(&haystack, &rules)
+                    {
+                        let due = last_violation
+                            .get(&identifier)
+                            .is_none_or(|t| now - t >= VIOLATION_COOLDOWN_MS);
+                        if due {
+                            last_violation.insert(identifier.clone(), now);
+                            // Report first (the manager's flag), then warn (the employee's toast):
+                            // `action_taken: warned` must be true by the time the batch leaves.
+                            state.pending_events.lock().unwrap().push(
+                                wp_agent_contract::AgentEvent::PolicyViolation {
+                                    ts: now,
+                                    kind: kind.to_string(),
+                                    identifier: identifier.clone(),
+                                    action_taken: "warned".to_string(),
+                                },
+                            );
+                            state.flush.notify_one();
+                            // The visible warning: surface the panel and tell the webview which
+                            // site/app tripped the policy. Deliberately shown, not focus-stolen —
+                            // the point is "you were seen", not yanking the keyboard mid-keystroke.
+                            if let Some(w) = app.get_webview_window("panel") {
+                                let _ = w.show();
+                            }
+                            let _ = app.emit(events::POLICY_BLOCKED, identifier);
+                        }
+                    }
+
                     if !crate::rules::is_untracked(&f.app, &rules) {
                         let cat = crate::rules::classify_focus(&f.app, &rules);
                         bucketer.sample_app(

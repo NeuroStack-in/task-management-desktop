@@ -222,7 +222,7 @@ async fn upload_screenshot(upload: &reqwest::Client, state: &AppState, pu: &Pres
             .lock()
             .unwrap()
             .get(&pu.screenshot_id)
-            .map(|s| (s.path.clone(), s.content_sha256.clone()))
+            .map(|s| (s.path.clone(), s.meta.content_sha256.clone()))
     };
     let Some((path, expected_sha256)) = expected else {
         return;

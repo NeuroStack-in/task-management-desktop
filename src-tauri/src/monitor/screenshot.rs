@@ -72,11 +72,7 @@ pub fn is_allowed_upload_host(url: &str) -> bool {
 ///
 /// One monitor failing to capture doesn't sink the others: each is processed independently and only
 /// its own `None` is dropped.
-pub fn capture_all(
-    app: &str,
-    blur_level: u8,
-    captured_at: i64,
-) -> Vec<(ScreenshotMeta, PathBuf, String)> {
+pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(ScreenshotMeta, PathBuf)> {
     let Ok(mut monitors) = xcap::Monitor::all() else {
         return Vec::new();
     };
@@ -87,12 +83,69 @@ pub fn capture_all(
     if std::fs::create_dir_all(&dir).is_err() {
         return Vec::new();
     }
+    // Lock the buffer down (once per process) so *other* users on the machine can't read or swap the
+    // pending images. This complements the upload-time SHA-256 check: hashing catches the monitored
+    // user's own scripts (same identity as the agent), ACLs stop everyone else.
+    HARDEN_ONCE.call_once(|| harden_dir(&dir));
     monitors
         .into_iter()
         .enumerate()
         .filter_map(|(i, m)| process_monitor(&m, app, blur_level, captured_at, i as u8, &dir))
         .collect()
 }
+
+static HARDEN_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// Restrict the screenshot buffer directory to the agent's own user (+ SYSTEM/Administrators on
+/// Windows). Best-effort and **never fatal** — a failure here must not stop capture; it's a
+/// hardening layer, not a gate.
+///
+/// **What it does and doesn't stop:** it denies *other* users on a shared machine. It does **not**
+/// stop the monitored user's own scripts — they run as the same identity as the agent — which is
+/// exactly what the upload-time content hash is for. Defence in depth, not a silver bullet.
+#[cfg(windows)]
+fn harden_dir(dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let user = std::env::var("USERNAME").unwrap_or_default();
+
+    let mut cmd = Command::new("icacls");
+    cmd.arg(dir).arg("/inheritance:r"); // drop inherited (broad) permissions
+    if !user.is_empty() {
+        cmd.arg("/grant:r").arg(format!("{user}:(OI)(CI)F"));
+    }
+    cmd.arg("/grant:r")
+        .arg("SYSTEM:(OI)(CI)F")
+        .arg("/grant:r")
+        .arg("Administrators:(OI)(CI)F")
+        .arg("/T")
+        .arg("/C")
+        .arg("/Q")
+        .creation_flags(CREATE_NO_WINDOW);
+
+    match cmd.output() {
+        Ok(o) if o.status.success() => tracing::info!("screenshot buffer directory locked down"),
+        Ok(o) => tracing::warn!(
+            "icacls harden failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => tracing::warn!("could not harden screenshot dir: {e}"),
+    }
+}
+
+#[cfg(unix)]
+fn harden_dir(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    // rwx for the owner only.
+    if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+        tracing::warn!("could not set 0700 on screenshot dir: {e}");
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn harden_dir(_dir: &Path) {}
 
 /// Lowercase-hex SHA-256 of `bytes`. Used to bind a screenshot's captured bytes to the upload so a
 /// swapped file on disk is detected (tamper-evidence).
@@ -106,8 +159,9 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Grab + process one display. `None` on capture/encode/IO failure for this monitor alone. The third
-/// tuple element is the SHA-256 of the exact WebP bytes written — the tamper-evidence anchor.
+/// Grab + process one display. `None` on capture/encode/IO failure for this monitor alone. The
+/// returned `meta.content_sha256` is the SHA-256 of the exact WebP bytes written — the tamper-evidence
+/// anchor that rides the authenticated batch and gates the upload.
 fn process_monitor(
     monitor: &xcap::Monitor,
     app: &str,
@@ -115,7 +169,7 @@ fn process_monitor(
     captured_at: i64,
     display: u8,
     dir: &Path,
-) -> Option<(ScreenshotMeta, PathBuf, String)> {
+) -> Option<(ScreenshotMeta, PathBuf)> {
     let rgba = monitor.capture_image().ok()?;
 
     let mut img = image::DynamicImage::ImageRgba8(rgba);
@@ -153,8 +207,9 @@ fn process_monitor(
         blur_level,
         bucket_minute: captured_at.div_euclid(60_000),
         display,
+        content_sha256,
     };
-    Some((meta, path, content_sha256))
+    Some((meta, path))
 }
 
 fn screenshots_dir() -> PathBuf {
