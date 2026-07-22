@@ -4,11 +4,12 @@ import { LogOut } from "lucide-react";
 import { ConsentCard } from "@/cards/ConsentCard";
 import { LoginCard } from "@/cards/LoginCard";
 import { PauseCard } from "@/cards/PauseCard";
-import { SessionsCard } from "@/cards/SessionsCard";
+import { SessionsCard, type ResumeSelection } from "@/cards/SessionsCard";
 import { TimerCard } from "@/cards/TimerCard";
 import { IdentityChip, LiveDot, StatusBadge, ThemeToggle } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import { startTimer, takePendingResume } from "@/lib/agent";
+import { recordHistory } from "@/lib/descriptionHistory";
 import { useAgent } from "@/hooks/useAgent";
 import { useTheme } from "@/hooks/useTheme";
 
@@ -73,6 +74,16 @@ function Panel() {
 
   // Silent mode suppresses the capture indicator by policy — the disclosure already covered it.
   const showLive = capture.capturing && !config.silent;
+
+  // Resume from a session row: start a new session on that row's (project, description) — the
+  // grain the server folds on, so the time lands in the same timesheet row. While a timer runs,
+  // resuming another row re-attributes to it (same semantics as the hero's pickers).
+  const resumeSession = (sel: ResumeSelection) => {
+    const full = { taskId: null, projectId: sel.projectId, description: sel.description };
+    recordHistory(sel.description);
+    if (timer.running) switchTo(full);
+    else toggleTimer(full);
+  };
 
   return (
     <>
@@ -172,7 +183,12 @@ function Panel() {
         {/* Sessions used to share this row with a Status card. That card was removed, so this
             runs the full panel width and lines up with the timer above and the pause card
             below, rather than sitting in a half-width column with dead space beside it. */}
-        <SessionsCard sessions={sessions} projects={projects} timer={timer} />
+        <SessionsCard
+          sessions={sessions}
+          projects={projects}
+          timer={timer}
+          onResume={resumeSession}
+        />
 
         <PauseCard pause={pause} refused={pauseRefused} onRequest={requestPause} />
       </div>

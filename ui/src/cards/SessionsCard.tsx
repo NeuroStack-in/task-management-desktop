@@ -1,9 +1,15 @@
-import { ListChecks } from "lucide-react";
+import { ListChecks, Play } from "lucide-react";
 
 import { CardTitleRow, PanelCard } from "@/components/panel";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { formatElapsed } from "@/lib/format";
 import type { Project, Session, TimerState } from "@/lib/types";
+
+/** What a row hands back to resume: the fold grain, (project, description). No task id exists here. */
+export interface ResumeSelection {
+  projectId: string | null;
+  description: string;
+}
 
 /**
  * Today's totals, as the server folded them: one row per **(project, description)**, not per task.
@@ -13,15 +19,22 @@ import type { Project, Session, TimerState } from "@/lib/types";
  * The server deliberately omits the *running* session (its entry has no `duration_secs` yet), so
  * the live segment is folded in here from the local timer. That's the no-double-count contract in
  * timesheet.rs: exactly one side counts the in-flight time, and it's this one.
+ *
+ * Every stopped row is a resume affordance (TaskFlow's pattern: the whole row is the button, with
+ * a play chip as the signifier). Clicking starts a **new** session on that row's (project,
+ * description) — the old entry is closed on the server and there is no un-close, so "resume"
+ * means "continue this work from now", never "reopen the hours in between".
  */
 export function SessionsCard({
   sessions,
   projects,
   timer,
+  onResume,
 }: {
   sessions: Session[];
   projects: Project[];
   timer: TimerState;
+  onResume: (sel: ResumeSelection) => void;
 }) {
   const rows = foldLiveSegment(sessions, timer);
   const total = rows.reduce((s, x) => s + x.secs, 0);
@@ -62,40 +75,58 @@ export function SessionsCard({
                   // `items-start` + a shared 20px line box on the badge, title and duration: the
                   // left block is two lines and the duration is one, so centring floated the
                   // duration between the title and the project name instead of reading as its value.
-                  <li key={keyOf(s)} className="flex items-start gap-2">
-                    <span
-                      aria-hidden
-                      className={
-                        running
-                          ? "flex size-5 shrink-0 items-center justify-center rounded-md bg-success/15"
-                          : "flex size-5 shrink-0 items-center justify-center rounded-md bg-primary/10"
+                  <li key={keyOf(s)}>
+                    <button
+                      type="button"
+                      disabled={running}
+                      onClick={() =>
+                        onResume({ projectId: s.project_id || null, description: s.description })
                       }
+                      title={running ? undefined : "Resume — start a new session on this work"}
+                      aria-label={
+                        running
+                          ? undefined
+                          : `Resume ${s.description || "session"} (starts a new session)`
+                      }
+                      className="group -mx-1 flex w-[calc(100%+0.5rem)] cursor-pointer items-start gap-2 rounded-lg px-1 py-0.5 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-default disabled:hover:bg-transparent"
                     >
+                      <span
+                        aria-hidden
+                        className={
+                          running
+                            ? "flex size-5 shrink-0 items-center justify-center rounded-md bg-success/15"
+                            : "flex size-5 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary"
+                        }
+                      >
+                        {running ? (
+                          <span className="size-1.5 animate-pulse rounded-full bg-success" />
+                        ) : (
+                          <>
+                            {/* Dot at rest, play on hover/focus — the row reads as data until the
+                                pointer says "act", then reads as a control. */}
+                            <span className="size-1.5 rounded-full bg-primary/60 group-hover:hidden group-focus-visible:hidden" />
+                            <Play className="hidden size-3 fill-current group-hover:block group-focus-visible:block" />
+                          </>
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13.5px] font-medium leading-5">
+                          {s.description || "No description"}
+                        </span>
+                        <span className="block truncate text-[11.5px] text-muted-foreground">
+                          {projectName.get(s.project_id) ?? s.project_id ?? "No project"}
+                        </span>
+                      </span>
                       <span
                         className={
                           running
-                            ? "size-1.5 animate-pulse rounded-full bg-success"
-                            : "size-1.5 rounded-full bg-primary/60"
+                            ? "tabular shrink-0 text-[13px] font-medium leading-5 text-success"
+                            : "tabular shrink-0 text-[13px] leading-5 text-muted-foreground"
                         }
-                      />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13.5px] font-medium leading-5">
-                        {s.description || "No description"}
+                      >
+                        {formatElapsed(s.secs)}
                       </span>
-                      <span className="block truncate text-[11.5px] text-muted-foreground">
-                        {projectName.get(s.project_id) ?? s.project_id ?? "No project"}
-                      </span>
-                    </span>
-                    <span
-                      className={
-                        running
-                          ? "tabular shrink-0 text-[13px] font-medium leading-5 text-success"
-                          : "tabular shrink-0 text-[13px] leading-5 text-muted-foreground"
-                      }
-                    >
-                      {formatElapsed(s.secs)}
-                    </span>
+                    </button>
                   </li>
                 );
               })}

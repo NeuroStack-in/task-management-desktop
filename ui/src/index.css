@@ -264,6 +264,48 @@
   animation-delay: calc(var(--menu-step) * 4);
 }
 
+/* Timer digits tick in as they change — each digit is keyed by its character, so a change
+   remounts it and replays this slide-up (TaskFlow's timer language, kept for family feel). */
+@keyframes wp-digit-tick {
+  0% {
+    opacity: 0;
+    transform: translateY(35%);
+  }
+  50% {
+    opacity: 0.65;
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+.wp-digit-tick {
+  animation: wp-digit-tick 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Stopped→recording ignite: a one-shot scale-in + glow ring on the timer hero. White-based
+   rather than TaskFlow's emerald — the glow has to sit on the filled teal feature surface. */
+@keyframes wp-recording-ignite {
+  0% {
+    opacity: 0.85;
+    transform: scale(0.97);
+    box-shadow: 0 0 0 0 rgb(255 255 255 / 0);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.012);
+    box-shadow: 0 0 0 6px rgb(255 255 255 / 0.14);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    box-shadow: 0 0 0 0 rgb(255 255 255 / 0);
+  }
+}
+.wp-recording-ignite {
+  animation: wp-recording-ignite 0.42s cubic-bezier(0.2, 0.7, 0.2, 1.2) both;
+}
+
 /* Copied in spirit from the web app: transforms are the vestibular trigger, opacity isn't
    (WCAG C39), so motion-sensitive users still get a fade rather than a hard pop. */
 @media (prefers-reduced-motion: reduce) {

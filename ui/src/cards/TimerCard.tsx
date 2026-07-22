@@ -13,6 +13,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { recordHistory, suggestHistory } from "@/lib/descriptionHistory";
 import { formatElapsed } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Project, Task, TimerSelection, TimerState } from "@/lib/types";
@@ -65,6 +66,10 @@ export function TimerCard({
   const [projectId, setProjectId] = useState<string>(() => timer.project_id ?? "");
   const [taskId, setTaskId] = useState<string | null>(() => timer.task_id);
   const [description, setDescription] = useState(timer.description);
+  // Recent-description suggestions render only while the field is focused; selection happens on
+  // `onMouseDown` so it wins the race against the input's blur closing the list.
+  const [descFocused, setDescFocused] = useState(false);
+  const suggestions = descFocused && !timer.running ? suggestHistory(description) : [];
 
   // Keep the controls pointed at whatever the core is actually timing — after a switch, or on a
   // remount while a session is live. Only while running: outside that, these are the user's
@@ -96,29 +101,49 @@ export function TimerCard({
 
   const chooseTask = (t: Task) => {
     setTaskId(t.id);
+    // Autofill the label with the task's title — but only into an EMPTY field, never over what
+    // the person typed (the description is the timesheet row's label, so their words win).
+    if (!description.trim()) setDescription(t.title);
     if (timer.running) onSwitch(selection({ taskId: t.id }));
+  };
+
+  const toggle = () => {
+    // Remember the description of every session actually started, so the field can suggest it
+    // next time (fold grain is (project, description) — retyping variants splits timesheet rows).
+    if (!timer.running) recordHistory(description);
+    onToggle(selection());
   };
 
   const canStart = Boolean(projectId);
   const status = timer.running ? "Recording" : canStart ? "Ready" : "Select a project";
 
   return (
-    <PanelCard className="border-transparent bg-feature text-feature-foreground shadow-none">
+    <PanelCard
+      className={cn(
+        "border-transparent bg-feature text-feature-foreground shadow-none",
+        // One-shot ignite when a session starts (the class appearing replays the keyframe).
+        timer.running && "wp-recording-ignite",
+      )}
+    >
       <CardContent className="flex flex-col gap-2.5">
         {/* The clock is the hero's whole point — centred and given the room. */}
         <div className="flex flex-col items-center gap-2 text-center">
           <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-feature-foreground/80">
-            <span
-              className={cn(
-                "size-1.5 rounded-full",
-                timer.running ? "animate-pulse bg-white" : canStart ? "bg-white/60" : "bg-white/30",
-              )}
-            />
+            {timer.running ? (
+              // Recording: a ping ring radiating off a solid dot (TaskFlow's recording badge).
+              <span aria-hidden className="relative flex size-1.5">
+                <span className="absolute size-full animate-ping rounded-full bg-white opacity-70" />
+                <span className="relative size-1.5 rounded-full bg-white" />
+              </span>
+            ) : (
+              <span
+                aria-hidden
+                className={cn("size-1.5 rounded-full", canStart ? "bg-white/60" : "bg-white/30")}
+              />
+            )}
             {status}
           </span>
-          <span className="tabular font-heading text-[44px] font-semibold leading-none tracking-tight">
-            {formatElapsed(timer.elapsed_secs)}
-          </span>
+          <TickingClock secs={timer.elapsed_secs} />
         </div>
 
         {/* The server folds time entries per (project, description), so this text is the label the
@@ -134,13 +159,46 @@ export function TimerCard({
             </p>
           )
         ) : (
-          <Input
-            aria-label="What are you working on?"
-            placeholder="What are you working on?"
-            value={description}
-            onValueChange={setDescription}
-            className="h-9 border-transparent bg-white/15 px-3 text-[13px] text-feature-foreground ring-1 ring-inset ring-white/15 placeholder:text-feature-foreground/50 focus-visible:ring-2 focus-visible:ring-white/70"
-          />
+          <div className="relative">
+            <Input
+              aria-label="What are you working on?"
+              placeholder="What are you working on?"
+              value={description}
+              onValueChange={setDescription}
+              onFocus={() => setDescFocused(true)}
+              onBlur={() => setDescFocused(false)}
+              className="h-9 w-full border-transparent bg-white/15 px-3 text-[13px] text-feature-foreground ring-1 ring-inset ring-white/15 placeholder:text-feature-foreground/50 focus-visible:ring-2 focus-visible:ring-white/70"
+            />
+            {suggestions.length > 0 && (
+              <ul
+                role="listbox"
+                aria-label="Recent descriptions"
+                className="absolute inset-x-0 top-full z-10 mt-1 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"
+              >
+                <li className="px-2 pb-0.5 pt-1 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Recent
+                </li>
+                {suggestions.map((s) => (
+                  <li key={s}>
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={false}
+                      // onMouseDown, not onClick: it fires before the input's blur unmounts the list.
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setDescription(s);
+                        setDescFocused(false);
+                      }}
+                      className="w-full truncate rounded-md px-2 py-1.5 text-left text-[12.5px] hover:bg-accent"
+                    >
+                      {s}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
 
         <div className="flex items-center gap-2">
@@ -242,7 +300,7 @@ export function TimerCard({
 
           <Button
             size="sm"
-            onClick={() => onToggle(selection())}
+            onClick={toggle}
             disabled={!timer.running && !canStart}
             className="h-9 shrink-0 gap-1.5 rounded-xl border-transparent bg-white/15 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25"
           >
@@ -260,6 +318,33 @@ export function TimerCard({
         </p>
       </CardContent>
     </PanelCard>
+  );
+}
+
+/**
+ * The hh:mm:ss readout with per-digit tick animation. Each digit's inner span is keyed by its
+ * character, so when a digit changes Preact remounts it and replays `wp-digit-tick` — the digit
+ * slides up into place. Unchanged digits (and the colons) keep their key and never re-animate.
+ */
+function TickingClock({ secs }: { secs: number }) {
+  return (
+    <span className="tabular font-heading text-[44px] font-semibold leading-none tracking-tight">
+      {formatElapsed(secs)
+        .split("")
+        .map((ch, i) =>
+          ch === ":" ? (
+            <span key={`c${i}`} className="inline-block">
+              :
+            </span>
+          ) : (
+            <span key={`d${i}`} className="inline-block overflow-hidden align-baseline">
+              <span key={ch} className="wp-digit-tick inline-block">
+                {ch}
+              </span>
+            </span>
+          ),
+        )}
+    </span>
   );
 }
 
