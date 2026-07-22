@@ -64,7 +64,11 @@ impl AuthManager {
                 self.set(t);
                 true
             }
-            Err(_) => {
+            Err(e) => {
+                // A refresh can fail because the token genuinely expired or was revoked — clearing
+                // is right — but it can also be a transient network failure at startup, so say which
+                // rather than silently demanding a password.
+                tracing::warn!("stored session could not be refreshed ({e}) — signing out");
                 let _ = token_store::clear(REFRESH_KEY);
                 false
             }
@@ -177,7 +181,14 @@ impl AuthManager {
     }
 
     fn set(&self, t: Tokens) {
-        let _ = token_store::store(REFRESH_KEY, t.refresh_token.as_bytes());
+        // **Logged, not discarded.** A failed keyring write is not cosmetic: it is the difference
+        // between "stay signed in" and "ask for a password on every launch", and it is otherwise
+        // completely silent — the session works fine until the next restart, so the symptom shows up
+        // far from the cause. This was `let _ = …` while every write was failing on Windows for an
+        // oversized chunk (see `token_store::CHUNK`), and nothing anywhere said so.
+        if let Err(e) = token_store::store(REFRESH_KEY, t.refresh_token.as_bytes()) {
+            tracing::error!("could not persist the refresh token ({e}) — sign-in will not survive a restart");
+        }
         *self.tokens.write().unwrap() = Some(t);
     }
 }

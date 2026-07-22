@@ -96,22 +96,35 @@ pub fn spawn_sender(app: tauri::AppHandle) {
     });
 }
 
-/// Refresh the cached device location — **consent-gated, fails closed**. With consent, capture a
-/// fresh OS fix (blocking WinRT → `spawn_blocking`) for the next heartbeat; without consent, clear any
-/// cached fix so a withdrawal takes effect on the very next cycle.
+/// Refresh the cached device location — **timer-gated, consent-gated, pause-aware; fails closed.**
+///
+/// All three gates must hold, and any one of them failing clears the cached fix so the change takes
+/// effect on the very next cycle rather than leaking a stale position into the next heartbeat.
+///
+/// **Timer-gating is the load-bearing one** (owner decision, 2026-07-21). Location previously rode
+/// the heartbeat, which runs whenever the agent is signed in and consented — so it recorded where
+/// the employee was at 21:00 on a Sunday with no timer running. That is the difference between
+/// *"where work happened"* and *"where this person is"*, and only the first is what the product
+/// claims to measure. It now matches the screenshot loop, which has always been timer-gated
+/// (`monitor::spawn_screenshots`), so no capture in the agent outlives the working session.
+///
+/// The privacy pause is honoured for the same reason it suspends screenshots: a bounded window in
+/// which nothing is recorded is worthless if one of the three capture paths keeps going.
 async fn refresh_location(app: &tauri::AppHandle) {
-    let consented = app
-        .state::<AppState>()
-        .consent
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let fix = if consented {
+    let state = app.state::<AppState>();
+
+    let running = state.timer.lock().unwrap().is_running();
+    let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
+    let paused = state.pause.lock().unwrap().is_paused(crate::clock::now_epoch_ms());
+
+    let fix = if running && consented && !paused {
         tokio::task::spawn_blocking(crate::location::capture)
             .await
             .unwrap_or(None)
     } else {
         None
     };
-    *app.state::<AppState>().location.lock().unwrap() = fix;
+    *state.location.lock().unwrap() = fix;
 }
 
 /// Send oldest-first until the outbox is empty or a send fails (then retry next tick). After each ack,

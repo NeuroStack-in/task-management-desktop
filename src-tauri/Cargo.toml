@@ -21,7 +21,6 @@ tauri-build = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-shell = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
-tauri-plugin-window-state = { workspace = true }
 tauri-plugin-autostart = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 url = { workspace = true }

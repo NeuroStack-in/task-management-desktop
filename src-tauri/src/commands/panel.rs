@@ -52,10 +52,15 @@ pub fn get_consent_state(state: State<'_, AppState>) -> ConsentStateDto {
 
 #[tauri::command]
 pub fn grant_consent(state: State<'_, AppState>, policy_version: u64) -> ConsentStateDto {
-    let _ = policy_version; // the version is advisory; consent is a single on/off flag
     state
         .consent
         .store(true, std::sync::atomic::Ordering::Relaxed);
+    // Persisted, so the monitoring notice is a first-run step rather than a toll on every launch.
+    // The version is recorded for audit — which disclosure was accepted — not used to re-prompt.
+    crate::session_state::update(|s| {
+        s.consent_granted = true;
+        s.consent_policy_version = policy_version;
+    });
     read_consent(&state)
 }
 
@@ -268,6 +273,46 @@ pub async fn list_sessions(
     let ingest_url = state.auth.config().ingest_url.clone();
     let client = crate::api::client::api_client();
     crate::api::timesheet::fetch_today(&client, &ingest_url, &id_token, &date).await
+}
+
+// ── resume after restart ─────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingResumeDto {
+    pub task_id: String,
+    pub project_id: String,
+    pub description: String,
+    /// Epoch ms the agent closed on this task. The panel compares it against its own local calendar
+    /// and only resumes when it is still the same day — the core has no local timezone.
+    pub stopped_at_ms: i64,
+}
+
+/// The task the agent was running when it last closed, **claimed once**.
+///
+/// Taking-and-clearing rather than a plain read is deliberate. This drives an auto-start, so a value
+/// left in place would resume again on the next launch, and again after that — a task the user
+/// stopped days ago quietly restarting forever. Claiming it means one restart resumes one session.
+///
+/// Returning it does not start anything: the panel decides, because only it knows whether
+/// `stopped_at_ms` is still today.
+#[tauri::command]
+pub fn take_pending_resume(state: State<'_, AppState>) -> Option<PendingResumeDto> {
+    // Never resume on top of a running timer — a start would be rejected anyway, and this makes the
+    // ordering explicit rather than relying on that.
+    if state.timer.lock().unwrap().is_running() {
+        return None;
+    }
+    let mut out = None;
+    crate::session_state::update(|s| {
+        out = s.resume.take().map(|r| PendingResumeDto {
+            task_id: r.task_id,
+            project_id: r.project_id,
+            description: r.description,
+            stopped_at_ms: r.stopped_at_ms,
+        });
+    });
+    out
 }
 
 // ── identity ─────────────────────────────────────────────────────────────────

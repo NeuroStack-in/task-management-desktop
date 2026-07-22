@@ -15,8 +15,8 @@
       {
         "label": "panel",
         "title": "WorkPulse",
-        "width": 620,
-        "height": 590,
+        "width": 420,
+        "height": 560,
         "center": true,
         "resizable": false,
         "maximizable": false,

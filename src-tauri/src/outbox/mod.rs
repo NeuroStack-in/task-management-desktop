@@ -132,7 +132,11 @@ impl Default for Outbox {
 
 /// Local agent-state dir. M0/M2: a dot-dir (gitignored), overridable via `WP_STATE_DIR`. Later:
 /// Tauri's per-user app-data dir.
-fn state_dir() -> PathBuf {
+///
+/// `pub(crate)` so `session_state` writes beside the outbox instead of re-deriving the path — two
+/// copies of the `WP_STATE_DIR` rule would drift, and the symptom would be state silently saved to
+/// one directory and read from another.
+pub(crate) fn state_dir() -> PathBuf {
     std::env::var_os("WP_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".agent-state"))

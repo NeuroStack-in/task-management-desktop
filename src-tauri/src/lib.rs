@@ -29,6 +29,7 @@ pub mod state;
 pub mod timer;
 pub mod updater;
 pub mod util;
+pub mod session_state;
 pub mod window_size;
 
 use state::AppState;
@@ -92,8 +93,6 @@ pub fn run() {
             focus_panel(app);
         }))
         .plugin(tauri_plugin_shell::init())
-        // Persists + restores the panel window size/position (debounced) — M6 window-size.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -126,6 +125,7 @@ pub fn run() {
             commands::panel::list_projects,
             commands::panel::list_tasks,
             commands::panel::list_sessions,
+            commands::panel::take_pending_resume,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {
@@ -137,6 +137,18 @@ pub fn run() {
         .setup(|app| {
             // Resume a keyring session, then start the sender (Thread B) + monitor (A) + screenshots (C).
             let handle = app.handle().clone();
+            // Consent first and synchronously: the monitor and screenshot threads start just below
+            // and gate on this flag, so restoring it after they spawn would leave a window in which
+            // a consented user is briefly treated as not consented (fail-closed, but it would drop
+            // the first cycle) — and, worse, would race the panel into showing the notice again.
+            {
+                let persisted = crate::session_state::load();
+                app.state::<AppState>()
+                    .consent
+                    .store(persisted.restore_consent(), std::sync::atomic::Ordering::Relaxed);
+                tracing::info!("consent restored at startup: {}", persisted.restore_consent());
+            }
+
             tauri::async_runtime::spawn(async move {
                 let restored = handle.state::<AppState>().auth.restore().await;
                 tracing::info!("auth restore at startup: {restored}");
@@ -210,10 +222,27 @@ pub fn run() {
             let ts = clock::now_epoch_ms();
             // Bound separately so the timer's MutexGuard is dropped before `state` goes out of
             // scope at the end of the block — an inline `if let` keeps the temporary alive too long.
-            let stopped = state.timer.lock().unwrap().stop(ts, StopReason::Shutdown);
-            if let Some(ev) = stopped {
-                state.pending_events.lock().unwrap().push(ev);
-            }
+            // Remember what was running *before* stopping it, so reopening can pick the same task
+            // back up. Read under the same lock scope as the stop so the two cannot disagree.
+            let resume = {
+                let mut t = state.timer.lock().unwrap();
+                let snap = t.snapshot(ts);
+                let resume = snap.running.then(|| crate::session_state::ResumeTask {
+                    task_id: snap.task_id.clone().unwrap_or_default(),
+                    project_id: snap.project_id.clone().unwrap_or_default(),
+                    description: snap.description.clone(),
+                    stopped_at_ms: ts,
+                });
+                let stopped = t.stop(ts, StopReason::Shutdown);
+                if let Some(ev) = stopped {
+                    state.pending_events.lock().unwrap().push(ev);
+                }
+                resume
+            };
+            // The session is still *closed* on the server (the TimerStopped event above): the offline
+            // period must not be billed, since nothing was captured during it. Reopening starts a
+            // fresh session on the same task, and today's total comes from the folded entries.
+            crate::session_state::update(|s| s.resume = resume);
         }
     });
 }

@@ -58,6 +58,10 @@ pub fn set_consent(state: State<'_, AppState>, granted: bool) {
     state
         .consent
         .store(granted, std::sync::atomic::Ordering::Relaxed);
+    // Persist **both** directions. A revoke that only lived in memory would come back granted on the
+    // next launch — silently resuming capture the user had switched off, which is the worst possible
+    // direction for this flag to fail in.
+    crate::session_state::update(|s| s.consent_granted = granted);
 }
 
 #[tauri::command]

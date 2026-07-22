@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { LogOut } from "lucide-react";
 
 import { ConsentCard } from "@/cards/ConsentCard";
@@ -7,6 +8,7 @@ import { SessionsCard } from "@/cards/SessionsCard";
 import { TimerCard } from "@/cards/TimerCard";
 import { IdentityChip, LiveDot, StatusBadge, ThemeToggle } from "@/components/panel";
 import { Button } from "@/components/ui/button";
+import { startTimer, takePendingResume } from "@/lib/agent";
 import { useAgent } from "@/hooks/useAgent";
 import { useTheme } from "@/hooks/useTheme";
 
@@ -34,6 +36,7 @@ function Panel() {
     refresh,
   } = useAgent();
   const { theme, toggle: toggleTheme } = useTheme();
+  useResumeLastTask(snapshot?.auth.signedIn === true, snapshot?.timer.running === true, refresh);
 
   if (error && !snapshot) {
     return (
@@ -104,11 +107,22 @@ function Panel() {
         </button>
       </header>
 
-      {/* The window is sized to this content exactly (tauri.conf.json) and the panel must never
-          scroll — `overflow-hidden` on request. That makes overflow a *clipping* failure rather
-          than a scrolling one, so any card added here has to earn its height back from another.
+      {/* The window is a fixed 420×560 companion widget (tauri.conf.json), sized so this content
+          fits without scrolling — that remains the target, and any card added here should still earn
+          its height back from another rather than assuming it can grow.
+
+          But the container **scrolls as a fallback** instead of clipping. It used to be
+          `overflow-hidden`, on the reasoning that a hard clip keeps the panel from degrading into a
+          scrolling document. The trade stopped being worth it once the panel narrowed to the
+          sign-in width: at 420 px the session rows, task names and project labels wrap onto more
+          lines than they did at 620, so the height the content *needs* went up at the same moment
+          the window got shorter. Under a hard clip that combination silently swallows the bottom of
+          the panel — the stop button, or the last session of the day — with nothing on screen to say
+          anything is missing. A scrollbar that appears only when something genuinely overflows is a
+          visible, recoverable failure instead of an invisible, lossy one.
+
           `min-h-0` still matters: without it the flex child refuses to shrink at all. */}
-      <div className="wp-enter flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+      <div className="wp-enter flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overflow-x-hidden">
         {/* Idle prompt — the core emits this at 5 min and hard-stops at 15 (events.rs:7). Offering
             keep/stop here is the whole point of the event: silently banking idle time, or silently
             discarding it, are both wrong. */}
@@ -164,4 +178,53 @@ function Panel() {
       </div>
     </>
   );
+}
+
+/** True when two instants fall on the same day in the **user's** local calendar. */
+function sameLocalDay(a: number, b: number): boolean {
+  const x = new Date(a);
+  const y = new Date(b);
+  return (
+    x.getFullYear() === y.getFullYear() &&
+    x.getMonth() === y.getMonth() &&
+    x.getDate() === y.getDate()
+  );
+}
+
+/**
+ * Pick the timer back up on the task the agent was running when it last closed.
+ *
+ * The core hands the task over once (`take_pending_resume` clears as it reads) and takes no view on
+ * whether to use it — it has no local timezone. This decides, and only resumes when the agent closed
+ * **earlier the same local day**: reopening on Wednesday must never silently restart, and bill,
+ * Monday evening's task.
+ *
+ * The offline period itself is never credited. The core already closed the old session on quit, so
+ * this starts a *fresh* one from now; today's total comes from the folded entries the server
+ * returns. That is the difference between "resume the work" and "bill the hours the laptop was
+ * shut" — only the first is something the agent can evidence.
+ *
+ * Runs once per launch (`claimed`), and only once signed in: resuming needs a session to attribute
+ * the new timer to.
+ */
+function useResumeLastTask(signedIn: boolean, running: boolean, refresh: () => void) {
+  const claimed = useRef(false);
+  useEffect(() => {
+    if (!signedIn || running || claimed.current) return;
+    claimed.current = true;
+    void (async () => {
+      try {
+        const pending = await takePendingResume();
+        if (!pending || !sameLocalDay(pending.stoppedAtMs, Date.now())) return;
+        await startTimer({
+          taskId: pending.taskId || null,
+          projectId: pending.projectId || null,
+          description: pending.description,
+        });
+        refresh();
+      } catch {
+        // A failed resume must never block the panel: the user can always press Start.
+      }
+    })();
+  }, [signedIn, running, refresh]);
 }

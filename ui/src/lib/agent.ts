@@ -198,6 +198,29 @@ export async function stopTimer(): Promise<void> {
   await invoke<TimerState>("stop_timer");
 }
 
+/** The task the agent was running when it last closed. See {@link takePendingResume}. */
+export interface PendingResume {
+  taskId: string;
+  projectId: string;
+  description: string;
+  /** Epoch ms the agent closed on this task. */
+  stoppedAtMs: number;
+}
+
+/**
+ * Claim the task the agent was running when it last closed, if any.
+ *
+ * **Claiming, not reading**: the core clears it as it hands it over, so one restart resumes at most
+ * one session. A plain read would let a task the user stopped days ago restart on every launch.
+ *
+ * The core deliberately does not decide whether to resume — it has no local timezone (its only clock
+ * is UTC ms, which is also why `listSessions` takes the date as a parameter). The caller compares
+ * `stoppedAtMs` against the local calendar; see `sameLocalDay`.
+ */
+export function takePendingResume(): Promise<PendingResume | null> {
+  return invoke<PendingResume | null>("take_pending_resume");
+}
+
 /**
  * Re-attribute a running timer. There is no atomic `switch_task` command, so this is stop + start
  * — two events, and a sub-second gap between them the backend will see. Worth a real command if

@@ -170,7 +170,12 @@ export function TimerCard({
             icon={ListChecks}
             label={task?.title ?? "Select task (optional)"}
             disabled={inProject.length === 0}
-            width="w-[19rem]"
+            // Matches the project picker. It was `w-[19rem]` (304px): anchored `align="start"` from
+            // this trigger — which sits in the right half of the row — a 304px popup overran the
+            // 392px content area, so the positioner shifted it ~46px left to keep it on screen. The
+            // collision handling was right; the width was wrong, and the result read as a menu
+            // detached from its button. 224px fits under the trigger, so nothing has to move.
+            width="w-56"
           >
             <p className="flex items-center gap-1.5 px-1.5 pb-1 pt-0.5 text-xs font-medium text-muted-foreground">
               Tasks
@@ -294,7 +299,15 @@ function HeroPicker({
           <ChevronDown className="ml-auto size-4 shrink-0 text-white/70 transition-transform duration-fast ease-standard group-data-[popup-open]:rotate-180" />
         )}
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" sideOffset={8} className={cn("max-h-72 p-1.5", width)}>
+      {/* `max-w` is a floor under every caller: the panel is a fixed 420px, so a popup wider than
+          the content area can only be placed by shifting it away from its trigger. Capping it at the
+          viewport minus the panel's own padding (`p-3.5` a side) means a future width — or a future
+          narrower panel — degrades to a snug menu rather than a detached one. */}
+      <DropdownMenuContent
+        align="start"
+        sideOffset={8}
+        className={cn("max-h-72 max-w-[calc(100vw-1.75rem)] p-1.5", width)}
+      >
         {children}
       </DropdownMenuContent>
     </DropdownMenu>

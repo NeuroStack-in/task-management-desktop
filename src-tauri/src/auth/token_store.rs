@@ -10,8 +10,24 @@ use base64::Engine;
 use keyring::Entry;
 
 const SERVICE: &str = "com.workpulse.agent";
-/// Base64 chars per keyring entry — comfortably under the CredMan blob limit.
-const CHUNK: usize = 2000;
+
+/// Base64 **characters** per keyring entry.
+///
+/// Windows caps a credential blob at `CRED_MAX_CREDENTIAL_BLOB_SIZE` = **2560 bytes**, and the
+/// Credential Manager stores the value as **UTF-16** — two bytes per ASCII character. The ceiling is
+/// therefore 1280 characters, not 2560.
+///
+/// This was `2000`, with a comment claiming it was "comfortably under the CredMan blob limit": the
+/// limit was read in bytes and applied to characters, missing the ×2. Every chunk was ~4000 bytes,
+/// so **every write failed**, on every login, on every machine. Nothing surfaced it — the caller
+/// discarded the error with `let _ =` — so the refresh token was never persisted and `restore()`
+/// returned false forever, which is why the agent asked for a password on every launch.
+///
+/// Measured, not assumed: 1280 characters stores, 1400 fails.
+///
+/// 1024 keeps a deliberate margin under 1280 — a chunk boundary landing badly should cost an extra
+/// entry, never a silently unsaved session.
+const CHUNK: usize = 1024;
 
 fn b64(blob: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(blob)
@@ -100,6 +116,37 @@ mod tests {
         let blob = b"refresh-token-value";
         let chunks = split(blob);
         assert_eq!(chunks.len(), 1);
+        assert_eq!(join(&chunks).unwrap(), blob);
+    }
+
+    /// Every chunk must fit a Windows credential blob **as Windows measures it**.
+    ///
+    /// The two tests above only ever compared chunks against `CHUNK` itself, so they stayed green
+    /// while `CHUNK` was 2000 and every single write to the Credential Manager failed. They pinned
+    /// the code to its own assumption; this pins it to the platform.
+    ///
+    /// `CRED_MAX_CREDENTIAL_BLOB_SIZE` is 2560 **bytes** and the value is stored **UTF-16**, so an
+    /// ASCII chunk costs two bytes per character. Verified empirically on Windows 11: a 1280-char
+    /// password stores, 1400 fails.
+    #[test]
+    fn chunks_fit_the_windows_credential_blob_limit() {
+        const CRED_MAX_CREDENTIAL_BLOB_SIZE: usize = 2560;
+        const UTF16_BYTES_PER_ASCII_CHAR: usize = 2;
+
+        // A blob comfortably larger than one chunk, so this exercises real split output rather than
+        // comparing two constants.
+        let blob: Vec<u8> = (0..8000u32).map(|i| (i % 251) as u8).collect();
+        let chunks = split(&blob);
+        assert!(chunks.len() > 1);
+
+        for (i, c) in chunks.iter().enumerate() {
+            let stored_bytes = c.len() * UTF16_BYTES_PER_ASCII_CHAR;
+            assert!(
+                stored_bytes <= CRED_MAX_CREDENTIAL_BLOB_SIZE,
+                "chunk {i} is {} chars = {stored_bytes} bytes as UTF-16, over the {CRED_MAX_CREDENTIAL_BLOB_SIZE}-byte                  Windows credential limit — set_password would fail and the session would not persist",
+                c.len(),
+            );
+        }
         assert_eq!(join(&chunks).unwrap(), blob);
     }
 }
