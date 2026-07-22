@@ -28,12 +28,14 @@ function Panel() {
     pauseRefused,
     idleSecs,
     screenshotBlocked,
+    restrictedHit,
     grantConsent,
     toggleTimer,
     switchTo,
     requestPause,
     signOut,
     dismissIdle,
+    dismissRestricted,
     refresh,
   } = useAgent();
   const { theme, toggle: toggleTheme } = useTheme();
@@ -155,6 +157,29 @@ function Panel() {
               onClick={() => toggleTimer({ taskId: null, projectId: null, description: "" })}
             >
               Stop
+            </Button>
+          </div>
+        )}
+
+        {/* A restricted app/site was focused while tracking. The violation is already on its way
+            to the server — this banner is the "you were seen" half (Option 2 semantics: warn +
+            flag, never block). Dismissible; the same identifier re-warns after the cooldown. */}
+        {restrictedHit && (
+          <div
+            role="alert"
+            className="flex shrink-0 items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1.5"
+          >
+            <span className="min-w-0 flex-1 text-[11px]">
+              <span className="font-semibold">{restrictedHit}</span> is restricted by your
+              organization's policy during work sessions. This has been noted.
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-[11px]"
+              onClick={dismissRestricted}
+            >
+              Dismiss
             </Button>
           </div>
         )}

@@ -15,6 +15,8 @@ export interface Agent {
   idleSecs: number | null;
   /** True after `monitor:screenshot-unavailable` — capture is denied at the OS level. */
   screenshotBlocked: boolean;
+  /** The restricted app/site last focused during tracking (`monitor:policy-blocked`); null = none. */
+  restrictedHit: string | null;
   grantConsent: () => void;
   /** Starts with `sel` when stopped; stops (ignoring `sel`) when running. */
   toggleTimer: (sel: TimerSelection) => void;
@@ -24,6 +26,8 @@ export interface Agent {
   signOut: () => void;
   /** Dismiss the idle prompt, keeping the timer running. */
   dismissIdle: () => void;
+  /** Dismiss the restricted-site warning banner. */
+  dismissRestricted: () => void;
   /** Re-read the core now instead of waiting out the poll — what the hero's refresh drives. */
   refresh: () => Promise<void>;
 }
@@ -41,6 +45,7 @@ export function useAgent(): Agent {
   const [pauseRefused, setPauseRefused] = useState(false);
   const [idleSecs, setIdleSecs] = useState<number | null>(null);
   const [screenshotBlocked, setScreenshotBlocked] = useState(false);
+  const [restrictedHit, setRestrictedHit] = useState<string | null>(null);
 
   // Avoids a slow poll landing after a newer one and rewinding the UI.
   const seq = useRef(0);
@@ -76,6 +81,9 @@ export function useAgent(): Agent {
       // user acts, because the next capture attempt is a whole cadence away.
       agent.listen(EVENTS.screenshotUnavailable, () => setScreenshotBlocked(true)),
       agent.listen<number>(EVENTS.idlePrompt, (secs) => setIdleSecs(secs)),
+      // A restricted app/site was focused mid-session. The core already queued the violation for
+      // the server; this is the employee-facing half of the warning.
+      agent.listen<string>(EVENTS.policyBlocked, (identifier) => setRestrictedHit(identifier)),
     ];
     return () => {
       for (const s of subs) void s.then((un) => un());
@@ -133,6 +141,7 @@ export function useAgent(): Agent {
   }, [refresh, report]);
 
   const dismissIdle = useCallback(() => setIdleSecs(null), []);
+  const dismissRestricted = useCallback(() => setRestrictedHit(null), []);
 
   return {
     snapshot,
@@ -140,12 +149,14 @@ export function useAgent(): Agent {
     pauseRefused,
     idleSecs,
     screenshotBlocked,
+    restrictedHit,
     grantConsent,
     toggleTimer,
     switchTo,
     requestPause,
     signOut,
     dismissIdle,
+    dismissRestricted,
     refresh,
   };
 }
