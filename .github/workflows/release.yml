@@ -63,7 +63,9 @@ jobs:
             label: macos
             bundles: dmg
             targetArg: "--target universal-apple-darwin"
-            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            # Space-separated — `rustup target add` takes multiple targets as separate args, not a
+            # comma list (a comma makes it one bogus target name and the step fails).
+            rust_targets: "aarch64-apple-darwin x86_64-apple-darwin"
             artifacts: |
               desktop/target/universal-apple-darwin/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
@@ -205,3 +207,50 @@ jobs:
           files: |
             release-files/SHA256SUMS
             release-files/SHA256SUMS.sig
+
+  # The desktop repo is PRIVATE, so its release assets can't be fetched anonymously. Mirror the
+  # installers to the public S3 downloads bucket the web app's Download page links to. Runs even on a
+  # partial build (`!cancelled()`), so a working platform still ships if another's build breaks.
+  s3-mirror:
+    name: mirror installers to S3
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          path: staged
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Upload to the public downloads bucket
+        env:
+          BUCKET: wp-downloads-dev
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          shopt -s nullglob
+          found=0
+          # Each installer goes to an immutable `agent/v<version>/<original-name>` AND the stable
+          # `agent/latest/<version-less-name>` the site links to (overwritten every release).
+          while IFS= read -r f; do
+            found=1
+            base="$(basename "$f")"
+            case "$base" in
+              *-setup.exe)  stable="WorkPulse-x64-setup.exe";  ct="application/octet-stream" ;;
+              *.dmg)        stable="WorkPulse-universal.dmg";   ct="application/octet-stream" ;;
+              *.deb)        stable="WorkPulse-amd64.deb";       ct="application/vnd.debian.binary-package" ;;
+              *.AppImage)   stable="WorkPulse-amd64.AppImage";  ct="application/octet-stream" ;;
+              *) continue ;;
+            esac
+            echo "→ $base  ⇒  agent/v$VERSION/$base  +  agent/latest/$stable"
+            aws s3 cp "$f" "s3://$BUCKET/agent/v$VERSION/$base" --content-type "$ct"
+            aws s3 cp "$f" "s3://$BUCKET/agent/latest/$stable"  --content-type "$ct"
+          done < <(find staged -type f \( -name '*-setup.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \))
+          [ "$found" = 1 ] && echo "mirrored to s3://$BUCKET/agent/" || echo "::warning::no installers found to mirror"
