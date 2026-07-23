@@ -6,7 +6,7 @@ import { LoginCard } from "@/cards/LoginCard";
 import { PauseCard } from "@/cards/PauseCard";
 import { SessionsCard, type ResumeSelection } from "@/cards/SessionsCard";
 import { TimerCard } from "@/cards/TimerCard";
-import { IdentityChip, LiveDot, StatusBadge, ThemeToggle } from "@/components/panel";
+import { AutostartToggle, IdentityChip, LiveDot, StatusBadge, ThemeToggle } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import { startTimer, takePendingResume } from "@/lib/agent";
 import { recordHistory } from "@/lib/descriptionHistory";
@@ -103,6 +103,7 @@ function Panel() {
             </StatusBadge>
           )}
         </span>
+        <AutostartToggle />
         <ThemeToggle theme={theme} onToggle={toggleTheme} />
         {/* Hidden rather than faked when the core can't say who it's bound to. */}
         {snapshot.identity && (

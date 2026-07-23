@@ -238,3 +238,18 @@ export async function switchTo(sel: TimerSelection): Promise<void> {
 export function requestPause(requestedSecs: number): Promise<PauseGrant> {
   return invoke<PauseGrant>("request_pause", { requestedSecs });
 }
+
+// ── launch at login ────────────────────────────────────────────────────────────
+
+/**
+ * The real OS launch-at-login state (macOS LaunchAgent / Windows Run key / Linux .desktop entry),
+ * read live from the autostart plugin — not a cached guess, so the toggle reflects reality.
+ */
+export function getAutoStart(): Promise<boolean> {
+  return invoke<boolean>("get_auto_start");
+}
+
+/** Enable or disable launch-at-login. On Windows the installer sets the initial value; this changes it. */
+export async function setAutoStart(enabled: boolean): Promise<void> {
+  await invoke<void>("set_auto_start", { enabled });
+}

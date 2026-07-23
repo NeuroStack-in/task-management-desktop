@@ -1,10 +1,11 @@
-import { Moon, Sun } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { Moon, Power, Sun } from "lucide-react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { getAutoStart, setAutoStart } from "@/lib/agent";
 import { initials } from "@/lib/format";
 import type { Theme } from "@/lib/theme";
 import type { Identity } from "@/lib/types";
@@ -213,6 +214,59 @@ export function IdentityChip({ identity }: { identity: Identity }) {
         <AvatarFallback>{initials(identity.name)}</AvatarFallback>
       </Avatar>
     </span>
+  );
+}
+
+/**
+ * Launch-at-login toggle. Reads the real OS state on mount and flips it on click. Renders **nothing**
+ * when the state can't be read (browser dev shell, or a platform where the query fails) rather than
+ * showing a control that lies. On Windows the installer already asked; this lets the user change it
+ * afterward, and it's the only control on macOS/Linux (no install wizard).
+ */
+export function AutostartToggle() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    getAutoStart().then(
+      (v) => live && setEnabled(v),
+      () => live && setEnabled(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  if (enabled === null) return null;
+
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    const next = !enabled;
+    try {
+      await setAutoStart(next);
+      setEnabled(next);
+    } catch {
+      // OS write failed — leave the toggle where it was rather than showing a false state.
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      onClick={toggle}
+      disabled={busy}
+      aria-pressed={enabled}
+      aria-label={enabled ? "Disable launch at startup" : "Enable launch at startup"}
+      title={enabled ? "Launch at startup: on" : "Launch at startup: off"}
+      className={enabled ? "text-primary" : "text-muted-foreground/50"}
+    >
+      <Power />
+    </Button>
   );
 }
 
