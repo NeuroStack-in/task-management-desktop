@@ -111,6 +111,8 @@ pub fn run() {
             commands::timer_status,
             commands::agent_id,
             commands::check_for_updates,
+            commands::set_auto_start,
+            commands::get_auto_start,
             // Panel (kishore's tray UI) command surface.
             commands::panel::get_consent_state,
             commands::panel::grant_consent,
@@ -165,11 +167,45 @@ pub fn run() {
             monitor::spawn(app.handle().clone());
             monitor::spawn_screenshots(app.handle().clone());
 
-            // Register autostart (agent should relaunch at login). `WP_NO_AUTOSTART` opts out in dev.
+            // Autostart policy (was: unconditional `enable()` every launch, which silently forced
+            // launch-at-login and re-overrode the user's choice on every start). Now:
+            //   • Windows — the installer's "Launch at startup" checkbox writes the registry Run key;
+            //     respect it, never override.
+            //   • macOS/Linux — no install wizard, so default autostart ON on the FIRST run only. The
+            //     user can flip it afterward via `set_auto_start`, and that choice sticks.
+            // `WP_NO_AUTOSTART` opts out entirely (dev).
             #[cfg(desktop)]
             if std::env::var_os("WP_NO_AUTOSTART").is_none() {
                 use tauri_plugin_autostart::ManagerExt;
-                let _ = app.autolaunch().enable();
+                let cfg_dir = app.path().app_config_dir().ok();
+                let marker = cfg_dir.as_ref().map(|d| d.join("autostart.initialized"));
+                let first_run = marker.as_ref().map(|m| !m.exists()).unwrap_or(false);
+                if first_run {
+                    // Initial launch-at-login state:
+                    //  • Windows — honor the installer's prompt, recorded in `autostart.choice`
+                    //    (1/0). Absent (portable/dev) → leave off.
+                    //  • macOS/Linux — no install wizard, so default ON.
+                    // The autostart PLUGIN writes the actual OS entry either way, so the state always
+                    // agrees with `get_auto_start` (no NSIS-vs-plugin registry-format drift).
+                    let enable = if cfg!(target_os = "windows") {
+                        cfg_dir
+                            .as_ref()
+                            .and_then(|d| std::fs::read_to_string(d.join("autostart.choice")).ok())
+                            .map(|s| s.trim() == "1")
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    if enable {
+                        let _ = app.autolaunch().enable();
+                    }
+                    if let Some(m) = &marker {
+                        if let Some(parent) = m.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(m, b"1");
+                    }
+                }
             }
 
             // M7: check for a signed update at startup (no-op without a pubkey; `WP_NO_UPDATE` skips).

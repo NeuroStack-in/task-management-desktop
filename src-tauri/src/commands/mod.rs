@@ -13,6 +13,29 @@ use crate::auth::AuthStatus;
 use crate::clock::now_epoch_ms;
 use crate::state::AppState;
 
+// ---- autostart / launch-at-login (M6) ----
+
+/// Enable or disable launch-at-login. On Windows the installer's "Launch at startup" checkbox sets
+/// the initial state and this changes it afterward; on macOS/Linux (no install wizard) this is the
+/// only control. Writes the OS autostart entry via the autostart plugin.
+#[tauri::command]
+pub fn set_auto_start(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let m = app.autolaunch();
+    let r = if enabled { m.enable() } else { m.disable() };
+    r.map_err(|e| format!("autostart change failed: {e}"))
+}
+
+/// The actual OS launch-at-login state — drives the settings toggle so it reflects reality, not a
+/// cached guess.
+#[tauri::command]
+pub fn get_auto_start(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| format!("autostart query failed: {e}"))
+}
+
 // ---- auth (M1) ----
 
 /// Sign in with Cognito `USER_PASSWORD_AUTH`. May return a `newPasswordSession` if the account was
