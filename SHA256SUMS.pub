@@ -1,0 +1,20 @@
+# WorkPulse release-checksums verification key (Ed25519, base64).
+#
+# Each GitHub Release ships SHA256SUMS (sha256 of every installer) and SHA256SUMS.sig
+# (an Ed25519 signature of that file, produced in CI from the RELEASE_SIGNING_KEY_B64 secret).
+# Verify a download you fetched from the Releases page:
+#
+#   python3 - <<'PY'
+#   import base64
+#   from nacl.signing import VerifyKey
+#   pub = "cREZVOyKkilCfVqR7RCE7IydFKXbSkW/KmVrcXF8wOw="
+#   body = open("SHA256SUMS","rb").read()
+#   sig  = base64.b64decode(open("SHA256SUMS.sig","rb").read())
+#   VerifyKey(base64.b64decode(pub)).verify(body, sig)   # raises if tampered
+#   print("SHA256SUMS signature OK"); print("now: sha256sum -c SHA256SUMS")
+#   PY
+#
+# NOTE: this is a SEPARATE trust root from the in-app auto-updater, which uses the Tauri
+# updater (minisign pubkey in src-tauri/tauri.conf.json + latest.json). This key only
+# authenticates the SHA256SUMS manifest for manual/OS-level verification.
+cREZVOyKkilCfVqR7RCE7IydFKXbSkW/KmVrcXF8wOw=
