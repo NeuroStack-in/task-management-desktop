@@ -1,0 +1,126 @@
+name: Release
+
+# Cross-platform build + release of the WorkPulse desktop agent.
+#
+# Trigger: push a tag `v*` (e.g. `v0.1.0`). Each OS runner builds its native installer(s) and
+# the Tauri updater signature, then tauri-action uploads them to a **draft** GitHub Release plus a
+# `latest.json` update manifest. A human publishes the draft — nothing ships silently
+# (UPDATES-SECURITY.md §4.5: restrict who can publish to the release feed).
+#
+# Required repo secrets:
+#   BACKEND_REPO_TOKEN                 PAT/deploy key with read on the backend repo (the agent
+#                                      wire-contract `wp-agent-contract` is a sibling path-dep).
+#   TAURI_SIGNING_PRIVATE_KEY          contents of the updater private key (minisign). Without it the
+#                                      updater `.sig` + latest.json can't be produced.
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD the key's password ("" if generated without one).
+# Optional (OS trust — unsigned installers still work but warn on SmartScreen/Gatekeeper):
+#   Windows Authenticode / Apple Developer ID + notarization creds (see UPDATES-SECURITY.md §3).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/attach (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Universal macOS binary (Apple Silicon + Intel) in one .dmg/.app.
+          - os: macos-latest
+            args: "--target universal-apple-darwin"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          # 22.04 (not 24.04): Tauri v2 wants webkit2gtk-4.1, and pinning the LTS keeps the produced
+          # .deb/.AppImage runnable on the widest range of glibc.
+          - os: ubuntu-22.04
+            args: ""
+            rust_targets: ""
+          - os: windows-latest
+            args: ""
+            rust_targets: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout desktop
+        uses: actions/checkout@v4
+        with:
+          path: desktop
+
+      # The agent's wire envelope (`wp-agent-contract`) is OWNED BY THE BACKEND REPO and consumed as a
+      # sibling path-dep (`../backend/crates/wp-agent-contract`) — clone it beside `desktop/`, exactly
+      # as CI does. Pinned to the backend integration branch; repin when it fast-forwards to main.
+      - name: Checkout backend (sibling — provides wp-agent-contract)
+        uses: actions/checkout@v4
+        with:
+          repository: NeuroStack-in/task-management-backend
+          ref: feat/giri
+          path: backend
+          token: ${{ secrets.BACKEND_REPO_TOKEN }}
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Add Rust targets (macOS universal)
+        if: matrix.rust_targets != ''
+        run: rustup target add ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/ui/package-lock.json
+
+      # Linux system deps: Tauri (webkit2gtk 4.1), X11 (device_query / x-win / xcap), C compiler
+      # (libwebp), plus the AppImage/deb tooling. Mirrors ci.yml.
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            build-essential libgtk-3-dev libxdo-dev libssl-dev \
+            libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+
+      # tauri-action runs `beforeBuildCommand` (`npm run build` in ui/), so the webview deps must be
+      # present first. tauri-action does not install them.
+      - name: Install webview deps
+        working-directory: desktop/ui
+        run: npm ci
+
+      - name: Build + release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing — produces the per-artifact `.sig` and the `latest.json` the agent verifies
+          # against the `pubkey` baked into tauri.conf.json before applying any update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          # On a tag push, github.ref_name is the tag; on manual dispatch, the input.
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "WorkPulse Agent ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseBody: "Automated cross-platform build. See assets for per-OS installers. This release is a draft — review, then publish to roll out via the updater."
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
