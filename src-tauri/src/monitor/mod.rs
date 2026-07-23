@@ -142,7 +142,11 @@ pub fn spawn_screenshots(app: AppHandle) {
                     );
                     crate::rules::is_excepted(&haystack, &c.rules)
                 });
-                (running && consented && on && !paused, c.tracking.blur_level, excepted)
+                (
+                    running && consented && on && !paused,
+                    c.tracking.blur_level,
+                    excepted,
+                )
             };
             if !go || excepted {
                 continue;

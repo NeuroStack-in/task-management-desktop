@@ -136,7 +136,8 @@ impl AppState {
         *self.pause.lock().unwrap() = PauseState::default();
 
         // Re-require consent for the next person: capture fails closed until they accept the notice.
-        self.consent.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.consent
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.idle.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }

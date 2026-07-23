@@ -65,7 +65,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: NeuroStack-in/task-management-backend
-          ref: feat/giri
+          # Current agent contract lives on kishore/new (feat/giri is stale — see ci.yml).
+          ref: kishore/new
           path: backend
           token: ${{ secrets.BACKEND_REPO_TOKEN }}
 
