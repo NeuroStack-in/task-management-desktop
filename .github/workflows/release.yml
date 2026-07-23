@@ -1,0 +1,207 @@
+name: Release
+
+# Tag-driven cross-platform release of the WorkPulse desktop agent. Produces the same installer set
+# as the TaskFlow reference (docs/REFERENCE-TASKFLOW.md):
+#   Windows  WorkPulse_<v>_x64-setup.exe   (NSIS)
+#   Linux    WorkPulse_<v>_amd64.AppImage + WorkPulse_<v>_amd64.deb
+#   macOS    WorkPulse_<v>_universal.dmg   (Intel + Apple Silicon, one dmg)
+#   + SHA256SUMS and SHA256SUMS.sig (Ed25519 — see SHA256SUMS.pub)
+#
+# UNLIKE TaskFlow, WorkPulse's in-app updater is the Tauri plugin, so this release ALSO carries the
+# updater's `latest.json` + per-artifact minisign `.sig` (tauri.conf.json pubkey verifies them). The
+# SHA256SUMS trust root is SEPARATE and only for manual/OS verification of a downloaded installer.
+#
+# Everything lands in a DRAFT release — a human publishes it (UPDATES-SECURITY.md §4.5). Keep the tag,
+# src-tauri/Cargo.toml `version`, and tauri.conf.json `version` in lockstep (e.g. v0.1.0 -> "0.1.0").
+#
+# Required secrets:
+#   BACKEND_REPO_TOKEN                  read access to the backend repo (wp-agent-contract path-dep).
+#   TAURI_SIGNING_PRIVATE_KEY / _PASSWORD   minisign key for the Tauri updater artifacts.
+#   RELEASE_SIGNING_KEY_B64             Ed25519 private key (base64) that signs SHA256SUMS.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/attach (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: bundle (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            bundles: nsis
+            targetArg: ""
+            rust_targets: ""
+            artifacts: |
+              desktop/target/release/bundle/nsis/*-setup.exe
+          - os: ubuntu-22.04
+            label: linux
+            bundles: deb,appimage
+            targetArg: ""
+            rust_targets: ""
+            artifacts: |
+              desktop/target/release/bundle/appimage/*.AppImage
+              desktop/target/release/bundle/deb/*.deb
+          # One macOS job → a UNIVERSAL dmg (Intel + Apple Silicon lipo'd together) on the arm64
+          # runner. Don't split off a macos-13 Intel job: GitHub retired the Intel runners.
+          - os: macos-latest
+            label: macos
+            bundles: dmg
+            targetArg: "--target universal-apple-darwin"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            artifacts: |
+              desktop/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout desktop
+        uses: actions/checkout@v4
+        with:
+          path: desktop
+
+      # The agent wire-contract (`wp-agent-contract`) is owned by the backend repo and consumed as a
+      # sibling path-dep — clone it beside desktop/, same as ci.yml. Current contract lives on
+      # kishore/new (feat/giri is stale).
+      - name: Checkout backend (sibling — provides wp-agent-contract)
+        uses: actions/checkout@v4
+        with:
+          repository: NeuroStack-in/task-management-backend
+          ref: kishore/new
+          path: backend
+          token: ${{ secrets.BACKEND_REPO_TOKEN }}
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust targets (macOS universal)
+        if: matrix.rust_targets != ''
+        run: rustup target add ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+          key: ${{ matrix.label }}-release
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/ui/package-lock.json
+
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            build-essential libgtk-3-dev libxdo-dev libssl-dev \
+            libx11-dev libxcb1-dev libxcb-randr0-dev libxrandr-dev \
+            libxss-dev libxtst-dev libxi-dev libxext-dev libdbus-1-dev
+
+      - name: Install webview deps
+        working-directory: desktop/ui
+        run: npm ci
+
+      # tauri-action builds the constrained bundle set + the updater artifacts (latest.json + minisign
+      # .sig), and uploads them to the DRAFT release for this tag.
+      - name: Build bundles + updater artifacts
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "WorkPulse Agent ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseBody: "Automated cross-platform build. Draft — verify SHA256SUMS, then publish to roll out via the updater."
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: --bundles ${{ matrix.bundles }} ${{ matrix.targetArg }}
+
+      # Hand the raw installers to the checksums job (which needs all three OSes' output at once).
+      - name: Upload installers as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}-installers
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
+
+  checksums:
+    name: SHA256SUMS + sign
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      SIGN_KEY: ${{ secrets.RELEASE_SIGNING_KEY_B64 }}
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: staged
+
+      - name: Flatten installers into release-files/
+        run: |
+          mkdir -p release-files
+          find staged -type f \
+            \( -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' \) \
+            -exec cp {} release-files/ \;
+          echo "=== installers ===" && ls -la release-files
+
+      - name: Generate SHA256SUMS
+        working-directory: release-files
+        run: |
+          sha256sum * > SHA256SUMS
+          echo "=== SHA256SUMS ===" && cat SHA256SUMS
+
+      - name: Sign SHA256SUMS (Ed25519)
+        if: env.SIGN_KEY != ''
+        run: |
+          python3 -m pip install --quiet pynacl
+          python3 - <<'PY'
+          import base64, os
+          from nacl.signing import SigningKey
+          key = SigningKey(base64.b64decode(os.environ["SIGN_KEY"]))
+          body = open("release-files/SHA256SUMS", "rb").read()
+          sig = key.sign(body).signature
+          open("release-files/SHA256SUMS.sig", "wb").write(base64.b64encode(sig))
+          print("SHA256SUMS -> SHA256SUMS.sig")
+          PY
+
+      - name: Warn if unsigned
+        if: env.SIGN_KEY == ''
+        run: echo "::warning::RELEASE_SIGNING_KEY_B64 not set — SHA256SUMS shipped UNSIGNED."
+
+      - name: Verify SHA256SUMS covers every installer
+        working-directory: release-files
+        run: |
+          fail=0
+          for f in *; do
+            case "$f" in SHA256SUMS|SHA256SUMS.sig) continue;; esac
+            grep -qi " [*]\?${f}\$" SHA256SUMS || { echo "MISSING: $f"; fail=1; }
+          done
+          [ "$fail" = 0 ] && echo "OK: all installers covered" || exit 1
+
+      - name: Attach SHA256SUMS to the draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: true
+          files: |
+            release-files/SHA256SUMS
+            release-files/SHA256SUMS.sig

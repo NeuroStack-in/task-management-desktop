@@ -13,3 +13,8 @@ pub const TRACKING_CHANGED: &str = "monitor:tracking-changed";
 /// A screenshot capture failed where it should have worked (e.g. macOS Screen-Recording denied) →
 /// the UI surfaces a "grant permission" state instead of silence (M5, risk #5).
 pub const SCREENSHOT_UNAVAILABLE: &str = "monitor:screenshot-unavailable";
+
+/// A restricted (blocked-list) app/site was focused while the timer ran. Payload: the offending
+/// identifier (domain or process). The panel shows the policy warning; the violation itself was
+/// already queued for the server (`PolicyViolation`, action_taken = "warned").
+pub const POLICY_BLOCKED: &str = "monitor:policy-blocked";

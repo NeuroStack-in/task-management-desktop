@@ -4,23 +4,32 @@ import { CardTitleRow, Meter, PanelCard } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { formatCountdown } from "@/lib/format";
-
-const PAUSE_SECS = 5 * 60;
+import type { PauseState } from "@/lib/types";
 
 /**
- * Bounded pause. The tray only *requests* — the core clamps to org policy and records the
+ * How much pause this button asks for. The core clamps it to whatever budget is left
+ * (`PauseState::request`), so the granted window is `min(this, remaining budget)` — which is why
+ * it is also a safe denominator for the meter: the live window can never exceed it.
+ */
+const PAUSE_REQUEST_SECS = 5 * 60;
+
+/**
+ * Bounded pause. The panel only *requests* — the core clamps to org policy and records the
  * pause as an auditable event (PRIVACY.md §5: "agency without creating blind spots").
+ *
+ * Every number here is read back from the core each poll; nothing is counted down locally, so a
+ * reload can't lose a pause that is still in effect.
  */
 export function PauseCard({
-  pauseSecs,
+  pause,
   refused,
   onRequest,
 }: {
-  pauseSecs: number;
+  pause: PauseState;
   refused: boolean;
   onRequest: (secs: number) => void;
 }) {
-  const active = pauseSecs > 0;
+  const budgetSpent = pause.remaining_budget_secs <= 0;
 
   return (
     <PanelCard>
@@ -29,16 +38,16 @@ export function PauseCard({
           icon={<PauseCircle />}
           label="Privacy pause"
           action={
-            active ? (
+            pause.paused ? (
               <span className="tabular text-sm font-semibold text-warning">
-                {formatCountdown(pauseSecs)}
+                {formatCountdown(pause.remaining_secs)}
               </span>
             ) : (
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => onRequest(PAUSE_SECS)}
-                disabled={refused}
+                onClick={() => onRequest(PAUSE_REQUEST_SECS)}
+                disabled={refused || budgetSpent}
               >
                 Pause 5 min
               </Button>
@@ -47,9 +56,12 @@ export function PauseCard({
         />
       </CardHeader>
       <CardContent>
-        {active ? (
+        {pause.paused ? (
           <>
-            <Meter value={(pauseSecs / PAUSE_SECS) * 100} className="bg-warning duration-1000" />
+            <Meter
+              value={Math.min(100, (pause.remaining_secs / PAUSE_REQUEST_SECS) * 100)}
+              className="bg-warning duration-1000"
+            />
             <p className="mt-0.5 text-[11px] text-muted-foreground">
               Capture is suspended. Your organization is notified that it was paused.
             </p>
@@ -58,7 +70,11 @@ export function PauseCard({
           <p className="text-[11px] text-muted-foreground">
             {refused
               ? "Pausing isn't available under your organization's policy."
-              : "Suspends capture for a bounded window. Logged as an auditable event."}
+              : budgetSpent
+                ? "You've used today's pause allowance. It resets tomorrow."
+                : `Suspends capture for a bounded window. ${formatCountdown(
+                    pause.remaining_budget_secs,
+                  )} of pause time left today.`}
           </p>
         )}
       </CardContent>

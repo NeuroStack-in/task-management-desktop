@@ -13,7 +13,6 @@ tauri-build = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 # Shell polish (M6)
 tauri-plugin-single-instance = "2"
-tauri-plugin-window-state = "2"
 tauri-plugin-autostart = "2"
 # Updater (M7)
 tauri-plugin-updater = "2"

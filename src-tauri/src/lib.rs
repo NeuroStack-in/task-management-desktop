@@ -25,6 +25,7 @@ pub mod location;
 pub mod monitor;
 pub mod outbox;
 pub mod rules;
+pub mod session_state;
 pub mod state;
 pub mod timer;
 pub mod updater;
@@ -92,8 +93,6 @@ pub fn run() {
             focus_panel(app);
         }))
         .plugin(tauri_plugin_shell::init())
-        // Persists + restores the panel window size/position (debounced) — M6 window-size.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -112,6 +111,8 @@ pub fn run() {
             commands::timer_status,
             commands::agent_id,
             commands::check_for_updates,
+            commands::set_auto_start,
+            commands::get_auto_start,
             // Panel (kishore's tray UI) command surface.
             commands::panel::get_consent_state,
             commands::panel::grant_consent,
@@ -121,10 +122,12 @@ pub fn run() {
             commands::panel::start_timer,
             commands::panel::stop_timer,
             commands::panel::request_pause,
+            commands::panel::pause_state,
             commands::panel::identity,
             commands::panel::list_projects,
             commands::panel::list_tasks,
             commands::panel::list_sessions,
+            commands::panel::take_pending_resume,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {
@@ -136,19 +139,73 @@ pub fn run() {
         .setup(|app| {
             // Resume a keyring session, then start the sender (Thread B) + monitor (A) + screenshots (C).
             let handle = app.handle().clone();
+            // Consent first and synchronously: the monitor and screenshot threads start just below
+            // and gate on this flag, so restoring it after they spawn would leave a window in which
+            // a consented user is briefly treated as not consented (fail-closed, but it would drop
+            // the first cycle) — and, worse, would race the panel into showing the notice again.
+            {
+                let persisted = crate::session_state::load();
+                app.state::<AppState>().consent.store(
+                    persisted.restore_consent(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                tracing::info!(
+                    "consent restored at startup: {}",
+                    persisted.restore_consent()
+                );
+            }
+
             tauri::async_runtime::spawn(async move {
                 let restored = handle.state::<AppState>().auth.restore().await;
                 tracing::info!("auth restore at startup: {restored}");
             });
             api::spawn_sender(app.handle().clone());
+            // The fast config rail: a 60 s conditional (ETag) pull so an admin's policy change lands
+            // within a minute instead of waiting up to a full screenshot cadence (10 min) for the
+            // next batch-cycle version check. The batch cycle remains the backstop.
+            api::spawn_config_poller(app.handle().clone());
             monitor::spawn(app.handle().clone());
             monitor::spawn_screenshots(app.handle().clone());
 
-            // Register autostart (agent should relaunch at login). `WP_NO_AUTOSTART` opts out in dev.
+            // Autostart policy (was: unconditional `enable()` every launch, which silently forced
+            // launch-at-login and re-overrode the user's choice on every start). Now:
+            //   • Windows — the installer's "Launch at startup" checkbox writes the registry Run key;
+            //     respect it, never override.
+            //   • macOS/Linux — no install wizard, so default autostart ON on the FIRST run only. The
+            //     user can flip it afterward via `set_auto_start`, and that choice sticks.
+            // `WP_NO_AUTOSTART` opts out entirely (dev).
             #[cfg(desktop)]
             if std::env::var_os("WP_NO_AUTOSTART").is_none() {
                 use tauri_plugin_autostart::ManagerExt;
-                let _ = app.autolaunch().enable();
+                let cfg_dir = app.path().app_config_dir().ok();
+                let marker = cfg_dir.as_ref().map(|d| d.join("autostart.initialized"));
+                let first_run = marker.as_ref().map(|m| !m.exists()).unwrap_or(false);
+                if first_run {
+                    // Initial launch-at-login state:
+                    //  • Windows — honor the installer's prompt, recorded in `autostart.choice`
+                    //    (1/0). Absent (portable/dev) → leave off.
+                    //  • macOS/Linux — no install wizard, so default ON.
+                    // The autostart PLUGIN writes the actual OS entry either way, so the state always
+                    // agrees with `get_auto_start` (no NSIS-vs-plugin registry-format drift).
+                    let enable = if cfg!(target_os = "windows") {
+                        cfg_dir
+                            .as_ref()
+                            .and_then(|d| std::fs::read_to_string(d.join("autostart.choice")).ok())
+                            .map(|s| s.trim() == "1")
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    if enable {
+                        let _ = app.autolaunch().enable();
+                    }
+                    if let Some(m) = &marker {
+                        if let Some(parent) = m.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(m, b"1");
+                    }
+                }
             }
 
             // M7: check for a signed update at startup (no-op without a pubkey; `WP_NO_UPDATE` skips).
@@ -194,15 +251,42 @@ pub fn run() {
         .expect("error while building the WorkPulse agent");
 
     app.run(|app_handle, event| {
-        // Auto-sign-out on quit (tray Quit / Ctrl-C / SIGTERM all funnel to ExitRequested). Bounded:
-        // stop the timer with `Shutdown` and clear the session/keyring. Idempotent.
+        // Close the running session on quit (tray Quit / Ctrl-C / SIGTERM all funnel to
+        // ExitRequested), stopping the timer with `Shutdown` so the day isn't left open
+        // (BUILD-PLAN.md:97). Idempotent.
+        //
+        // The session is deliberately **not** cleared here. Tokens live in the OS keyring and refresh
+        // is automatic (ENROLLMENT.md:11); `setup()` calls `auth.restore()` at startup for exactly
+        // this reason. Signing out on every quit made that restore dead code and forced a fresh login
+        // on each launch — for an agent that autostarts at login, that is the difference between
+        // "monitoring resumes" and "monitoring silently doesn't". Sign-out is a user action
+        // (`auth_logout`), not a side effect of closing the window.
         if let RunEvent::ExitRequested { .. } = event {
             let state = app_handle.state::<AppState>();
             let ts = clock::now_epoch_ms();
-            if let Some(ev) = state.timer.lock().unwrap().stop(ts, StopReason::Shutdown) {
-                state.pending_events.lock().unwrap().push(ev);
-            }
-            state.auth.logout();
+            // Bound separately so the timer's MutexGuard is dropped before `state` goes out of
+            // scope at the end of the block — an inline `if let` keeps the temporary alive too long.
+            // Remember what was running *before* stopping it, so reopening can pick the same task
+            // back up. Read under the same lock scope as the stop so the two cannot disagree.
+            let resume = {
+                let mut t = state.timer.lock().unwrap();
+                let snap = t.snapshot(ts);
+                let resume = snap.running.then(|| crate::session_state::ResumeTask {
+                    task_id: snap.task_id.clone().unwrap_or_default(),
+                    project_id: snap.project_id.clone().unwrap_or_default(),
+                    description: snap.description.clone(),
+                    stopped_at_ms: ts,
+                });
+                let stopped = t.stop(ts, StopReason::Shutdown);
+                if let Some(ev) = stopped {
+                    state.pending_events.lock().unwrap().push(ev);
+                }
+                resume
+            };
+            // The session is still *closed* on the server (the TimerStopped event above): the offline
+            // period must not be billed, since nothing was captured during it. Reopening starts a
+            // fresh session on the same task, and today's total comes from the folded entries.
+            crate::session_state::update(|s| s.resume = resume);
         }
     });
 }

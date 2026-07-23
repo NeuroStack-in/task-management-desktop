@@ -110,6 +110,7 @@ mod tests {
                 blur_level: 0,
                 bucket_minute: 1,
                 display: 0,
+                content_sha256: String::new(),
             }],
         };
 

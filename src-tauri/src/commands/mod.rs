@@ -13,6 +13,29 @@ use crate::auth::AuthStatus;
 use crate::clock::now_epoch_ms;
 use crate::state::AppState;
 
+// ---- autostart / launch-at-login (M6) ----
+
+/// Enable or disable launch-at-login. On Windows the installer's "Launch at startup" checkbox sets
+/// the initial state and this changes it afterward; on macOS/Linux (no install wizard) this is the
+/// only control. Writes the OS autostart entry via the autostart plugin.
+#[tauri::command]
+pub fn set_auto_start(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let m = app.autolaunch();
+    let r = if enabled { m.enable() } else { m.disable() };
+    r.map_err(|e| format!("autostart change failed: {e}"))
+}
+
+/// The actual OS launch-at-login state — drives the settings toggle so it reflects reality, not a
+/// cached guess.
+#[tauri::command]
+pub fn get_auto_start(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| format!("autostart query failed: {e}"))
+}
+
 // ---- auth (M1) ----
 
 /// Sign in with Cognito `USER_PASSWORD_AUTH`. May return a `newPasswordSession` if the account was
@@ -41,6 +64,15 @@ pub async fn auth_complete_new_password(
 
 #[tauri::command]
 pub fn auth_logout(state: State<'_, AppState>) {
+    // Full teardown so the next person to sign in on this device starts clean — the timer, queued
+    // captures, consent, pause budget and the resume hand-off are all reset (see state.rs). The
+    // persisted flags that outlive the process are cleared here: the next user must re-consent, and
+    // the previous user's "resume this task" must never auto-start under them.
+    state.reset_for_account_switch();
+    crate::session_state::update(|s| {
+        s.consent_granted = false;
+        s.resume = None;
+    });
     state.auth.logout();
 }
 
@@ -58,6 +90,21 @@ pub fn set_consent(state: State<'_, AppState>, granted: bool) {
     state
         .consent
         .store(granted, std::sync::atomic::Ordering::Relaxed);
+    if !granted {
+        // Turning monitoring off must also drop frames already captured but not yet uploaded —
+        // otherwise the last shots keep leaving the device after the user believes capture is off
+        // (they are re-declared every cycle until uploaded). Mirrors the location-on-withdrawal
+        // behaviour in api/mod.rs.
+        let mut shots = state.screenshots.lock().unwrap();
+        for s in shots.values() {
+            let _ = std::fs::remove_file(&s.path);
+        }
+        shots.clear();
+    }
+    // Persist **both** directions. A revoke that only lived in memory would come back granted on the
+    // next launch — silently resuming capture the user had switched off, which is the worst possible
+    // direction for this flag to fail in.
+    crate::session_state::update(|s| s.consent_granted = granted);
 }
 
 #[tauri::command]

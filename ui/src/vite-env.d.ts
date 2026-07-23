@@ -1,8 +1,8 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  /** Set to "1" to bypass the mock core and invoke the real Tauri commands in dev. */
-  readonly VITE_REAL?: string;
+  // No app-specific vars: the panel reads everything from the core over IPC, and the core reads
+  // its own config from the environment (WP_*). Nothing the backend needs belongs in the webview.
 }
 
 interface ImportMeta {

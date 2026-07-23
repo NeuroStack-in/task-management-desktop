@@ -1,64 +1,76 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as agent from "@/lib/agent";
-import type { AgentSnapshot, Project, Session, Task } from "@/lib/types";
+import { EVENTS } from "@/lib/agent";
+import { clearHistory } from "@/lib/descriptionHistory";
+import type { AgentSnapshot, TimerSelection } from "@/lib/types";
 
-/**
- * Local state is **not** polled every second — the timer runs locally (the recording numerals tick
- * from an anchor), and a start/stop reads immediately. This slow interval only exists to notice a
- * *core-side* change the UI didn't initiate: an idle auto-stop, or the capture indicator flipping.
- */
-const LOCAL_POLL_MS = 15_000;
-/** Today's sessions come from the backend, so they refresh slowly (+ eagerly after start/stop). */
-const SESSIONS_POLL_MS = 20_000;
+const POLL_MS = 1000;
 
 export interface Agent {
   snapshot: AgentSnapshot | null;
   error: string | null;
-  /** Seconds left on the active pause, 0 when not paused. */
-  pauseSecs: number;
   /** Set when the core refused the last pause request (budget spent, or admin-disabled). */
   pauseRefused: boolean;
+  /** Idle seconds reported by the last `monitor:idle-prompt`; null when not prompting. */
+  idleSecs: number | null;
+  /** True after `monitor:screenshot-unavailable` — capture is denied at the OS level. */
+  screenshotBlocked: boolean;
+  /** The restricted app/site last focused during tracking (`monitor:policy-blocked`); null = none. */
+  restrictedHit: string | null;
+  /** Set when a user action (start/stop/switch/consent/pause) failed; shown inline until dismissed. */
+  actionError: string | null;
+  /** True while a write action is in flight — buttons disable / ignore re-clicks. */
+  busy: boolean;
   grantConsent: () => void;
-  /** Start a session against a project (+ optional task) + description — or switch if one is running. */
-  start: (projectId: string, description: string, taskId?: string) => void;
-  stop: () => void;
-  /** Re-fetch projects, tasks and today's sessions (the backend-fed lists). */
-  refresh: () => void;
+  /** Starts with `sel` when stopped; stops (ignoring `sel`) when running. */
+  toggleTimer: (sel: TimerSelection) => void;
+  /** Re-attribute a running timer without stopping the clock. */
+  switchTo: (sel: TimerSelection) => void;
   requestPause: (secs: number) => void;
+  signOut: () => void;
+  /** Dismiss the idle prompt, keeping the timer running. */
+  dismissIdle: () => void;
+  /** Dismiss the restricted-site warning banner. */
+  dismissRestricted: () => void;
+  /** Dismiss the action-error banner. */
+  dismissActionError: () => void;
+  /** Re-read the core now instead of waiting out the poll — what the hero's refresh drives. */
+  refresh: () => Promise<void>;
 }
 
 /**
- * Owns the panel's view state, split by how often each part changes and how expensive it is to read:
+ * Polls the core once a second and owns the panel's whole view state.
  *
- * - **Local state** (timer, consent, capture, config, identity) — in-process Rust reads, polled every
- *   second so the timer ticks smoothly. No network on this path, which is what keeps the clock from
- *   stuttering/skipping.
- * - **Projects + tasks** — backend reads, fetched once on mount and on an explicit refresh.
- * - **Today's sessions** — backend read, refreshed every 20 s and eagerly right after a start/stop.
- *
- * The old design fetched all three backend lists on the 1 s timer tick, so every second waited on
- * three AWS round-trips — the poll landed irregularly and the timer jumped. This separation fixes it.
+ * Polling covers steady state; the core's events cover the transitions a 1 s poll would show late
+ * or miss entirely (a session dying, capture being denied). Both feed the same `refresh`, so an
+ * event is only ever an early nudge — never a second source of truth.
  */
 export function useAgent(): Agent {
-  const [local, setLocal] = useState<agent.LocalState | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pauseSecs, setPauseSecs] = useState(() => agent.initialPauseSecs());
   const [pauseRefused, setPauseRefused] = useState(false);
+  const [idleSecs, setIdleSecs] = useState<number | null>(null);
+  const [screenshotBlocked, setScreenshotBlocked] = useState(false);
+  const [restrictedHit, setRestrictedHit] = useState<string | null>(null);
+  // User-action feedback: set when an explicit action (start/stop/switch/consent/pause) fails, so the
+  // panel can show it — unlike the poll's `error`, which is cleared on the next successful read.
+  const [actionError, setActionError] = useState<string | null>(null);
+  // In-flight flag so buttons can disable / ignore re-clicks while an action is pending.
+  const [busy, setBusy] = useState(false);
+  // Ref mirror of `busy`, checked synchronously so a rapid double-click is dropped before a second
+  // call can fire (state updates are async and would let both clicks through).
+  const busyRef = useRef(false);
 
-  // Avoids a slow local read landing after a newer one and rewinding the UI.
+  // Avoids a slow poll landing after a newer one and rewinding the UI.
   const seq = useRef(0);
 
-  // ── fast local poll (1 s, no network) ──
-  const pollLocal = useCallback(async () => {
+  const refresh = useCallback(async () => {
     const id = ++seq.current;
     try {
-      const next = await agent.readLocal();
+      const next = await agent.readSnapshot();
       if (id !== seq.current) return;
-      setLocal(next);
+      setSnapshot(next);
       setError(null);
     } catch (e) {
       if (id !== seq.current) return;
@@ -67,102 +79,148 @@ export function useAgent(): Agent {
   }, []);
 
   useEffect(() => {
-    void pollLocal();
-    const t = setInterval(() => void pollLocal(), LOCAL_POLL_MS);
+    void refresh();
+    const t = setInterval(() => void refresh(), POLL_MS);
     return () => clearInterval(t);
-  }, [pollLocal]);
+  }, [refresh]);
 
-  // ── projects + tasks (on mount + refresh) ──
-  const reloadCatalog = useCallback(() => {
-    void agent.fetchProjects().then(setProjects);
-    void agent.fetchTasks().then(setTasks);
-  }, []);
-  useEffect(() => reloadCatalog(), [reloadCatalog]);
-
-  // ── today's sessions (slow poll + after start/stop) ──
-  const reloadSessions = useCallback(() => {
-    void agent.fetchSessions().then(setSessions);
-  }, []);
+  // Core events. Each unlisten is awaited on cleanup so a remount can't double-subscribe.
   useEffect(() => {
-    reloadSessions();
-    const t = setInterval(reloadSessions, SESSIONS_POLL_MS);
-    return () => clearInterval(t);
-  }, [reloadSessions]);
+    const subs = [
+      // The session died (401 on refresh). Re-read immediately so the login gate takes over now
+      // rather than up to a second later.
+      agent.listen(EVENTS.authExpired, () => void refresh()),
+      // Tracking started/stopped outside the panel (idle auto-stop, tray).
+      agent.listen(EVENTS.trackingChanged, () => void refresh()),
+      // Capture is denied at the OS level (e.g. macOS Screen Recording). Sticky: it stays until the
+      // user acts, because the next capture attempt is a whole cadence away.
+      agent.listen(EVENTS.screenshotUnavailable, () => setScreenshotBlocked(true)),
+      agent.listen<number>(EVENTS.idlePrompt, (secs) => setIdleSecs(secs)),
+      // A restricted app/site was focused mid-session. The core already queued the violation for
+      // the server; this is the employee-facing half of the warning.
+      agent.listen<string>(EVENTS.policyBlocked, (identifier) => setRestrictedHit(identifier)),
+    ];
+    return () => {
+      for (const s of subs) void s.then((un) => un());
+    };
+  }, [refresh]);
 
-  // Pause countdown is tracked here because the core exposes no pause-state read command.
+  // The core hard-stops the timer well after the prompt; once it isn't running, the prompt is moot.
   useEffect(() => {
-    if (pauseSecs <= 0) return;
-    const t = setInterval(() => setPauseSecs((s) => Math.max(0, s - 1)), 1000);
-    return () => clearInterval(t);
-  }, [pauseSecs > 0]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (snapshot && !snapshot.timer.running) setIdleSecs(null);
+  }, [snapshot?.timer.running]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const snapshot: AgentSnapshot | null = local
-    ? {
-        ...local,
-        projects,
-        tasks,
-        activity: [],
-        // Fold the live segment in so the running session's row ticks between server refreshes.
-        sessions: agent.withLiveSession(sessions, local.timer),
-      }
-    : null;
+  // Whenever the session drops — an explicit sign-out OR a token that expired (auth:expired) — clear
+  // the ephemeral per-session banners so a policy violation, pause-refusal or idle prompt from one
+  // user can never greet the next person who signs in on this device.
+  useEffect(() => {
+    if (snapshot && !snapshot.auth.signedIn) {
+      setRestrictedHit(null);
+      setPauseRefused(false);
+      setIdleSecs(null);
+      setActionError(null);
+    }
+  }, [snapshot?.auth.signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const grantConsent = useCallback(() => {
-    if (!local) return;
-    void agent
-      .grantConsent(local.consent.policy_version)
-      .then(pollLocal)
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
-  }, [local, pollLocal]);
+  const reportAction = useCallback((e: unknown) => {
+    setActionError(e instanceof Error ? e.message : String(e));
+  }, []);
 
-  const start = useCallback(
-    (projectId: string, description: string, taskId?: string) => {
-      if (!local) return;
-      // Start when idle, switch when running. Refresh the timer immediately + reload sessions so the
-      // new row shows without waiting for the 20 s cycle.
-      void agent.switchSession(projectId, description, local.timer.running, taskId).then(() => {
-        void pollLocal();
-        reloadSessions();
-      });
+  // Run a write action single-flight, surfacing any failure. The ref guard is checked synchronously,
+  // so a rapid double-click is dropped before a second call can fire (e.g. starting two timers).
+  const run = useCallback(
+    (fn: () => Promise<unknown>) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setBusy(true);
+      setActionError(null);
+      void fn()
+        .then(refresh)
+        .catch(reportAction)
+        .finally(() => {
+          busyRef.current = false;
+          setBusy(false);
+        });
     },
-    [local, pollLocal, reloadSessions],
+    [refresh, reportAction],
   );
 
-  const stop = useCallback(() => {
-    if (!local) return;
-    void agent.stopTimer().then(() => {
-      void pollLocal();
-      // A stopped session becomes a completed entry once the batch folds — reload shortly after.
-      reloadSessions();
-      window.setTimeout(reloadSessions, 3000);
-    });
-  }, [local, pollLocal, reloadSessions]);
+  const grantConsent = useCallback(() => {
+    if (!snapshot) return;
+    run(() => agent.grantConsent(snapshot.consent.policy_version));
+  }, [snapshot, run]);
 
-  const refresh = useCallback(() => {
-    reloadCatalog();
-    reloadSessions();
-  }, [reloadCatalog, reloadSessions]);
+  const toggleTimer = useCallback(
+    (sel: TimerSelection) => {
+      if (!snapshot) return;
+      setIdleSecs(null);
+      run(() => (snapshot.timer.running ? agent.stopTimer() : agent.startTimer(sel)));
+    },
+    [snapshot, run],
+  );
+
+  const switchTo = useCallback(
+    (sel: TimerSelection) => {
+      if (!snapshot?.timer.running) return;
+      run(() => agent.switchTo(sel));
+    },
+    [snapshot, run],
+  );
 
   const requestPause = useCallback(
     (secs: number) => {
-      void agent.requestPause(secs).then((grant) => {
-        setPauseRefused(!grant.granted);
-        if (grant.granted) setPauseSecs(grant.granted_secs);
-        void pollLocal();
-      });
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setBusy(true);
+      setActionError(null);
+      void agent
+        .requestPause(secs)
+        .then((grant) => {
+          setPauseRefused(!grant.granted);
+          // No local countdown: the next poll reads the authoritative window from the core.
+          void refresh();
+        })
+        .catch(reportAction)
+        .finally(() => {
+          busyRef.current = false;
+          setBusy(false);
+        });
     },
-    [pollLocal],
+    [refresh, reportAction],
   );
+
+  const signOut = useCallback(() => {
+    // Clear the device-global description MRU + every ephemeral per-session banner, so the next
+    // person who signs in on this device inherits none of the previous user's UI state.
+    clearHistory();
+    setActionError(null);
+    setRestrictedHit(null);
+    setPauseRefused(false);
+    setIdleSecs(null);
+    void agent.logout().then(refresh).catch(reportAction);
+  }, [refresh, reportAction]);
+
+  const dismissIdle = useCallback(() => setIdleSecs(null), []);
+  const dismissRestricted = useCallback(() => setRestrictedHit(null), []);
+  const dismissActionError = useCallback(() => setActionError(null), []);
 
   return {
     snapshot,
     error,
-    pauseSecs,
     pauseRefused,
+    idleSecs,
+    screenshotBlocked,
+    restrictedHit,
+    actionError,
+    busy,
     grantConsent,
-    start,
-    stop,
-    refresh,
+    toggleTimer,
+    switchTo,
     requestPause,
+    signOut,
+    dismissIdle,
+    dismissRestricted,
+    dismissActionError,
+    refresh,
   };
 }

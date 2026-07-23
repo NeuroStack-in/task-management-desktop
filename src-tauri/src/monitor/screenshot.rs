@@ -16,9 +16,20 @@ use image::imageops::FilterType;
 use wp_agent_contract::ScreenshotMeta;
 
 /// Max WebP width; taller shots keep aspect.
-const MAX_WIDTH: u32 = 768;
-/// Lossy WebP quality (0–100).
-const WEBP_QUALITY: f32 = 75.0;
+///
+/// **Deliberate deviation from the LLD (owner decision, 2026-07-21).** The LLD specifies 768px in
+/// three places (§33, §592, §1035) and `BUILD-PLAN.md:209` adopts it. In practice 768px is a ~40%
+/// downscale of a 1920-wide display, which leaves on-screen text unreadable — so the review grid
+/// could not answer the one question it exists to answer ("what was this person working on?").
+/// 1280px is ~67% and legible, while still well short of shipping a native-resolution frame.
+///
+/// This weakens the "minimum useful fidelity" position in `PRIVACY.md:76`; the fidelity is now
+/// *useful* rather than *minimum*. **The LLD should be amended to match** — do not silently revert
+/// this to 768 to close the gap, and do not raise it further without the same conversation.
+const MAX_WIDTH: u32 = 1280;
+/// Lossy WebP quality (0–100). Not specified by the LLD (which fixes only the width); raised from
+/// 75 alongside the width bump, since a sharper downscale is wasted on a soft encode.
+const WEBP_QUALITY: f32 = 85.0;
 
 /// Map a blur level to a Gaussian sigma. 0 = no blur.
 fn blur_sigma(blur_level: u8) -> f32 {
@@ -72,6 +83,10 @@ pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(Screensh
     if std::fs::create_dir_all(&dir).is_err() {
         return Vec::new();
     }
+    // Lock the buffer down (once per process) so *other* users on the machine can't read or swap the
+    // pending images. This complements the upload-time SHA-256 check: hashing catches the monitored
+    // user's own scripts (same identity as the agent), ACLs stop everyone else.
+    HARDEN_ONCE.call_once(|| harden_dir(&dir));
     monitors
         .into_iter()
         .enumerate()
@@ -79,7 +94,74 @@ pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(Screensh
         .collect()
 }
 
-/// Grab + process one display. `None` on capture/encode/IO failure for this monitor alone.
+static HARDEN_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// Restrict the screenshot buffer directory to the agent's own user (+ SYSTEM/Administrators on
+/// Windows). Best-effort and **never fatal** — a failure here must not stop capture; it's a
+/// hardening layer, not a gate.
+///
+/// **What it does and doesn't stop:** it denies *other* users on a shared machine. It does **not**
+/// stop the monitored user's own scripts — they run as the same identity as the agent — which is
+/// exactly what the upload-time content hash is for. Defence in depth, not a silver bullet.
+#[cfg(windows)]
+fn harden_dir(dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let user = std::env::var("USERNAME").unwrap_or_default();
+
+    let mut cmd = Command::new("icacls");
+    cmd.arg(dir).arg("/inheritance:r"); // drop inherited (broad) permissions
+    if !user.is_empty() {
+        cmd.arg("/grant:r").arg(format!("{user}:(OI)(CI)F"));
+    }
+    cmd.arg("/grant:r")
+        .arg("SYSTEM:(OI)(CI)F")
+        .arg("/grant:r")
+        .arg("Administrators:(OI)(CI)F")
+        .arg("/T")
+        .arg("/C")
+        .arg("/Q")
+        .creation_flags(CREATE_NO_WINDOW);
+
+    match cmd.output() {
+        Ok(o) if o.status.success() => tracing::info!("screenshot buffer directory locked down"),
+        Ok(o) => tracing::warn!(
+            "icacls harden failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => tracing::warn!("could not harden screenshot dir: {e}"),
+    }
+}
+
+#[cfg(unix)]
+fn harden_dir(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    // rwx for the owner only.
+    if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+        tracing::warn!("could not set 0700 on screenshot dir: {e}");
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn harden_dir(_dir: &Path) {}
+
+/// Lowercase-hex SHA-256 of `bytes`. Used to bind a screenshot's captured bytes to the upload so a
+/// swapped file on disk is detected (tamper-evidence).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Grab + process one display. `None` on capture/encode/IO failure for this monitor alone. The
+/// returned `meta.content_sha256` is the SHA-256 of the exact WebP bytes written — the tamper-evidence
+/// anchor that rides the authenticated batch and gates the upload.
 fn process_monitor(
     monitor: &xcap::Monitor,
     app: &str,
@@ -110,6 +192,9 @@ fn process_monitor(
     let webp_bytes =
         webp::Encoder::from_rgba(&rgba, rgba.width(), rgba.height()).encode(WEBP_QUALITY);
 
+    // Bind these exact bytes for tamper-evidence — computed here, before the file leaves our hands.
+    let content_sha256 = sha256_hex(&webp_bytes);
+
     let id = uuid::Uuid::new_v4().to_string();
     let path = dir.join(format!("{id}.webp"));
     std::fs::write(&path, &*webp_bytes).ok()?;
@@ -122,6 +207,7 @@ fn process_monitor(
         blur_level,
         bucket_minute: captured_at.div_euclid(60_000),
         display,
+        content_sha256,
     };
     Some((meta, path))
 }
@@ -145,8 +231,20 @@ mod tests {
 
     #[test]
     fn scaled_dims_preserve_aspect_and_cap_width() {
-        assert_eq!(scaled_dims(1920, 1080), (768, 432));
+        assert_eq!(scaled_dims(1920, 1080), (1280, 720)); // 16:9 stays 16:9
+        assert_eq!(scaled_dims(2560, 1600), (1280, 800)); // 16:10 stays 16:10
         assert_eq!(scaled_dims(640, 480), (640, 480)); // already under cap
+    }
+
+    #[test]
+    fn sha256_hex_is_stable_and_detects_a_changed_byte() {
+        // Known vector: SHA-256("abc").
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // Any change flips the hash — this is what catches a swapped screenshot.
+        assert_ne!(sha256_hex(b"abc"), sha256_hex(b"abd"));
     }
 
     #[test]

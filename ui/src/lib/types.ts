@@ -1,26 +1,32 @@
 /**
- * Mirrors the serde shapes returned by the tray's Tauri commands.
- * Source of truth: tray/src-tauri/src/features/*.rs and
- * backend/crates/wp-agent-contract/src/config.rs (TrackingConfig).
+ * Mirrors the serde shapes returned by the core's Tauri commands.
+ *
+ * Source of truth:
+ *   src-tauri/src/commands/panel.rs   (snake_case DTOs — policy_version, next_cycle_secs, …)
+ *   src-tauri/src/commands/mod.rs     (auth DTOs — camelCase, see AuthStatus)
+ *   src-tauri/src/api/{projects,tasks,timesheet}.rs  (backend-fed rows)
+ *   ../backend/crates/wp-agent-contract/src/config.rs (TrackingConfig)
+ *
+ * Hand-maintained, no codegen — if a DTO changes Rust-side, change it here too.
  */
 
 export type Cadence = "off" | "min3" | "min5" | "min10";
 
-/** tray/src-tauri/src/features/consent.rs */
+/** panel.rs — ConsentStateDto */
 export interface ConsentState {
   granted: boolean;
   policy_version: number;
   captured: string[];
 }
 
-/** tray/src-tauri/src/features/capture_indicator.rs */
+/** panel.rs — CaptureStateDto */
 export interface CaptureState {
   capturing: boolean;
   screenshots: boolean;
   next_cycle_secs: number;
 }
 
-/** backend/crates/wp-agent-contract/src/config.rs */
+/** wp-agent-contract config.rs — TrackingConfig */
 export interface TrackingConfig {
   version: number;
   cadence: Cadence;
@@ -31,45 +37,61 @@ export interface TrackingConfig {
   silent: boolean;
 }
 
-/** tray/src-tauri/src/features/pause.rs */
+/** panel.rs — PauseGrantDto */
 export interface PauseGrant {
   granted: boolean;
   granted_secs: number;
   remaining_budget_secs: number;
 }
 
-/** tray/src-tauri/src/features/timer_ui.rs */
+/**
+ * panel.rs — PauseStateDto. The authoritative pause window, read from the core each poll.
+ *
+ * The panel must not count this down locally: the core owns the budget, and a webview reload used
+ * to lose the countdown while capture stayed suspended.
+ */
+export interface PauseState {
+  paused: boolean;
+  remaining_secs: number;
+  remaining_budget_secs: number;
+}
+
+/**
+ * panel.rs — TimerStateDto.
+ *
+ * `project_id` and `description` are what the backend folds time entries by, so they are part of
+ * the state, not just start arguments — the panel reads them back to keep its inputs pointed at
+ * whatever the core is actually timing.
+ */
 export interface TimerState {
   running: boolean;
   task_id: string | null;
-  /** The project the running session is attributed to (null in a task-only/legacy session). */
   project_id: string | null;
-  /** What the user typed they're working on ("what are you working on?"). */
   description: string;
   elapsed_secs: number;
 }
 
-/**
- * A project the timer can be attributed to — the "Select project" picker's rows.
- *
- * Real: `list_projects` fetches `GET /v1/projects` with the user's JWT (id/name/billable). Mock:
- * derived from the demo task list. `billable` is display-only on the agent side.
- */
+/** api/projects.rs — ProjectDto (`GET /v1/projects`). */
 export interface Project {
   id: string;
   name: string;
   billable: boolean;
+  status: string;
 }
 
 /**
- * A task the timer can be attributed to. Real, from `GET /v1/me/tasks` (`list_tasks`) — the assignee's
- * tasks with titles (the backend batch-gets titles that GSI1 doesn't project). The project *name* is
- * looked up from the `projects` list by `project_id`, so it isn't carried here.
+ * api/tasks.rs — TaskDto (`GET /v1/me/tasks`) **joined onto its project**.
+ *
+ * The wire row carries only `{id, title, project_id}`. `project_name` and `billable` are filled in
+ * by `agent.ts` from the projects list; a task whose project isn't in that list falls back to
+ * "Unassigned" rather than rendering a raw id.
  */
 export interface Task {
   id: string;
   title: string;
   project_id: string;
+  project_name: string;
+  billable: boolean;
 }
 
 /**
@@ -83,52 +105,57 @@ export interface Task {
 export type ActivitySeries = number[];
 
 /**
- * A task worked today and its total for the day, including any live segment.
+ * api/timesheet.rs — SessionDto (`GET /v1/me/timesheet/today`).
  *
- * Mirrors the web app's per-task day clock (timer.store.ts: "Banked seconds **per task**
- * … so returning to a task always resumes from its day total").
- *
- * PROPOSED — no command returns this. The core does own the authoritative timer state
- * machine and emits TimerStarted/TimerStopped (timer_ui.rs), so it has the raw material;
- * it needs a `sessions_today()` command to expose the roll-up.
+ * The server folds this agent's own TimerStarted/Stopped events into time entries and aggregates
+ * them per **(project, description)** — not per task. A session therefore has no `task_id`, and
+ * the panel must not try to look one up.
  */
 export interface Session {
   project_id: string;
-  /** What was worked on (the free-text description); the session's human label. */
   description: string;
   secs: number;
 }
 
-/**
- * The person this device reports as.
- *
- * ENROLLMENT.md §2: "A device is a first-class, org-scoped entity bound to exactly one user."
- * Showing who that is, is transparency — the monitored person should never have to guess whose
- * timesheet their activity lands on.
- *
- * PROPOSED — no command returns this. The binding is established at enrollment and the core
- * holds it; it needs an `identity()` command (or the state push) to surface it.
- * `avatar_url` mirrors the web app's User.avatarUrl, which is empty for seeded users — the
- * gradient monogram is the intended default, not a missing image.
- */
+/** panel.rs — IdentityDto. Name/email come from the ID-token claims, never the `sub` UUID. */
 export interface Identity {
   name: string;
   email: string;
   avatar_url: string;
 }
 
+/**
+ * commands/mod.rs — AuthStatus. **camelCase** (`#[serde(rename_all = "camelCase")]`), unlike the
+ * panel DTOs above; optional fields are omitted entirely rather than sent as null.
+ */
+export interface AuthStatus {
+  signedIn: boolean;
+  tenantId?: string;
+  username?: string;
+  /** Present when Cognito demands a new password (admin-created first login). */
+  newPasswordSession?: string;
+}
+
+/** What `start_timer` needs. `task_id` is optional core-side — a project alone is a valid session. */
+export interface TimerSelection {
+  taskId: string | null;
+  projectId: string | null;
+  description: string;
+}
+
 /** Everything the panel renders, polled as one snapshot. */
 export interface AgentSnapshot {
-  /** Null until the proposed command above exists. */
+  auth: AuthStatus;
+  /** Null when signed out — the panel hides the avatar rather than inventing a person. */
   identity: Identity | null;
   consent: ConsentState;
   capture: CaptureState;
   config: TrackingConfig;
   timer: TimerState;
-  /** The user's projects for the picker — real, from `GET /v1/projects`. */
+  pause: PauseState;
   projects: Project[];
-  /** Empty until the proposed commands above exist. */
   tasks: Task[];
+  /** Still empty — no `recent_activity` command exists (see ActivitySeries above). */
   activity: ActivitySeries;
   sessions: Session[];
 }

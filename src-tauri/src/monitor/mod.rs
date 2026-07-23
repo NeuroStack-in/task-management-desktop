@@ -31,8 +31,16 @@ use input::InputSampler;
 const WINDOW_SAMPLE_EVERY: u64 = 5;
 /// Prompt the user after this much continuous idle.
 const IDLE_PROMPT_SECS: u64 = 300;
+/// No user input for this long marks the machine **idle** in the fleet heartbeat. Independent of the
+/// timer and shorter than the prompt/auto-stop thresholds: the heartbeat answers "is anyone at this
+/// machine right now", not "should we stop the timer".
+const HEARTBEAT_IDLE_SECS: u64 = 60;
 /// Hard-stop the timer after this much continuous idle (no productive time is invented).
 const AUTO_STOP_SECS: u64 = 900;
+/// Re-warn (and re-report) the same restricted identifier at most once per this window. One
+/// YouTube session is one violation with one warning — not sixty per minute; a *different*
+/// restricted site during the cooldown still fires immediately (the map is per-identifier).
+const VIOLATION_COOLDOWN_MS: i64 = 5 * 60 * 1000;
 
 /// One `splitmix64` step → a uniform `f64` in `[0, 1)`. Cheap, no-dep PRNG; good enough for
 /// anti-evasion jitter (not cryptographic). Seeded per shot from `clock::entropy_seed()`.
@@ -109,23 +117,42 @@ pub fn spawn_screenshots(app: AppHandle) {
             next_window = shot_window + 1;
             tokio::time::sleep(Duration::from_millis(sleep_ms.max(0) as u64)).await;
 
+            // Read the foreground window once — used both for the exception carve-out and as the
+            // capture's app label. Fetched before the config lock so no syscall runs under it.
+            let focus = active_window::current();
+
             // Gates (scoped so `state` isn't held across the blocking capture).
-            let (go, blur) = {
+            let (go, blur, excepted) = {
                 let state = app.state::<AppState>();
                 let running = state.timer.lock().unwrap().is_running();
                 let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
                 // Privacy pause (panel PauseCard) suspends capture until the grant expires.
                 let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
                 let cfg = state.config.lock().unwrap();
-                let t = &cfg.get().tracking;
-                let on = !matches!(t.cadence, wp_agent_contract::Cadence::Off);
-                (running && consented && on && !paused, t.blur_level)
+                let c = cfg.get();
+                let on = !matches!(c.tracking.cadence, wp_agent_contract::Cadence::Off);
+                // Privacy exceptions carve-out (§14 / PRIVACY.md §2): a focused excepted app/site is
+                // never screenshotted. Match on the full app+title+url haystack, like the span path.
+                let excepted = focus.as_ref().is_some_and(|f| {
+                    let haystack = format!(
+                        "{} {} {}",
+                        f.app,
+                        f.title.as_deref().unwrap_or(""),
+                        f.url.as_deref().unwrap_or("")
+                    );
+                    crate::rules::is_excepted(&haystack, &c.rules)
+                });
+                (
+                    running && consented && on && !paused,
+                    c.tracking.blur_level,
+                    excepted,
+                )
             };
-            if !go {
+            if !go || excepted {
                 continue;
             }
 
-            let app_name = active_window::current().map(|f| f.app).unwrap_or_default();
+            let app_name = focus.map(|f| f.app).unwrap_or_default();
             let cap_ts = clock::now_epoch_ms();
             // One shot per connected display (dual-monitor → two); all share this cycle's timestamp.
             let shots = tokio::task::spawn_blocking(move || {
@@ -161,6 +188,9 @@ fn run(app: AppHandle) {
     let mut tick: u64 = 0;
     let mut was_running = false;
     let mut idle_prompted = false;
+    // identifier → last time it was warned/reported (the violation debounce).
+    let mut last_violation: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
 
     loop {
         thread::sleep(Duration::from_secs(1));
@@ -172,16 +202,70 @@ fn run(app: AppHandle) {
         let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
         // Privacy pause (panel PauseCard) suspends activity capture until the grant expires.
         let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
+
+        // Idle for the fleet heartbeat is sampled every tick, independent of the capture gate below:
+        // a signed-in machine can be idle whether or not a timer is running. Published for
+        // `cycle::assemble_and_enqueue` to fold into the next heartbeat. Reused inside the gate so the
+        // OS is queried once per tick.
+        let idle = idle::idle_seconds();
+        state.idle.store(
+            idle >= HEARTBEAT_IDLE_SECS,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         if running && consented && !paused {
             let now = clock::now_epoch_ms();
-            let idle = idle::idle_seconds();
             let (kb, mouse) = sampler.sample();
             bucketer.tick(now, idle, kb, mouse);
 
             if tick.is_multiple_of(WINDOW_SAMPLE_EVERY) {
                 if let Some(f) = active_window::current() {
                     let rules = state.config.lock().unwrap().get().rules.clone();
-                    if !crate::rules::is_untracked(&f.app, &rules) {
+
+                    // Restricted-list enforcement (LLD §14) — timer-gated by this whole branch,
+                    // and checked BEFORE the untracked filter (the three rule lists are
+                    // orthogonal: an untracked app can still be restricted). URL when the
+                    // platform yields one, title as the fallback signal, process name for apps.
+                    let haystack = format!(
+                        "{} {} {}",
+                        f.app,
+                        f.title.as_deref().unwrap_or(""),
+                        f.url.as_deref().unwrap_or("")
+                    );
+                    if let Some((kind, identifier)) = crate::rules::blocked_match(&haystack, &rules)
+                    {
+                        let due = last_violation
+                            .get(&identifier)
+                            .is_none_or(|t| now - t >= VIOLATION_COOLDOWN_MS);
+                        if due {
+                            last_violation.insert(identifier.clone(), now);
+                            // Report first (the manager's flag), then warn (the employee's toast):
+                            // `action_taken: warned` must be true by the time the batch leaves.
+                            state.pending_events.lock().unwrap().push(
+                                wp_agent_contract::AgentEvent::PolicyViolation {
+                                    ts: now,
+                                    kind: kind.to_string(),
+                                    identifier: identifier.clone(),
+                                    action_taken: "warned".to_string(),
+                                },
+                            );
+                            state.flush.notify_one();
+                            // The visible warning: surface the panel and tell the webview which
+                            // site/app tripped the policy. Deliberately shown, not focus-stolen —
+                            // the point is "you were seen", not yanking the keyboard mid-keystroke.
+                            if let Some(w) = app.get_webview_window("panel") {
+                                let _ = w.show();
+                            }
+                            let _ = app.emit(events::POLICY_BLOCKED, identifier);
+                        }
+                    }
+
+                    // Privacy exceptions carve-out (§14 / PRIVACY.md §2): while an excepted app/site
+                    // is focused, record nothing about it — no activity span (the screenshot loop
+                    // applies the same carve-out to its capture). Orthogonal to `is_untracked`, so
+                    // check it independently on the full app+title+url haystack.
+                    let excepted = crate::rules::is_excepted(&haystack, &rules);
+                    if !excepted && !crate::rules::is_untracked(&f.app, &rules) {
                         let cat = crate::rules::classify_focus(&f.app, &rules);
                         bucketer.sample_app(
                             now,

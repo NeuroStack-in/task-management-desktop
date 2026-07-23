@@ -37,6 +37,46 @@ pub fn is_untracked(app: &str, rules: &AppUrlRules) -> bool {
         .any(|r| !r.tracked && a.contains(&r.process_name.to_lowercase()))
 }
 
+/// Does the focused window match the org's **privacy exceptions** carve-out?
+///
+/// While one of these is focused the agent records **nothing** about it — no screenshot and no
+/// activity span (§14 / PRIVACY.md §2: "never screenshot or track"). Same matching shape as
+/// `blocked_match`: the app name, plus the window title / URL when the platform yields them, are
+/// searched against the exception app + domain lists (both are plain identifier strings). Empty
+/// entries never match. Checked independently of the other two lists — an app can be classified,
+/// blocked, and excepted in any combination (§14).
+pub fn is_excepted(haystack: &str, rules: &AppUrlRules) -> bool {
+    let h = haystack.to_lowercase();
+    rules
+        .exceptions
+        .urls
+        .iter()
+        .chain(rules.exceptions.apps.iter())
+        .any(|id| !id.trim().is_empty() && h.contains(&id.to_lowercase()))
+}
+
+/// Does the focused window match the org's **restricted** (blocked) lists?
+///
+/// `haystack` is app + title + URL concatenated — the URL when the platform yields one, the window
+/// title as the fallback signal (a domain often appears there), the process name for app rules.
+/// Returns the contract's `(kind, identifier)` — `blocked_url` beats `blocked_app`, mirroring
+/// "URL beats app" in classification (LLD §14). Checked independently of `is_untracked`: the three
+/// rule lists are orthogonal, so an untracked app can still be restricted.
+pub fn blocked_match(haystack: &str, rules: &AppUrlRules) -> Option<(&'static str, String)> {
+    let h = haystack.to_lowercase();
+    for domain in &rules.blocked.urls {
+        if !domain.trim().is_empty() && h.contains(&domain.to_lowercase()) {
+            return Some(("blocked_url", domain.clone()));
+        }
+    }
+    for process in &rules.blocked.apps {
+        if !process.trim().is_empty() && h.contains(&process.to_lowercase()) {
+            return Some(("blocked_app", process.clone()));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod focus_tests {
     use super::*;
@@ -77,5 +117,49 @@ mod focus_tests {
         r.apps[0].tracked = false;
         assert!(is_untracked("chrome", &r));
         assert!(!is_untracked("code", &r));
+    }
+
+    #[test]
+    fn blocked_match_finds_urls_and_apps_and_prefers_url() {
+        let mut r = rules();
+        r.blocked.urls = vec!["youtube.com".into()];
+        r.blocked.apps = vec!["steam".into()];
+        // Domain visible in the title/url haystack → blocked_url with the offending domain.
+        assert_eq!(
+            blocked_match("chrome Watch - youtube.com", &r),
+            Some(("blocked_url", "youtube.com".to_string()))
+        );
+        assert_eq!(
+            blocked_match("steam big picture", &r),
+            Some(("blocked_app", "steam".to_string()))
+        );
+        // A haystack matching both reports the URL (URL beats app, LLD §14).
+        r.blocked.apps = vec!["chrome".into()];
+        assert_eq!(
+            blocked_match("chrome youtube.com", &r).unwrap().0,
+            "blocked_url"
+        );
+        assert_eq!(blocked_match("code main.rs", &r), None);
+        // Empty entries never match everything.
+        r.blocked.urls = vec!["".into()];
+        r.blocked.apps = vec!["  ".into()];
+        assert_eq!(blocked_match("anything", &r), None);
+    }
+
+    #[test]
+    fn excepted_matches_app_or_url_and_ignores_empties() {
+        let mut r = rules();
+        r.exceptions.apps = vec!["1password".into()];
+        r.exceptions.urls = vec!["bank.example".into()];
+        // Matches the exempt app by process name…
+        assert!(is_excepted("1password main window", &r));
+        // …and the exempt domain seen in the title/url haystack.
+        assert!(is_excepted("chrome Sign in - bank.example", &r));
+        // An unrelated window is not excepted.
+        assert!(!is_excepted("code main.rs", &r));
+        // Empty entries never match everything.
+        r.exceptions.apps = vec!["  ".into()];
+        r.exceptions.urls = vec!["".into()];
+        assert!(!is_excepted("anything", &r));
     }
 }

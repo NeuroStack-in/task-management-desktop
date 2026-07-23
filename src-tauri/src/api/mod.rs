@@ -19,7 +19,7 @@ pub mod timesheet;
 use std::path::Path;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use wp_agent_contract::PresignedUpload;
 
 use crate::cycle::{self, SCREENSHOT_ATTEMPT_CAP};
@@ -29,6 +29,10 @@ use crate::state::AppState;
 /// Fallback heartbeat interval when the owner set cadence to `Off` (no screenshots) — the fleet still
 /// needs periodic heartbeats, so we don't go silent.
 const DEFAULT_CYCLE_SECS: u64 = 300;
+
+/// Interval for `spawn_config_poller` — one conditional (ETag) config GET per minute; a 304 except
+/// in the minute after an admin changed the policy.
+const CONFIG_POLL_SECS: u64 = 60;
 
 /// Spawn the sender loop on Tauri's async (tokio) runtime.
 ///
@@ -45,6 +49,8 @@ pub fn spawn_sender(app: tauri::AppHandle) {
         let upload = client::upload_client();
         // Cloned once so `select!` can await it without re-borrowing `AppState` each tick.
         let flush = app.state::<AppState>().flush.clone();
+        // Tracks the last observed session so a sign-out can be reported once, as an edge.
+        let mut was_signed_in = false;
         loop {
             // The heartbeat interval tracks the current screenshot cadence, read fresh each cycle so a
             // policy change takes effect on the next window.
@@ -71,9 +77,20 @@ pub fn spawn_sender(app: tauri::AppHandle) {
             let state = app.state::<AppState>();
 
             // Auth-gated: no token → skip (don't grow the outbox while signed out).
+            //
+            // `id_token()` also drives the `auth:expired` edge (BUILD-PLAN.md M1: "401 →
+            // `auth:expired`"). A 401 on refresh makes `AuthManager` log itself out, so the token
+            // going from Some to None is precisely the moment the session died — as opposed to the
+            // user signing out, which lands here too but only after the UI already moved. Emitting on
+            // the edge (not every idle cycle) keeps it a one-shot the panel can act on.
             let Some(id_token) = state.auth.id_token().await else {
+                if was_signed_in {
+                    was_signed_in = false;
+                    let _ = app.emit(crate::events::AUTH_EXPIRED, ());
+                }
                 continue;
             };
+            was_signed_in = true;
             let ingest_url = state.auth.config().ingest_url.clone();
 
             refresh_location(&app).await;
@@ -83,22 +100,70 @@ pub fn spawn_sender(app: tauri::AppHandle) {
     });
 }
 
-/// Refresh the cached device location — **consent-gated, fails closed**. With consent, capture a
-/// fresh OS fix (blocking WinRT → `spawn_blocking`) for the next heartbeat; without consent, clear any
-/// cached fix so a withdrawal takes effect on the very next cycle.
+/// Spawn the fast config poller — the "reflect settings changes ASAP" rail.
+///
+/// The batch cycle already pulls config on a version mismatch, but its interval *is* the screenshot
+/// cadence, so a policy change could sit unapplied for up to 10 minutes. This loop closes that gap
+/// with a 60 s conditional pull. It is auth-gated like the sender (no token → skip quietly) and
+/// deliberately fire-and-forget: a failed poll waits for the next tick, and the batch-cycle pull
+/// remains the backstop — two readers of the same ETag'd endpoint can't disagree.
+pub fn spawn_config_poller(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let http = client::api_client();
+        loop {
+            tokio::time::sleep(Duration::from_secs(CONFIG_POLL_SECS)).await;
+            let state = app.state::<AppState>();
+            let Some(id_token) = state.auth.id_token().await else {
+                continue;
+            };
+            let ingest_url = state.auth.config().ingest_url.clone();
+            let etag = state.config.lock().unwrap().etag();
+            match config::pull_config(&http, &ingest_url, &id_token, etag.as_deref()).await {
+                Ok(config::ConfigPull::Fresh { config, etag }) => {
+                    let v = config.version;
+                    state.config.lock().unwrap().apply(config, etag);
+                    tracing::info!("config poller applied version {v}");
+                }
+                Ok(config::ConfigPull::NotModified) => {}
+                Err(e) => tracing::debug!("config poll skipped: {e}"),
+            }
+        }
+    });
+}
+
+/// Refresh the cached device location — **timer-gated, consent-gated, pause-aware; fails closed.**
+///
+/// All three gates must hold, and any one of them failing clears the cached fix so the change takes
+/// effect on the very next cycle rather than leaking a stale position into the next heartbeat.
+///
+/// **Timer-gating is the load-bearing one** (owner decision, 2026-07-21). Location previously rode
+/// the heartbeat, which runs whenever the agent is signed in and consented — so it recorded where
+/// the employee was at 21:00 on a Sunday with no timer running. That is the difference between
+/// *"where work happened"* and *"where this person is"*, and only the first is what the product
+/// claims to measure. It now matches the screenshot loop, which has always been timer-gated
+/// (`monitor::spawn_screenshots`), so no capture in the agent outlives the working session.
+///
+/// The privacy pause is honoured for the same reason it suspends screenshots: a bounded window in
+/// which nothing is recorded is worthless if one of the three capture paths keeps going.
 async fn refresh_location(app: &tauri::AppHandle) {
-    let consented = app
-        .state::<AppState>()
-        .consent
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let fix = if consented {
+    let state = app.state::<AppState>();
+
+    let running = state.timer.lock().unwrap().is_running();
+    let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
+    let paused = state
+        .pause
+        .lock()
+        .unwrap()
+        .is_paused(crate::clock::now_epoch_ms());
+
+    let fix = if running && consented && !paused {
         tokio::task::spawn_blocking(crate::location::capture)
             .await
             .unwrap_or(None)
     } else {
         None
     };
-    *app.state::<AppState>().location.lock().unwrap() = fix;
+    *state.location.lock().unwrap() = fix;
 }
 
 /// Send oldest-first until the outbox is empty or a send fails (then retry next tick). After each ack,
@@ -151,19 +216,43 @@ async fn drain(
 /// PUT one screenshot's bytes to its presigned S3 URL (host-pinned). Success deletes the local file;
 /// failure bumps the attempt count and drops the shot once it hits the cap (BUILD-PLAN §5).
 async fn upload_screenshot(upload: &reqwest::Client, state: &AppState, pu: &PresignedUpload) {
-    let path = {
+    let expected = {
         state
             .screenshots
             .lock()
             .unwrap()
             .get(&pu.screenshot_id)
-            .map(|s| s.path.clone())
+            .map(|s| (s.path.clone(), s.meta.content_sha256.clone()))
     };
-    let Some(path) = path else { return };
+    let Some((path, expected_sha256)) = expected else {
+        return;
+    };
 
     if !is_allowed_upload_host(&pu.url) {
         tracing::warn!("rejected non-amazonaws screenshot upload host");
         return;
+    }
+
+    // Tamper-evidence: the bytes on disk must still be the bytes we captured. If a script replaced the
+    // buffered image, its SHA-256 no longer matches what we committed at capture — so we **refuse to
+    // upload the forged image** and drop it, rather than let a fabricated screenshot reach the server.
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let actual = crate::monitor::screenshot::sha256_hex(&bytes);
+            if actual != expected_sha256 {
+                tracing::warn!(
+                    id = %pu.screenshot_id,
+                    "screenshot bytes changed on disk since capture — refusing to upload (tampered)"
+                );
+                state.screenshots.lock().unwrap().remove(&pu.screenshot_id);
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(id = %pu.screenshot_id, "screenshot file unreadable, skipping: {e}");
+            return;
+        }
     }
 
     match put_bytes(upload, &pu.url, &path).await {

@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm --prefix ui run dev",
-    "beforeBuildCommand": "npm --prefix ui run build"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -15,13 +15,10 @@
       {
         "label": "panel",
         "title": "WorkPulse",
-        "width": 580,
-        "height": 780,
-        "maxWidth": 720,
-        "maxHeight": 900,
-        "minWidth": 520,
-        "minHeight": 600,
-        "resizable": true,
+        "width": 420,
+        "height": 560,
+        "center": true,
+        "resizable": false,
         "maximizable": false,
         "decorations": true,
         "visible": true
@@ -37,7 +34,7 @@
       "endpoints": [
         "https://github.com/NeuroStack-in/task-management-desktop/releases/latest/download/latest.json"
       ],
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFNjFCQjdCNzM5MkQyNQpSV1FsTFRtM3R4dm1CcUFjK3ljNUpHMm9wcGVHbmxTZWJrcXoyY2ZjMmFGM1FaOUt0RVR0ay9XOAo="
     }
   },
   "bundle": {
@@ -49,6 +46,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
+    }
   }
 }

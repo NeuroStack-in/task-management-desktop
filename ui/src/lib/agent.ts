@@ -1,38 +1,39 @@
 /**
  * The single seam between the panel UI and the core.
  *
- * Dev (`npm run dev`, and `just tray-dev`) talks to the fake core in mock.ts, because the real
- * Tauri commands are still `TODO(ipc)` stubs that return frozen constants — you cannot design
- * against a timer that never ticks. Production builds always invoke the real commands.
- * Override with `VITE_REAL=1 npm run dev` to see the actual (currently frozen) stub output.
+ * Every read and write below invokes a real Tauri command. There is no mock layer: the panel
+ * shows what the core knows, or it shows nothing. Where the core has no command yet (activity
+ * series, pause-state readback) the gap is explicit and commented, never papered over with a
+ * plausible-looking constant.
+ *
+ * The webview never talks to the backend directly — the production CSP (`default-src 'self'`,
+ * tauri.conf.json) has no `connect-src` for the API by design. All network egress is Rust-side.
+ * Keep it that way.
  */
 
-import * as mock from "./mock";
 import type {
   AgentSnapshot,
+  AuthStatus,
   ConsentState,
+  Identity,
   PauseGrant,
+  PauseState,
   Project,
   Session,
   Task,
+  TimerSelection,
   TimerState,
 } from "./types";
 
-/**
- * The fast, **local** slice of the snapshot — read from the core every second to drive the timer.
- * All five are in-process Rust reads (no network), so the 1 s poll stays instant and the timer ticks
- * smoothly. Projects/tasks/sessions (which DO hit the backend) are fetched separately, on a slower
- * cadence — see `fetchProjects`/`fetchTasks`/`fetchSessions`.
- */
-export type LocalState = Pick<
-  AgentSnapshot,
-  "identity" | "consent" | "capture" | "config" | "timer"
->;
-
-export const USE_MOCK = import.meta.env.DEV && import.meta.env.VITE_REAL !== "1";
+type UnlistenFn = () => void;
 
 type TauriWindow = Window & {
-  __TAURI__?: { core?: { invoke<T>(cmd: string, args?: unknown): Promise<T> } };
+  __TAURI__?: {
+    core?: { invoke<T>(cmd: string, args?: unknown): Promise<T> };
+    event?: {
+      listen<T>(ev: string, cb: (e: { payload: T }) => void): Promise<UnlistenFn>;
+    };
+  };
 };
 
 function invoke<T>(cmd: string, args?: unknown): Promise<T> {
@@ -45,126 +46,210 @@ function invoke<T>(cmd: string, args?: unknown): Promise<T> {
   return fn<T>(cmd, args);
 }
 
-/** The client's own local date (YYYY-MM-DD) — "today" is the user's calendar, not the server's UTC. */
-function localDate(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+/**
+ * Event names the core emits (src-tauri/src/events.rs). Keep this in sync with that file — it is
+ * the `ui/src/lib/ipc.ts` its doc-comment refers to, which never existed until now.
+ */
+export const EVENTS = {
+  authExpired: "auth:expired",
+  idlePrompt: "monitor:idle-prompt",
+  trackingChanged: "monitor:tracking-changed",
+  screenshotUnavailable: "monitor:screenshot-unavailable",
+  /** A restricted app/site was focused while tracking; payload = the offending identifier. */
+  policyBlocked: "monitor:policy-blocked",
+} as const;
+
+/**
+ * Subscribe to a core event. Resolves to an unlisten function; if the bridge is missing (browser
+ * dev shell) it resolves to a no-op rather than throwing, so a caller's cleanup path is uniform.
+ */
+export function listen<T>(event: string, cb: (payload: T) => void): Promise<UnlistenFn> {
+  const fn = (window as TauriWindow).__TAURI__?.event?.listen;
+  if (!fn) return Promise.resolve(() => {});
+  return fn<T>(event, (e) => cb(e.payload));
 }
 
-/** The fast local slice — polled every second. All in-process reads; never touches the network. */
-export async function readLocal(): Promise<LocalState> {
-  if (USE_MOCK) {
-    const s = mock.read();
-    return { identity: s.identity, consent: s.consent, capture: s.capture, config: s.config, timer: s.timer };
-  }
-  const [consent, capture, config, timer, identity] = await Promise.all([
-    invoke<LocalState["consent"]>("get_consent_state"),
-    invoke<LocalState["capture"]>("capture_state"),
-    invoke<LocalState["config"]>("effective_config"),
-    invoke<LocalState["timer"]>("timer_state"),
-    invoke<LocalState["identity"]>("identity"),
-  ]);
-  return { identity, consent, capture, config, timer };
-}
-
-/** The user's projects (`GET /v1/projects`). Fetched on mount + refresh — not every second. */
-export async function fetchProjects(): Promise<Project[]> {
-  if (USE_MOCK) return mock.read().projects;
-  return invoke<Project[]>("list_projects").catch(() => []);
-}
-
-/** The user's tasks (`GET /v1/me/tasks`). Fetched on mount + refresh — not every second. */
-export async function fetchTasks(): Promise<Task[]> {
-  if (USE_MOCK) return mock.read().tasks;
-  return invoke<Task[]>("list_tasks").catch(() => []);
-}
-
-/** Today's folded sessions (`GET /v1/me/timesheet/today`). Fetched periodically + after start/stop. */
-export async function fetchSessions(): Promise<Session[]> {
-  if (USE_MOCK) return mock.read().sessions;
-  return invoke<Session[]>("list_sessions", { date: localDate() }).catch(() => []);
+/** api/tasks.rs `TaskDto` — the raw wire row, before the project join. */
+interface TaskRow {
+  id: string;
+  title: string;
+  project_id: string;
 }
 
 /**
- * Fold the running session's live segment into its (project, description) row so it ticks between
- * server refreshes. The server's completed totals exclude the still-open session (no duration yet),
- * so this never double-counts — once it stops and folds, `timer.running` is false and the sum wins.
+ * The backend-fed reads return `Result<_, String>`, which Tauri surfaces as a rejection — most
+ * often `"auth:expired"` on a 401. One failing list must not blank the whole panel, and it must
+ * not be mistaken for "the core is unreachable": the core is fine, the token isn't. Rust
+ * auto-logs-out on a failed refresh, so the next poll's `auth_status` flips to signed-out and
+ * the sign-in screen takes over on its own.
  */
-export function withLiveSession(sessions: Session[], timer: TimerState): Session[] {
-  if (!timer.running || !timer.project_id) return sessions;
-  const desc = timer.description.trim();
-  const out = sessions.map((s) => ({ ...s }));
-  const row = out.find((s) => s.project_id === timer.project_id && s.description === desc);
-  if (row) row.secs += timer.elapsed_secs;
-  else out.push({ project_id: timer.project_id, description: desc, secs: timer.elapsed_secs });
-  return out;
+async function soft<T>(p: Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await p;
+  } catch {
+    return fallback;
+  }
 }
 
-/** @deprecated kept for any legacy caller — prefer `readLocal` + the `fetch*` helpers. */
-export async function readSnapshot(): Promise<AgentSnapshot> {
-  if (USE_MOCK) return mock.read();
-  const [local, projects, tasks, sessions] = await Promise.all([
-    readLocal(),
-    fetchProjects(),
-    fetchTasks(),
-    fetchSessions(),
-  ]);
-  return {
-    ...local,
-    projects,
-    tasks,
-    activity: [],
-    sessions: withLiveSession(sessions, local.timer),
-  };
+/**
+ * The client's **local** `YYYY-MM-DD`, which is what `list_sessions` expects — the Lambda runs in
+ * UTC and cannot know the user's day. `toISOString()` would be wrong here: it renders the UTC
+ * date, so anyone east or west of UTC gets yesterday's or tomorrow's sessions near midnight.
+ */
+function localDate(d = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
+
+/**
+ * `GET /v1/me/tasks` carries only `{id, title, project_id}` — the title/billable a picker needs
+ * live on the project. Joined here rather than Rust-side so the two lists stay independently
+ * cacheable and a project with no tasks still reaches the project picker.
+ */
+function joinTasks(rows: TaskRow[], projects: Project[]): Task[] {
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  return rows.map((t) => {
+    const p = byId.get(t.project_id);
+    return {
+      id: t.id,
+      title: t.title,
+      project_id: t.project_id,
+      // A task whose project the user can't see still renders — labelled, not blank, and never
+      // as a raw id.
+      project_name: p?.name ?? "Unassigned",
+      billable: p?.billable ?? false,
+    };
+  });
+}
+
+export async function readSnapshot(): Promise<AgentSnapshot> {
+  // Auth first: signed out, the backend-fed lists are all empty anyway (the commands short-circuit
+  // on a missing token), so skipping them saves four IPC round-trips per poll.
+  const auth = await invoke<AuthStatus>("auth_status");
+
+  const [consent, capture, config, timer, pause] = await Promise.all([
+    invoke<AgentSnapshot["consent"]>("get_consent_state"),
+    invoke<AgentSnapshot["capture"]>("capture_state"),
+    invoke<AgentSnapshot["config"]>("effective_config"),
+    invoke<TimerState>("timer_state"),
+    invoke<PauseState>("pause_state"),
+  ]);
+
+  const base = { auth, consent, capture, config, timer, pause, activity: [] as number[] };
+
+  if (!auth.signedIn) {
+    return { ...base, identity: null, projects: [], tasks: [], sessions: [] };
+  }
+
+  const [identity, rows, projects, sessions] = await Promise.all([
+    soft(invoke<Identity | null>("identity"), null),
+    soft(invoke<TaskRow[]>("list_tasks"), []),
+    soft(invoke<Project[]>("list_projects"), []),
+    soft(invoke<Session[]>("list_sessions", { date: localDate() }), []),
+  ]);
+
+  return { ...base, identity, projects, tasks: joinTasks(rows, projects), sessions };
+}
+
+// ── auth ─────────────────────────────────────────────────────────────────────
+
+export function authStatus(): Promise<AuthStatus> {
+  return invoke<AuthStatus>("auth_status");
+}
+
+/** May resolve with `newPasswordSession` set instead of `signedIn` — see `completeNewPassword`. */
+export function login(username: string, password: string): Promise<AuthStatus> {
+  return invoke<AuthStatus>("auth_login", { username, password });
+}
+
+/** Second leg of the admin-created-account first login, using the session from `login`. */
+export function completeNewPassword(
+  username: string,
+  newPassword: string,
+  session: string,
+): Promise<AuthStatus> {
+  return invoke<AuthStatus>("auth_complete_new_password", { username, newPassword, session });
+}
+
+export async function logout(): Promise<void> {
+  await invoke<void>("auth_logout");
+}
+
+// ── consent ──────────────────────────────────────────────────────────────────
 
 export async function grantConsent(policyVersion: number): Promise<void> {
-  if (USE_MOCK) return mock.grantConsent(policyVersion);
   await invoke<ConsentState>("grant_consent", { policyVersion });
 }
 
-/** Start a session against a project + optional task, with the user's free-text description. */
-export async function startSession(
-  projectId: string,
-  description: string,
-  taskId?: string,
-): Promise<void> {
-  if (USE_MOCK) return mock.startSession(projectId, description, taskId);
-  await invoke<TimerState>("start_timer", { projectId, description, taskId });
-}
+// ── timer ────────────────────────────────────────────────────────────────────
 
 /**
- * Re-attribute the running session to another project/task/description. There is no atomic `switch`
- * command, so against the real core this is stop + start (as the docs describe the core doing,
- * just not atomically). When nothing is running it's a plain start.
+ * `project_id` and `description` are not optional in practice even though the command accepts
+ * them as such: the server folds time entries per (project, description), so a start missing
+ * both lands in an unlabelled bucket the user can't tell apart from any other.
  */
-export async function switchSession(
-  projectId: string,
-  description: string,
-  running: boolean,
-  taskId?: string,
-): Promise<void> {
-  if (!running) return startSession(projectId, description, taskId);
-  if (USE_MOCK) return mock.switchSession(projectId, description, taskId);
-  await invoke<TimerState>("stop_timer");
-  await invoke<TimerState>("start_timer", { projectId, description, taskId });
+export async function startTimer(sel: TimerSelection): Promise<void> {
+  await invoke<TimerState>("start_timer", {
+    taskId: sel.taskId,
+    projectId: sel.projectId,
+    description: sel.description,
+  });
 }
 
 export async function stopTimer(): Promise<void> {
-  if (USE_MOCK) return mock.stopTimer();
   await invoke<TimerState>("stop_timer");
 }
 
-export async function requestPause(requestedSecs: number): Promise<PauseGrant> {
-  if (USE_MOCK) return mock.requestPause(requestedSecs);
-  return invoke<PauseGrant>("request_pause", { requestedSecs });
+/** The task the agent was running when it last closed. See {@link takePendingResume}. */
+export interface PendingResume {
+  taskId: string;
+  projectId: string;
+  description: string;
+  /** Epoch ms the agent closed on this task. */
+  stoppedAtMs: number;
 }
 
 /**
- * Seconds already remaining on a pause at mount. The core exposes no pause-state read command
- * yet (only `request_pause`), so outside mock we start from zero and track locally.
+ * Claim the task the agent was running when it last closed, if any.
+ *
+ * **Claiming, not reading**: the core clears it as it hands it over, so one restart resumes at most
+ * one session. A plain read would let a task the user stopped days ago restart on every launch.
+ *
+ * The core deliberately does not decide whether to resume — it has no local timezone (its only clock
+ * is UTC ms, which is also why `listSessions` takes the date as a parameter). The caller compares
+ * `stoppedAtMs` against the local calendar; see `sameLocalDay`.
  */
-export function initialPauseSecs(): number {
-  return USE_MOCK ? mock.pauseRemainingSecs() : 0;
+export function takePendingResume(): Promise<PendingResume | null> {
+  return invoke<PendingResume | null>("take_pending_resume");
+}
+
+/**
+ * Re-attribute a running timer. There is no atomic `switch_task` command, so this is stop + start
+ * — two events, and a sub-second gap between them the backend will see. Worth a real command if
+ * switching turns out to be common.
+ */
+export async function switchTo(sel: TimerSelection): Promise<void> {
+  await invoke<TimerState>("stop_timer");
+  await startTimer(sel);
+}
+
+// ── privacy pause ────────────────────────────────────────────────────────────
+
+export function requestPause(requestedSecs: number): Promise<PauseGrant> {
+  return invoke<PauseGrant>("request_pause", { requestedSecs });
+}
+
+// ── launch at login ────────────────────────────────────────────────────────────
+
+/**
+ * The real OS launch-at-login state (macOS LaunchAgent / Windows Run key / Linux .desktop entry),
+ * read live from the autostart plugin — not a cached guess, so the toggle reflects reality.
+ */
+export function getAutoStart(): Promise<boolean> {
+  return invoke<boolean>("get_auto_start");
+}
+
+/** Enable or disable launch-at-login. On Windows the installer sets the initial value; this changes it. */
+export async function setAutoStart(enabled: boolean): Promise<void> {
+  await invoke<void>("set_auto_start", { enabled });
 }

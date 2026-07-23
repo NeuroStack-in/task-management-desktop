@@ -19,6 +19,32 @@ impl JsonlStore {
         Self { path }
     }
 
+    /// Sidecar holding the highest `batch_seq` ever assigned.
+    ///
+    /// The queue file cannot answer this: a prune rewrites it to the *un-acked remainder*, so once
+    /// the server has acked everything the file is empty and the highest-seq-ever is gone with it.
+    /// The counter therefore lives beside it and is never truncated.
+    fn seq_path(&self) -> PathBuf {
+        self.path.with_extension("seq")
+    }
+
+    /// Highest `batch_seq` ever assigned, or 0 when unknown (absent/corrupt — never fatal).
+    pub fn load_watermark(&self) -> u64 {
+        fs::read_to_string(self.seq_path())
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Record the highest assigned seq. Best-effort: a failure here costs a duplicate seq after a
+    /// restart, which is exactly the bug this guards, so it is logged loudly by the caller.
+    pub fn save_watermark(&self, seq: u64) -> io::Result<()> {
+        if let Some(parent) = self.seq_path().parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(self.seq_path(), seq.to_string())
+    }
+
     /// Read every persisted envelope (empty if the file is absent or a line is corrupt — a corrupt
     /// tail line is skipped, never fatal).
     pub fn load(&self) -> Vec<BatchEnvelope> {
