@@ -105,6 +105,19 @@ impl Outbox {
         self.queue.front()
     }
 
+    /// Drop every un-acked batch on an **account switch**: they hold the previous user's captures and
+    /// must never be sent under a different user's token. `next_seq` (and its durable watermark) is
+    /// preserved, so the sequence never repeats and the server keeps deduping correctly.
+    pub fn clear(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        self.queue.clear();
+        if let Err(e) = self.store.rewrite(&self.queue) {
+            tracing::error!("outbox: failed to clear queue on account switch: {e}");
+        }
+    }
+
     /// Drop every batch with `batch_seq <= watermark_seq` (durably accepted), then rewrite the file
     /// to the remainder.
     pub fn prune_to(&mut self, watermark_seq: u64) {

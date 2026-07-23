@@ -29,6 +29,7 @@ function Panel() {
     idleSecs,
     screenshotBlocked,
     restrictedHit,
+    actionError,
     grantConsent,
     toggleTimer,
     switchTo,
@@ -36,6 +37,7 @@ function Panel() {
     signOut,
     dismissIdle,
     dismissRestricted,
+    dismissActionError,
     refresh,
   } = useAgent();
   const { theme, toggle: toggleTheme } = useTheme();
@@ -136,6 +138,27 @@ function Panel() {
 
           `min-h-0` still matters: without it the flex child refuses to shrink at all. */}
       <div className="wp-enter flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overflow-x-hidden">
+        {/* A user action (start/stop/switch/consent/pause) failed. Without this the button simply
+            does nothing and the user has no idea why — the single highest-value beta feedback fix. */}
+        {actionError && (
+          <div
+            role="alert"
+            className="flex shrink-0 items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1.5"
+          >
+            <span className="min-w-0 flex-1 text-[11px]">
+              <span className="font-semibold">That didn&apos;t work.</span> {actionError}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-[11px]"
+              onClick={dismissActionError}
+            >
+              Dismiss
+            </Button>
+          </div>
+        )}
+
         {/* Idle prompt — the core emits this at 5 min and hard-stops at 15 (events.rs:7). Offering
             keep/stop here is the whole point of the event: silently banking idle time, or silently
             discarding it, are both wrong. */}

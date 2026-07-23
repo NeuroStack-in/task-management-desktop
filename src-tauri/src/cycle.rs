@@ -31,7 +31,10 @@ pub fn assemble_and_enqueue(state: &AppState) -> u64 {
     let location = *state.location.lock().unwrap();
     let mut outbox = state.outbox.lock().unwrap();
     let outbox_mb = outbox.backlog_bytes() as f32 / (1024.0 * 1024.0);
-    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), outbox_mb, false, location);
+    // Real machine-idle signal published by the monitor thread (was hardcoded `false`, which left the
+    // fleet dashboard's online/idle status permanently "not idle").
+    let idle = state.idle.load(std::sync::atomic::Ordering::Relaxed);
+    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), outbox_mb, idle, location);
     outbox.enqueue_cycle(
         now_epoch_ms(),
         config_version,

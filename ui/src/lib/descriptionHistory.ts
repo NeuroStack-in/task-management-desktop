@@ -42,3 +42,16 @@ export function suggestHistory(query: string, limit = 5): string[] {
   // An exact match suggests nothing new — offering the text already in the box is noise.
   return hits.filter((s) => s.toLowerCase() !== q).slice(0, limit);
 }
+
+/**
+ * Wipe the description MRU. Called on sign-out so one user's "what are you working on?" entries
+ * never surface as suggestions to the next person on a shared device — the key is device-global,
+ * not per-user, so it must be cleared at the account boundary.
+ */
+export function clearHistory(): void {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // Non-fatal — worst case the suggestions linger until the next successful clear.
+  }
+}

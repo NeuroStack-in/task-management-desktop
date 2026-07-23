@@ -31,6 +31,10 @@ use input::InputSampler;
 const WINDOW_SAMPLE_EVERY: u64 = 5;
 /// Prompt the user after this much continuous idle.
 const IDLE_PROMPT_SECS: u64 = 300;
+/// No user input for this long marks the machine **idle** in the fleet heartbeat. Independent of the
+/// timer and shorter than the prompt/auto-stop thresholds: the heartbeat answers "is anyone at this
+/// machine right now", not "should we stop the timer".
+const HEARTBEAT_IDLE_SECS: u64 = 60;
 /// Hard-stop the timer after this much continuous idle (no productive time is invented).
 const AUTO_STOP_SECS: u64 = 900;
 /// Re-warn (and re-report) the same restricted identifier at most once per this window. One
@@ -113,23 +117,38 @@ pub fn spawn_screenshots(app: AppHandle) {
             next_window = shot_window + 1;
             tokio::time::sleep(Duration::from_millis(sleep_ms.max(0) as u64)).await;
 
+            // Read the foreground window once — used both for the exception carve-out and as the
+            // capture's app label. Fetched before the config lock so no syscall runs under it.
+            let focus = active_window::current();
+
             // Gates (scoped so `state` isn't held across the blocking capture).
-            let (go, blur) = {
+            let (go, blur, excepted) = {
                 let state = app.state::<AppState>();
                 let running = state.timer.lock().unwrap().is_running();
                 let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
                 // Privacy pause (panel PauseCard) suspends capture until the grant expires.
                 let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
                 let cfg = state.config.lock().unwrap();
-                let t = &cfg.get().tracking;
-                let on = !matches!(t.cadence, wp_agent_contract::Cadence::Off);
-                (running && consented && on && !paused, t.blur_level)
+                let c = cfg.get();
+                let on = !matches!(c.tracking.cadence, wp_agent_contract::Cadence::Off);
+                // Privacy exceptions carve-out (§14 / PRIVACY.md §2): a focused excepted app/site is
+                // never screenshotted. Match on the full app+title+url haystack, like the span path.
+                let excepted = focus.as_ref().is_some_and(|f| {
+                    let haystack = format!(
+                        "{} {} {}",
+                        f.app,
+                        f.title.as_deref().unwrap_or(""),
+                        f.url.as_deref().unwrap_or("")
+                    );
+                    crate::rules::is_excepted(&haystack, &c.rules)
+                });
+                (running && consented && on && !paused, c.tracking.blur_level, excepted)
             };
-            if !go {
+            if !go || excepted {
                 continue;
             }
 
-            let app_name = active_window::current().map(|f| f.app).unwrap_or_default();
+            let app_name = focus.map(|f| f.app).unwrap_or_default();
             let cap_ts = clock::now_epoch_ms();
             // One shot per connected display (dual-monitor → two); all share this cycle's timestamp.
             let shots = tokio::task::spawn_blocking(move || {
@@ -179,9 +198,19 @@ fn run(app: AppHandle) {
         let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
         // Privacy pause (panel PauseCard) suspends activity capture until the grant expires.
         let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
+
+        // Idle for the fleet heartbeat is sampled every tick, independent of the capture gate below:
+        // a signed-in machine can be idle whether or not a timer is running. Published for
+        // `cycle::assemble_and_enqueue` to fold into the next heartbeat. Reused inside the gate so the
+        // OS is queried once per tick.
+        let idle = idle::idle_seconds();
+        state.idle.store(
+            idle >= HEARTBEAT_IDLE_SECS,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         if running && consented && !paused {
             let now = clock::now_epoch_ms();
-            let idle = idle::idle_seconds();
             let (kb, mouse) = sampler.sample();
             bucketer.tick(now, idle, kb, mouse);
 
@@ -227,7 +256,12 @@ fn run(app: AppHandle) {
                         }
                     }
 
-                    if !crate::rules::is_untracked(&f.app, &rules) {
+                    // Privacy exceptions carve-out (§14 / PRIVACY.md §2): while an excepted app/site
+                    // is focused, record nothing about it — no activity span (the screenshot loop
+                    // applies the same carve-out to its capture). Orthogonal to `is_untracked`, so
+                    // check it independently on the full app+title+url haystack.
+                    let excepted = crate::rules::is_excepted(&haystack, &rules);
+                    if !excepted && !crate::rules::is_untracked(&f.app, &rules) {
                         let cat = crate::rules::classify_focus(&f.app, &rules);
                         bucketer.sample_app(
                             now,

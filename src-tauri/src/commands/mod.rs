@@ -41,6 +41,15 @@ pub async fn auth_complete_new_password(
 
 #[tauri::command]
 pub fn auth_logout(state: State<'_, AppState>) {
+    // Full teardown so the next person to sign in on this device starts clean — the timer, queued
+    // captures, consent, pause budget and the resume hand-off are all reset (see state.rs). The
+    // persisted flags that outlive the process are cleared here: the next user must re-consent, and
+    // the previous user's "resume this task" must never auto-start under them.
+    state.reset_for_account_switch();
+    crate::session_state::update(|s| {
+        s.consent_granted = false;
+        s.resume = None;
+    });
     state.auth.logout();
 }
 
@@ -58,6 +67,17 @@ pub fn set_consent(state: State<'_, AppState>, granted: bool) {
     state
         .consent
         .store(granted, std::sync::atomic::Ordering::Relaxed);
+    if !granted {
+        // Turning monitoring off must also drop frames already captured but not yet uploaded —
+        // otherwise the last shots keep leaving the device after the user believes capture is off
+        // (they are re-declared every cycle until uploaded). Mirrors the location-on-withdrawal
+        // behaviour in api/mod.rs.
+        let mut shots = state.screenshots.lock().unwrap();
+        for s in shots.values() {
+            let _ = std::fs::remove_file(&s.path);
+        }
+        shots.clear();
+    }
     // Persist **both** directions. A revoke that only lived in memory would come back granted on the
     // next launch — silently resuming capture the user had switched off, which is the worst possible
     // direction for this flag to fail in.

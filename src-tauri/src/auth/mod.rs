@@ -54,13 +54,26 @@ impl AuthManager {
     }
 
     /// Restore a session at startup from the keyring's refresh token. Returns whether it worked.
+    ///
+    /// **Never clobbers a live session.** `restore` is spawned async at launch and its Cognito
+    /// refresh is a network round-trip, so the user can finish signing in (as a *different* person)
+    /// before it returns. If that happened, keeping the freshly-established session is the only
+    /// correct outcome — otherwise the just-logged-in user's API calls would silently go out under
+    /// the previous user's token (their projects, their tasks, their data).
     pub async fn restore(&self) -> bool {
+        if self.is_authenticated() {
+            return true;
+        }
         let Some(rt) = token_store::load(REFRESH_KEY).and_then(|b| String::from_utf8(b).ok())
         else {
             return false;
         };
         match cognito::refresh(&self.http, &self.cfg, &rt, now_secs()).await {
             Ok(t) => {
+                // Re-check after the network round-trip: a login may have landed while we refreshed.
+                if self.is_authenticated() {
+                    return true;
+                }
                 self.set(t);
                 true
             }

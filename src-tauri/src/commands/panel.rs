@@ -140,10 +140,12 @@ pub fn start_timer(
     project_id: Option<String>,
     description: Option<String>,
     task_id: Option<String>,
-) -> TimerStateDto {
+) -> Result<TimerStateDto, String> {
     let ts = now_ms();
     let session_id = uuid::Uuid::new_v4().to_string();
-    let ev = {
+    // Surface a start that was refused (already running) instead of swallowing it and returning the
+    // *old* session — otherwise the panel shows the previous task as if the new one started.
+    let event = {
         let mut t = state.timer.lock().unwrap();
         t.start(
             session_id,
@@ -152,13 +154,11 @@ pub fn start_timer(
             description.unwrap_or_default(),
             ts,
         )
-        .ok()
+        .map_err(|e| format!("timer:{e}"))?
     };
-    if let Some(e) = ev {
-        state.pending_events.lock().unwrap().push(e);
-        state.flush.notify_one(); // flush now — don't wait for the 300 s cycle (LLD §4)
-    }
-    read_timer(&state)
+    state.pending_events.lock().unwrap().push(event);
+    state.flush.notify_one(); // flush now — don't wait for the 300 s cycle (LLD §4)
+    Ok(read_timer(&state))
 }
 
 #[tauri::command]

@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
-use wp_agent_contract::{ActivityRollup, AgentEvent, ScreenshotMeta};
+use wp_agent_contract::{ActivityRollup, AgentEvent, ScreenshotMeta, StopReason};
 
 use crate::auth::AuthManager;
 use crate::config::ConfigCache;
@@ -73,6 +73,10 @@ pub struct AppState {
     pub screenshots: Mutex<HashMap<String, PendingShot>>,
     /// Monitoring consent. **Defaults false → capture fails closed** (PRIVACY.md); the tray grants it.
     pub consent: AtomicBool,
+    /// Latest machine-idle signal for the fleet heartbeat (true = no user input for the idle window).
+    /// Published by the monitor thread every tick, **independent of the timer**, so the fleet table
+    /// reflects an idle-but-online machine. Read by `cycle::assemble_and_enqueue` into `Heartbeat.idle`.
+    pub idle: AtomicBool,
     /// Privacy-pause window + budget (the panel's "Pause 5 min").
     pub pause: Mutex<PauseState>,
     /// Latest device location fix, refreshed each cycle **only while consent is granted** (the sender
@@ -93,10 +97,47 @@ impl AppState {
             pending_activity: Mutex::new(Vec::new()),
             screenshots: Mutex::new(HashMap::new()),
             consent: AtomicBool::new(false),
+            idle: AtomicBool::new(false),
             pause: Mutex::new(PauseState::default()),
             location: Mutex::new(None),
             auth: AuthManager::new(),
         }
+    }
+}
+
+impl AppState {
+    /// Wipe all **per-user** runtime state on an account switch (sign-out), so one user's timer,
+    /// queued captures, consent and session can never bleed into the next person who signs in on
+    /// this device. Device-level config/idle re-sync from the server/OS and are left alone.
+    ///
+    /// The stopped session's `TimerStopped` event is intentionally **dropped**, not queued: it can no
+    /// longer be sent under the signing-out user's token, and the server's 00:15 close resolves the
+    /// still-open day. Keeping it would only risk folding it under the *next* user.
+    pub fn reset_for_account_switch(&self) {
+        // End the running session locally so the next user never inherits it.
+        let _ = self
+            .timer
+            .lock()
+            .unwrap()
+            .stop(crate::clock::now_epoch_ms(), StopReason::Logout);
+
+        // Drop buffered-but-unsent captures and any queued batches — all the previous user's data.
+        self.pending_events.lock().unwrap().clear();
+        self.pending_activity.lock().unwrap().clear();
+        {
+            let mut shots = self.screenshots.lock().unwrap();
+            for s in shots.values() {
+                let _ = std::fs::remove_file(&s.path);
+            }
+            shots.clear();
+        }
+        self.outbox.lock().unwrap().clear();
+        *self.location.lock().unwrap() = None;
+        *self.pause.lock().unwrap() = PauseState::default();
+
+        // Re-require consent for the next person: capture fails closed until they accept the notice.
+        self.consent.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.idle.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

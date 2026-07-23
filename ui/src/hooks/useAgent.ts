@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as agent from "@/lib/agent";
 import { EVENTS } from "@/lib/agent";
+import { clearHistory } from "@/lib/descriptionHistory";
 import type { AgentSnapshot, TimerSelection } from "@/lib/types";
 
 const POLL_MS = 1000;
@@ -17,6 +18,10 @@ export interface Agent {
   screenshotBlocked: boolean;
   /** The restricted app/site last focused during tracking (`monitor:policy-blocked`); null = none. */
   restrictedHit: string | null;
+  /** Set when a user action (start/stop/switch/consent/pause) failed; shown inline until dismissed. */
+  actionError: string | null;
+  /** True while a write action is in flight — buttons disable / ignore re-clicks. */
+  busy: boolean;
   grantConsent: () => void;
   /** Starts with `sel` when stopped; stops (ignoring `sel`) when running. */
   toggleTimer: (sel: TimerSelection) => void;
@@ -28,6 +33,8 @@ export interface Agent {
   dismissIdle: () => void;
   /** Dismiss the restricted-site warning banner. */
   dismissRestricted: () => void;
+  /** Dismiss the action-error banner. */
+  dismissActionError: () => void;
   /** Re-read the core now instead of waiting out the poll — what the hero's refresh drives. */
   refresh: () => Promise<void>;
 }
@@ -46,6 +53,14 @@ export function useAgent(): Agent {
   const [idleSecs, setIdleSecs] = useState<number | null>(null);
   const [screenshotBlocked, setScreenshotBlocked] = useState(false);
   const [restrictedHit, setRestrictedHit] = useState<string | null>(null);
+  // User-action feedback: set when an explicit action (start/stop/switch/consent/pause) fails, so the
+  // panel can show it — unlike the poll's `error`, which is cleared on the next successful read.
+  const [actionError, setActionError] = useState<string | null>(null);
+  // In-flight flag so buttons can disable / ignore re-clicks while an action is pending.
+  const [busy, setBusy] = useState(false);
+  // Ref mirror of `busy`, checked synchronously so a rapid double-click is dropped before a second
+  // call can fire (state updates are async and would let both clicks through).
+  const busyRef = useRef(false);
 
   // Avoids a slow poll landing after a newer one and rewinding the UI.
   const seq = useRef(0);
@@ -95,35 +110,69 @@ export function useAgent(): Agent {
     if (snapshot && !snapshot.timer.running) setIdleSecs(null);
   }, [snapshot?.timer.running]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const report = useCallback((e: unknown) => {
-    setError(e instanceof Error ? e.message : String(e));
+  // Whenever the session drops — an explicit sign-out OR a token that expired (auth:expired) — clear
+  // the ephemeral per-session banners so a policy violation, pause-refusal or idle prompt from one
+  // user can never greet the next person who signs in on this device.
+  useEffect(() => {
+    if (snapshot && !snapshot.auth.signedIn) {
+      setRestrictedHit(null);
+      setPauseRefused(false);
+      setIdleSecs(null);
+      setActionError(null);
+    }
+  }, [snapshot?.auth.signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const reportAction = useCallback((e: unknown) => {
+    setActionError(e instanceof Error ? e.message : String(e));
   }, []);
+
+  // Run a write action single-flight, surfacing any failure. The ref guard is checked synchronously,
+  // so a rapid double-click is dropped before a second call can fire (e.g. starting two timers).
+  const run = useCallback(
+    (fn: () => Promise<unknown>) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setBusy(true);
+      setActionError(null);
+      void fn()
+        .then(refresh)
+        .catch(reportAction)
+        .finally(() => {
+          busyRef.current = false;
+          setBusy(false);
+        });
+    },
+    [refresh, reportAction],
+  );
 
   const grantConsent = useCallback(() => {
     if (!snapshot) return;
-    void agent.grantConsent(snapshot.consent.policy_version).then(refresh).catch(report);
-  }, [snapshot, refresh, report]);
+    run(() => agent.grantConsent(snapshot.consent.policy_version));
+  }, [snapshot, run]);
 
   const toggleTimer = useCallback(
     (sel: TimerSelection) => {
       if (!snapshot) return;
-      const action = snapshot.timer.running ? agent.stopTimer() : agent.startTimer(sel);
-      void action.then(refresh).catch(report);
       setIdleSecs(null);
+      run(() => (snapshot.timer.running ? agent.stopTimer() : agent.startTimer(sel)));
     },
-    [snapshot, refresh, report],
+    [snapshot, run],
   );
 
   const switchTo = useCallback(
     (sel: TimerSelection) => {
       if (!snapshot?.timer.running) return;
-      void agent.switchTo(sel).then(refresh).catch(report);
+      run(() => agent.switchTo(sel));
     },
-    [snapshot, refresh, report],
+    [snapshot, run],
   );
 
   const requestPause = useCallback(
     (secs: number) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setBusy(true);
+      setActionError(null);
       void agent
         .requestPause(secs)
         .then((grant) => {
@@ -131,17 +180,29 @@ export function useAgent(): Agent {
           // No local countdown: the next poll reads the authoritative window from the core.
           void refresh();
         })
-        .catch(report);
+        .catch(reportAction)
+        .finally(() => {
+          busyRef.current = false;
+          setBusy(false);
+        });
     },
-    [refresh, report],
+    [refresh, reportAction],
   );
 
   const signOut = useCallback(() => {
-    void agent.logout().then(refresh).catch(report);
-  }, [refresh, report]);
+    // Clear the device-global description MRU + every ephemeral per-session banner, so the next
+    // person who signs in on this device inherits none of the previous user's UI state.
+    clearHistory();
+    setActionError(null);
+    setRestrictedHit(null);
+    setPauseRefused(false);
+    setIdleSecs(null);
+    void agent.logout().then(refresh).catch(reportAction);
+  }, [refresh, reportAction]);
 
   const dismissIdle = useCallback(() => setIdleSecs(null), []);
   const dismissRestricted = useCallback(() => setRestrictedHit(null), []);
+  const dismissActionError = useCallback(() => setActionError(null), []);
 
   return {
     snapshot,
@@ -150,6 +211,8 @@ export function useAgent(): Agent {
     idleSecs,
     screenshotBlocked,
     restrictedHit,
+    actionError,
+    busy,
     grantConsent,
     toggleTimer,
     switchTo,
@@ -157,6 +220,7 @@ export function useAgent(): Agent {
     signOut,
     dismissIdle,
     dismissRestricted,
+    dismissActionError,
     refresh,
   };
 }

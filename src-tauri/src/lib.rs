@@ -158,6 +158,10 @@ pub fn run() {
                 tracing::info!("auth restore at startup: {restored}");
             });
             api::spawn_sender(app.handle().clone());
+            // The fast config rail: a 60 s conditional (ETag) pull so an admin's policy change lands
+            // within a minute instead of waiting up to a full screenshot cadence (10 min) for the
+            // next batch-cycle version check. The batch cycle remains the backstop.
+            api::spawn_config_poller(app.handle().clone());
             monitor::spawn(app.handle().clone());
             monitor::spawn_screenshots(app.handle().clone());
 
