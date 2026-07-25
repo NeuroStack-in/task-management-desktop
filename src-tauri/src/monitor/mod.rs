@@ -130,7 +130,12 @@ pub fn spawn_screenshots(app: AppHandle) {
                 let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
                 let cfg = state.config.lock().unwrap();
                 let c = cfg.get();
-                let on = !matches!(c.tracking.cadence, wp_agent_contract::Cadence::Off);
+                // Screenshots need both a live cadence AND the org's `monitoring.screenshots`
+                // entitlement (mirrored into `screenshots_enabled`). Disabling the feature stops
+                // capture without disturbing the admin's chosen interval; activity/heartbeats are
+                // gated separately and keep running.
+                let on = !matches!(c.tracking.cadence, wp_agent_contract::Cadence::Off)
+                    && c.tracking.screenshots_enabled;
                 // Privacy exceptions carve-out (§14 / PRIVACY.md §2): a focused excepted app/site is
                 // never screenshotted. Match on the full app+title+url haystack, like the span path.
                 let excepted = focus.as_ref().is_some_and(|f| {
@@ -213,7 +218,12 @@ fn run(app: AppHandle) {
             std::sync::atomic::Ordering::Relaxed,
         );
 
-        if running && consented && !paused {
+        // The org's `monitoring.activity` entitlement (mirrored into `activity_enabled`) gates
+        // activity capture only — the heartbeat above (device liveness) and the timer keep running,
+        // so disabling activity still reports the device without app/input rollups.
+        let activity_enabled = state.config.lock().unwrap().get().tracking.activity_enabled;
+
+        if running && consented && !paused && activity_enabled {
             let now = clock::now_epoch_ms();
             let (kb, mouse) = sampler.sample();
             bucketer.tick(now, idle, kb, mouse);
