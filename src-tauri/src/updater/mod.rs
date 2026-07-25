@@ -20,9 +20,11 @@ pub fn current_version() -> &'static str {
 const RELEASES_ENDPOINT: &str =
     "https://github.com/NeuroStack-in/task-management-desktop/releases/latest/download/latest.json";
 
-/// Baked-in Ed25519 public key. Empty by default → updates are disabled until a key is provided
-/// (via `WP_UPDATER_PUBKEY` or by pasting the `cargo tauri signer generate` public key here).
-const PUBKEY: &str = "";
+/// Baked-in minisign public key — **must be the public half of the CI `TAURI_SIGNING_PRIVATE_KEY`
+/// secret**, and identical to `tauri.conf.json` `plugins.updater.pubkey` (the plugin verifies each
+/// artifact against it). `WP_UPDATER_PUBKEY` can override at runtime for testing. Non-empty ⇒ the
+/// updater actually runs; empty short-circuits to `updater:no_pubkey` and installs nothing.
+const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFNjFCQjdCNzM5MkQyNQpSV1FsTFRtM3R4dm1CcUFjK3ljNUpHMm9wcGVHbmxTZWJrcXoyY2ZjMmFGM1FaOUt0RVR0ay9XOAo=";
 
 fn pubkey() -> String {
     match std::env::var("WP_UPDATER_PUBKEY") {

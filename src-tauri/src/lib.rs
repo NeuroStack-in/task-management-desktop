@@ -225,6 +225,31 @@ pub fn run() {
                         Err(e) => tracing::info!("update check skipped/failed: {e}"),
                     }
                 });
+
+                // …and re-check on a slow cadence so a long-running agent adopts a published release
+                // without a restart. Reads `auto_update` fresh each pass, so a policy change takes
+                // effect on the next tick. Same `WP_NO_UPDATE` gate as the startup check above.
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    const EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+                    loop {
+                        tokio::time::sleep(EVERY).await;
+                        let auto = h
+                            .state::<AppState>()
+                            .config
+                            .lock()
+                            .unwrap()
+                            .get()
+                            .tracking
+                            .auto_update;
+                        match updater::check_and_maybe_install(&h, auto).await {
+                            Ok(available) => {
+                                tracing::info!("periodic update check: available={available}")
+                            }
+                            Err(e) => tracing::info!("periodic update check skipped/failed: {e}"),
+                        }
+                    }
+                });
             }
 
             // Tray: menu + a tooltip the monitor keeps in sync with tracking state.
