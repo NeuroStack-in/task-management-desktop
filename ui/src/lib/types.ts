@@ -118,6 +118,21 @@ export interface Session {
   secs: number;
 }
 
+/**
+ * privacy_log.rs — `LocalEvent`, served by the `privacy_log` command, newest first.
+ *
+ * The employee's own record of things done to this machine that they could not otherwise observe —
+ * today, admin-triggered on-demand captures (taken **and** refused). PRIVACY.md §5: no silent
+ * access. `detail` is a ready-to-render sentence; the panel never composes one from `kind`.
+ */
+export interface LocalEvent {
+  /** Epoch ms. */
+  ts: number;
+  /** `admin_capture` | `admin_capture_refused` — more kinds may appear; render `detail`. */
+  kind: string;
+  detail: string;
+}
+
 /** panel.rs — IdentityDto. Name/email come from the ID-token claims, never the `sub` UUID. */
 export interface Identity {
   name: string;
@@ -159,6 +174,8 @@ export interface AgentSnapshot {
   /** Still empty — no `recent_activity` command exists (see ActivitySeries above). */
   activity: ActivitySeries;
   sessions: Session[];
+  /** Local transparency log, newest first. Empty for a machine nothing has been done to. */
+  privacyLog: LocalEvent[];
 }
 
 const CADENCE_PRESET_LABEL: Record<Exclude<Cadence, object>, string> = {

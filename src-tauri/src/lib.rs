@@ -25,6 +25,7 @@ pub mod location;
 pub mod monitor;
 pub mod mqtt;
 pub mod outbox;
+pub mod privacy_log;
 pub mod rules;
 pub mod session_state;
 pub mod state;
@@ -129,6 +130,7 @@ pub fn run() {
             commands::panel::list_tasks,
             commands::panel::list_sessions,
             commands::panel::take_pending_resume,
+            commands::panel::privacy_log,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {

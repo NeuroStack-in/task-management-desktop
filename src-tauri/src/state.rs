@@ -71,6 +71,13 @@ pub struct AppState {
     pub pending_activity: Mutex<Vec<ActivityRollup>>,
     /// Captured screenshots keyed by id, awaiting upload (M5).
     pub screenshots: Mutex<HashMap<String, PendingShot>>,
+    /// Screenshot metadata for frames whose **bytes are already in S3**, awaiting declaration in the
+    /// next batch. Today that is only the admin-triggered `capture_now`, which uploads to the
+    /// command's own presigned URL rather than to one the ack hands back — so the meta still has to
+    /// ride a batch (that is what makes ingest's fold write the `SHOT#` row pointing at the object),
+    /// but it must **not** sit in `screenshots` waiting for an upload that already happened.
+    /// Drained by `cycle::assemble_and_enqueue`, like `pending_events`.
+    pub pending_screenshot_meta: Mutex<Vec<ScreenshotMeta>>,
     /// Monitoring consent. **Defaults false → capture fails closed** (PRIVACY.md); the tray grants it.
     pub consent: AtomicBool,
     /// Latest machine-idle signal for the fleet heartbeat (true = no user input for the idle window).
@@ -100,6 +107,7 @@ impl AppState {
             flush: Arc::new(Notify::new()),
             pending_activity: Mutex::new(Vec::new()),
             screenshots: Mutex::new(HashMap::new()),
+            pending_screenshot_meta: Mutex::new(Vec::new()),
             consent: AtomicBool::new(false),
             idle: AtomicBool::new(false),
             pause: Mutex::new(PauseState::default()),
@@ -136,9 +144,14 @@ impl AppState {
             }
             shots.clear();
         }
+        self.pending_screenshot_meta.lock().unwrap().clear();
         self.outbox.lock().unwrap().clear();
         *self.location.lock().unwrap() = None;
         *self.pause.lock().unwrap() = PauseState::default();
+
+        // The transparency log is this user's own record of what was captured on their machine; the
+        // next person to sign in must not inherit (or be able to read) it.
+        crate::privacy_log::clear();
 
         // Re-require consent for the next person: capture fails closed until they accept the notice.
         self.consent

@@ -14,6 +14,11 @@ pub const TRACKING_CHANGED: &str = "monitor:tracking-changed";
 /// the UI surfaces a "grant permission" state instead of silence (M5, risk #5).
 pub const SCREENSHOT_UNAVAILABLE: &str = "monitor:screenshot-unavailable";
 
+/// An administrator asked for an on-demand screenshot of this machine (`capture_now`). Payload: the
+/// sentence to show the employee — taken **or refused**, and why. Never covert: the same line is
+/// appended to the local privacy log (`privacy_log.rs`), so it survives the banner being dismissed.
+pub const ADMIN_CAPTURE: &str = "privacy:admin-capture";
+
 /// A restricted (blocked-list) app/site was focused while the timer ran. Payload: the offending
 /// identifier (domain or process). The panel shows the policy warning; the violation itself was
 /// already queued for the server (`PolicyViolation`, action_taken = "warned").

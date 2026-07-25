@@ -227,6 +227,18 @@ pub fn request_pause(state: State<'_, AppState>, requested_secs: u64) -> PauseGr
     }
 }
 
+// ── transparency log (local) ─────────────────────────────────────────────────
+
+/// The employee's own record of privacy-relevant events on this machine, newest first.
+///
+/// Today it carries the admin-triggered on-demand captures (taken **and** refused) — the one thing
+/// the agent does that the employee could not otherwise observe. PRIVACY.md §5: "no silent access,
+/// everything leaves a trail"; this is the employee's copy of that trail.
+#[tauri::command]
+pub fn privacy_log(limit: Option<usize>) -> Vec<crate::privacy_log::LocalEvent> {
+    crate::privacy_log::recent(limit.unwrap_or(20))
+}
+
 // ── projects (backend-fed) ───────────────────────────────────────────────────
 
 /// The signed-in user's projects for the "Select project" picker — fetched live from

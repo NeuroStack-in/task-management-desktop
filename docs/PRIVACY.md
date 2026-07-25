@@ -43,6 +43,7 @@ These are properties of the agent, not configurable away:
 | **Exceptions carve-out** | A focused app/site in `exceptions` suppresses the screenshot **and** the activity span — nothing about that window is recorded. |
 | **Monitoring exceptions** (§13.7: who · what's exempt · reason · expiry) | The agent honours per-user/per-team exemptions in its cached policy: an exempt signal (screenshots / apps / urls) is **not captured at all** while the exception is active; expiry re-enables it. |
 | **Anonymize toggle** (§12.6) | When set, the agent omits window titles and reduces screenshot fidelity/redacts aggressively; identity still flows for attribution but content is minimized. |
+| **Admin "Capture now"** (on-demand, added 2026-07-25) | An admin can request a single screenshot over the MQTT rail (`POST /v1/fleet/{id}/capture-now`). **It is a request, not a command:** the agent refuses during a privacy pause, without consent, with no timer running, or when the focused window is excepted — and it *always* answers with the reason, which the server audits. The employee sees every outcome, captured or refused, in the local **privacy log** (§5) and as an immediate in-app banner. The server can never override a device-side refusal. |
 | **Data retention period** (§12.6) | Enforced server-side (S3 lifecycle, BACKEND §6); the agent keeps only what's needed to upload, then deletes from the local spool. |
 
 ---
@@ -93,6 +94,14 @@ sensitive-data detection.
   ([PLAN-remote-support.md](../../frontend/Docs/PLAN-remote-support.md)): no silent access, everything leaves a trail.
 
 ---
+
+### Local privacy log (added 2026-07-25)
+
+The agent keeps an **employee-owned, local** record at `state_dir()/privacy-log.jsonl` (capped, wiped
+on account switch) of every admin-triggered capture — **including the ones it refused**. It is
+written before any answer goes back to the server, is readable in the panel without a network round
+trip, and no server call can clear it. The point is asymmetry: an admin can ask for a capture, but
+they cannot ask for it *quietly*.
 
 ## 6. Compliance posture (informative)
 

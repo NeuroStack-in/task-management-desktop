@@ -1,8 +1,9 @@
 //! MQTT downlink — the push rail (backend/docs/MQTT-MIGRATION.md Phase 3). One background tokio
 //! task holds a mutual-TLS connection to AWS IoT Core using the per-install X.509 credential from
 //! `POST /v1/agent/enroll`, subscribes the device's `cmd` topic, and turns server commands into
-//! local actions (today: `config_changed` → pull `/v1/agent/config` immediately instead of waiting
-//! for the next poll/cycle). Presence rides the same connection: `{"online":true}` on connect, a
+//! local actions (`config_changed` → pull `/v1/agent/config` immediately instead of waiting for the
+//! next poll/cycle; `capture_now` → the admin-triggered on-demand screenshot, guarded in
+//! [`capture`]). Presence rides the same connection: `{"online":true}` on connect, a
 //! Last Will `{"online":false}` on unclean disconnect, and a best-effort clean `{"online":false}`
 //! on app exit (`shutdown`).
 //!
@@ -14,6 +15,8 @@
 //! account switches, so `reset_for_account_switch` deliberately leaves it (and this connection)
 //! alone. Enrollment itself needs a signed-in user (the enroll route is user-JWT-authed), so an
 //! unenrolled agent waits for a session and enrolls once.
+
+pub mod capture;
 
 use std::time::Duration;
 
@@ -84,6 +87,16 @@ pub struct MqttHandle {
 enum Command {
     /// "Pull `/v1/agent/config` now" — the admin changed policy; don't wait for the 60 s poller.
     ConfigChanged,
+    /// "Take one screenshot of this employee's screen, now, and PUT it here." The most invasive
+    /// command in the product — every guard lives in [`capture`], and every outcome is acked.
+    CaptureNow {
+        screenshot_id: String,
+        upload_url: String,
+        /// The user who asked. **Echoed verbatim** in the ack: it is the server's whole routing
+        /// mechanism for the answer (`fleet::features::agent_events`).
+        #[serde(default)]
+        requested_by: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -285,6 +298,29 @@ async fn handle_command(
                 tracing::warn!("mqtt: config_changed ack not published: {e}");
             }
         }
+        Ok(Command::CaptureNow {
+            screenshot_id,
+            upload_url,
+            requested_by,
+        }) => {
+            tracing::info!(id = %screenshot_id, %requested_by, "mqtt: capture_now requested");
+            // Off the event loop: a grab + encode + S3 PUT can take seconds (the upload client
+            // allows up to 180 s), and the loop must keep polling or the connection misses its
+            // keepalive and drops mid-capture. The ack is published from the spawned task on the
+            // same (cloneable) client.
+            let app = app.clone();
+            let mqtt = mqtt.clone();
+            let evt_topic = cred.evt_topic.clone();
+            tauri::async_runtime::spawn(async move {
+                let ack = capture::handle(&app, &screenshot_id, &upload_url, &requested_by).await;
+                if let Err(e) = mqtt.publish(&evt_topic, QoS::AtLeastOnce, false, ack).await {
+                    // The requester is left waiting, but the local disclosure and the capture
+                    // decision itself already happened — nothing is silently *done*, only silently
+                    // unanswered, and the server audits from its own request record.
+                    tracing::warn!("mqtt: capture_now result not published: {e}");
+                }
+            });
+        }
         Ok(Command::Unknown) => {
             tracing::info!("mqtt: unknown command kind ignored (forward-compatible)");
         }
@@ -353,8 +389,38 @@ mod tests {
     #[test]
     fn unknown_command_kind_is_tolerated() {
         let c: Command =
-            serde_json::from_slice(br#"{"kind":"capture_now","extra":"field"}"#).unwrap();
+            serde_json::from_slice(br#"{"kind":"reboot_please","extra":"field"}"#).unwrap();
         assert!(matches!(c, Command::Unknown));
+    }
+
+    /// The exact payload `fleet::features::capture_now` publishes.
+    #[test]
+    fn parses_capture_now_command() {
+        let raw = br#"{"kind":"capture_now","screenshot_id":"01J0","upload_url":"https://b.s3.ap-south-1.amazonaws.com/k?sig=x","requested_by":"u7"}"#;
+        let c: Command = serde_json::from_slice(raw).unwrap();
+        match c {
+            Command::CaptureNow {
+                screenshot_id,
+                upload_url,
+                requested_by,
+            } => {
+                assert_eq!(screenshot_id, "01J0");
+                assert!(upload_url.starts_with("https://"));
+                assert_eq!(requested_by, "u7");
+            }
+            other => panic!("expected CaptureNow, got {other:?}"),
+        }
+    }
+
+    /// An older backend that omits `requested_by` must still capture — the ack simply has nobody to
+    /// route back to (the server drops it), which is better than refusing the command outright.
+    #[test]
+    fn capture_now_without_a_requester_still_parses() {
+        let raw = br#"{"kind":"capture_now","screenshot_id":"s","upload_url":"https://x.amazonaws.com/k"}"#;
+        let c: Command = serde_json::from_slice(raw).unwrap();
+        assert!(
+            matches!(c, Command::CaptureNow { ref requested_by, .. } if requested_by.is_empty())
+        );
     }
 
     #[test]

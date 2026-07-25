@@ -73,25 +73,48 @@ pub fn is_allowed_upload_host(url: &str) -> bool {
 /// One monitor failing to capture doesn't sink the others: each is processed independently and only
 /// its own `None` is dropped.
 pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(ScreenshotMeta, PathBuf)> {
-    let Ok(mut monitors) = xcap::Monitor::all() else {
+    let Some((monitors, dir)) = displays_and_dir() else {
         return Vec::new();
     };
-    // Primary display first, so it is always `display = 0` ("Monitor 1"); the index is then the
-    // stable physical position (a monitor that fails to capture leaves a gap rather than renumbering).
-    monitors.sort_by_key(|m| !m.is_primary().unwrap_or(false));
-    let dir = screenshots_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return Vec::new();
-    }
-    // Lock the buffer down (once per process) so *other* users on the machine can't read or swap the
-    // pending images. This complements the upload-time SHA-256 check: hashing catches the monitored
-    // user's own scripts (same identity as the agent), ACLs stop everyone else.
-    HARDEN_ONCE.call_once(|| harden_dir(&dir));
     monitors
         .into_iter()
         .enumerate()
         .filter_map(|(i, m)| process_monitor(&m, app, blur_level, captured_at, i as u8, &dir))
         .collect()
+}
+
+/// Capture **the primary display only**, through the exact same pipeline as [`capture_all`]
+/// (downscale → blur → WebP → pHash → temp file + content hash).
+///
+/// This exists for the admin-triggered on-demand capture (`mqtt::capture`), which is handed exactly
+/// **one** presigned URL: capturing every monitor there would spool frames of screens nobody can
+/// upload, which is the opposite of data minimization (PRIVACY.md §4). Periodic capture keeps taking
+/// every display — it gets one URL per declared meta.
+pub fn capture_primary(
+    app: &str,
+    blur_level: u8,
+    captured_at: i64,
+) -> Option<(ScreenshotMeta, PathBuf)> {
+    let (monitors, dir) = displays_and_dir()?;
+    let primary = monitors.into_iter().next()?;
+    process_monitor(&primary, app, blur_level, captured_at, 0, &dir)
+}
+
+/// Connected displays (**primary first**) plus the prepared, hardened spool directory — the shared
+/// prologue of both capture entry points. `None` when the OS yields no monitors or the spool can't
+/// be created.
+fn displays_and_dir() -> Option<(Vec<xcap::Monitor>, PathBuf)> {
+    let mut monitors = xcap::Monitor::all().ok()?;
+    // Primary display first, so it is always `display = 0` ("Monitor 1"); the index is then the
+    // stable physical position (a monitor that fails to capture leaves a gap rather than renumbering).
+    monitors.sort_by_key(|m| !m.is_primary().unwrap_or(false));
+    let dir = screenshots_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    // Lock the buffer down (once per process) so *other* users on the machine can't read or swap the
+    // pending images. This complements the upload-time SHA-256 check: hashing catches the monitored
+    // user's own scripts (same identity as the agent), ACLs stop everyone else.
+    HARDEN_ONCE.call_once(|| harden_dir(&dir));
+    Some((monitors, dir))
 }
 
 static HARDEN_ONCE: std::sync::Once = std::sync::Once::new();

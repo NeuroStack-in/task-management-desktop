@@ -277,7 +277,14 @@ async fn upload_screenshot(upload: &reqwest::Client, state: &AppState, pu: &Pres
     }
 }
 
-async fn put_bytes(client: &reqwest::Client, url: &str, path: &Path) -> Result<(), String> {
+/// PUT a spooled file's bytes to a presigned URL. **No auth header** — the signature is in the URL —
+/// and `Content-Type` must match what the server signed. Shared with the on-demand `capture_now`
+/// path (`mqtt::capture`), which uploads to the command's own URL instead of an ack's.
+pub(crate) async fn put_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read:{e}"))?;
     let resp = client
         .put(url)

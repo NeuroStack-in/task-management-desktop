@@ -18,7 +18,7 @@ pub fn assemble_and_enqueue(state: &AppState) -> u64 {
     let events = std::mem::take(&mut *state.pending_events.lock().unwrap());
     let activity = std::mem::take(&mut *state.pending_activity.lock().unwrap());
     // Screenshots are **re-declared** each cycle (idempotent by id) until uploaded or capped.
-    let screenshots = {
+    let mut screenshots = {
         let shots = state.screenshots.lock().unwrap();
         shots
             .values()
@@ -26,6 +26,10 @@ pub fn assemble_and_enqueue(state: &AppState) -> u64 {
             .map(|s| s.meta.clone())
             .collect::<Vec<_>>()
     };
+    // …plus frames whose bytes are already in S3 (the admin-triggered `capture_now` uploads to the
+    // command's own presigned URL). Their meta is **drained**, not re-declared: there is no upload
+    // left to wait for, only the fold that writes the `SHOT#` row pointing at the object.
+    screenshots.append(&mut state.pending_screenshot_meta.lock().unwrap());
     let config_version = state.config.lock().unwrap().version();
     // The consent-gated location fix the sender refreshed this cycle (None when withheld/no fix).
     let location = *state.location.lock().unwrap();
