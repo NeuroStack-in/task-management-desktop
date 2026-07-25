@@ -1,9 +1,14 @@
 name: CI
 
+# `main` only (2026-07-26, owner decision — Actions minutes). This previously ran on every push to
+# every branch AND on every PR; with a 3-OS matrix that is ~130 billable minutes per run, because
+# private-repo macOS bills at 10x and Windows at 2x. Feature branches and PRs are now unchecked —
+# run the gate locally before merging:
+#   cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings \
+#     && cargo test --workspace
 on:
   push:
-    branches: ["**"]
-  pull_request:
+    branches: [main]
 
 # The agent's wire contract is a path-dep to the sibling backend checkout
 # (`../backend/crates/wp-agent-contract`), so CI checks out BOTH repos side by side.
