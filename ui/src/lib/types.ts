@@ -10,7 +10,8 @@
  * Hand-maintained, no codegen — if a DTO changes Rust-side, change it here too.
  */
 
-export type Cadence = "off" | "min3" | "min5" | "min10";
+/** Mirrors Rust `Cadence`: presets as strings, a custom interval as `{ custom: minutes }`. */
+export type Cadence = "off" | "min3" | "min5" | "min10" | { custom: number };
 
 /** panel.rs — ConsentStateDto */
 export interface ConsentState {
@@ -160,11 +161,15 @@ export interface AgentSnapshot {
   sessions: Session[];
 }
 
-export const CADENCE_LABEL: Record<Cadence, string> = {
+const CADENCE_PRESET_LABEL: Record<Exclude<Cadence, object>, string> = {
   off: "Off",
   min3: "Every 3 min",
   min5: "Every 5 min",
   min10: "Every 10 min",
 };
+
+export function cadenceLabel(c: Cadence): string {
+  return typeof c === "object" ? `Every ${c.custom} min` : CADENCE_PRESET_LABEL[c];
+}
 
 export const BLUR_LABEL = ["None", "Light", "Moderate", "Heavy"] as const;
