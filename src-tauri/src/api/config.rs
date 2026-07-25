@@ -8,9 +8,10 @@ use wp_agent_contract::AgentConfig;
 pub enum ConfigPull {
     /// Server config unchanged (304) — keep the cached one.
     NotModified,
-    /// A fresh config to apply, plus its ETag for the next conditional pull.
+    /// A fresh config to apply, plus its ETag for the next conditional pull. Boxed to keep the enum
+    /// small next to `NotModified` (clippy `large_enum_variant` — `AgentConfig` keeps growing).
     Fresh {
-        config: AgentConfig,
+        config: Box<AgentConfig>,
         etag: Option<String>,
     },
 }
@@ -48,7 +49,7 @@ pub async fn pull_config(
         return Err(format!("config:status:{}:{body}", status.as_u16()));
     }
     let text = resp.text().await.map_err(|e| format!("config:read:{e}"))?;
-    let config = parse_config(&text)?;
+    let config = Box::new(parse_config(&text)?);
     Ok(ConfigPull::Fresh { config, etag })
 }
 

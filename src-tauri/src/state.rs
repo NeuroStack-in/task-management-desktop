@@ -84,6 +84,10 @@ pub struct AppState {
     pub location: Mutex<Option<wp_agent_contract::GeoLocation>>,
     /// Cognito session + single-flight refresh (interior mutability — not behind the outer Mutex).
     pub auth: AuthManager,
+    /// Live MQTT client + status topic, set while a broker connection is up — so the exit hook can
+    /// publish a clean `{"online":false}` (mqtt::shutdown). **Device-level, like config**: the
+    /// credential and connection are per-install, so `reset_for_account_switch` leaves this alone.
+    pub mqtt: Mutex<Option<crate::mqtt::MqttHandle>>,
 }
 
 impl AppState {
@@ -101,6 +105,7 @@ impl AppState {
             pause: Mutex::new(PauseState::default()),
             location: Mutex::new(None),
             auth: AuthManager::new(),
+            mqtt: Mutex::new(None),
         }
     }
 }

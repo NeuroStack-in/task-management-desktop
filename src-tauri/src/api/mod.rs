@@ -12,6 +12,7 @@
 pub mod batch;
 pub mod client;
 pub mod config;
+pub mod enroll;
 pub mod projects;
 pub mod tasks;
 pub mod timesheet;
@@ -121,7 +122,7 @@ pub fn spawn_config_poller(app: tauri::AppHandle) {
             match config::pull_config(&http, &ingest_url, &id_token, etag.as_deref()).await {
                 Ok(config::ConfigPull::Fresh { config, etag }) => {
                     let v = config.version;
-                    state.config.lock().unwrap().apply(config, etag);
+                    state.config.lock().unwrap().apply(*config, etag);
                     tracing::info!("config poller applied version {v}");
                 }
                 Ok(config::ConfigPull::NotModified) => {}
@@ -193,7 +194,7 @@ async fn drain(
                     match config::pull_config(http, ingest_url, id_token, etag.as_deref()).await {
                         Ok(config::ConfigPull::Fresh { config, etag }) => {
                             let v = config.version;
-                            state.config.lock().unwrap().apply(config, etag);
+                            state.config.lock().unwrap().apply(*config, etag);
                             tracing::info!("config applied (version {v})");
                         }
                         Ok(config::ConfigPull::NotModified) => {}

@@ -23,6 +23,7 @@ pub mod heartbeat;
 pub mod lifecycle;
 pub mod location;
 pub mod monitor;
+pub mod mqtt;
 pub mod outbox;
 pub mod rules;
 pub mod session_state;
@@ -164,6 +165,11 @@ pub fn run() {
             // within a minute instead of waiting up to a full screenshot cadence (10 min) for the
             // next batch-cycle version check. The batch cycle remains the backstop.
             api::spawn_config_poller(app.handle().clone());
+            // The MQTT downlink (MQTT-MIGRATION Phase 3): enrolls the device once (first signed-in
+            // launch), then holds a mutual-TLS connection to IoT Core for pushed commands + presence.
+            // Signals only — batches and config stay on the HTTP rails above, which remain the
+            // backstop whenever this connection is down.
+            mqtt::spawn(app.handle().clone());
             monitor::spawn(app.handle().clone());
             monitor::spawn_screenshots(app.handle().clone());
 
@@ -288,6 +294,10 @@ pub fn run() {
         // (`auth_logout`), not a side effect of closing the window.
         if let RunEvent::ExitRequested { .. } = event {
             let state = app_handle.state::<AppState>();
+            // Best-effort clean MQTT presence: queue `{"online":false}` + DISCONNECT so the fleet
+            // flips offline immediately; if the process dies first, the broker's Last Will delivers
+            // the same payload after the keepalive window.
+            mqtt::shutdown(&state);
             let ts = clock::now_epoch_ms();
             // Bound separately so the timer's MutexGuard is dropped before `state` goes out of
             // scope at the end of the block — an inline `if let` keeps the temporary alive too long.

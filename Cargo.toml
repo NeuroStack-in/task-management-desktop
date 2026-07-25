@@ -29,6 +29,8 @@ dotenvy = "0.15"
 sysinfo = "0.32"
 local-ip-address = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# MQTT downlink (AWS IoT Core, mutual-TLS with the enrollment cert) — backend/docs/MQTT-MIGRATION.md Phase 3.
+rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 base64 = "0.22"
 # OS capture (M4) — real data only on a live desktop session; degrade to 0/None headless & on Wayland.
