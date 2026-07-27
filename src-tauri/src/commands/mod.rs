@@ -46,7 +46,14 @@ pub async fn auth_login(
     username: String,
     password: String,
 ) -> Result<AuthStatus, String> {
-    state.auth.login(&username, &password).await
+    let status = state.auth.login(&username, &password).await?;
+    // A signed-in agent should appear in the fleet **now**, not a full cadence (up to 5–10 min) later:
+    // wake the sender so it sends the first heartbeat immediately. Harmless if the login returned a
+    // new-password challenge — the sender still auth-gates on a real token.
+    if status.signed_in {
+        state.flush.notify_one();
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -56,10 +63,14 @@ pub async fn auth_complete_new_password(
     new_password: String,
     session: String,
 ) -> Result<AuthStatus, String> {
-    state
+    let status = state
         .auth
         .complete_new_password(&username, &new_password, &session)
-        .await
+        .await?;
+    if status.signed_in {
+        state.flush.notify_one();
+    }
+    Ok(status)
 }
 
 #[tauri::command]

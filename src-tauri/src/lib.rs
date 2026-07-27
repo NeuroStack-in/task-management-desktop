@@ -161,6 +161,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let restored = handle.state::<AppState>().auth.restore().await;
                 tracing::info!("auth restore at startup: {restored}");
+                // Send the first heartbeat right after a resumed session so the device reappears in the
+                // fleet within seconds of launch, not after a full cadence interval.
+                if restored {
+                    handle.state::<AppState>().flush.notify_one();
+                }
             });
             api::spawn_sender(app.handle().clone());
             // The fast config rail: a 60 s conditional (ETag) pull so an admin's policy change lands
