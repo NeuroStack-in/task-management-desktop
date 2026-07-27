@@ -325,6 +325,20 @@ pub fn run() {
                 }
                 resume
             };
+            // Persist that `TimerStopped` before the process dies. `pending_events` is an in-memory
+            // Vec that only reaches the durable outbox via `assemble_and_enqueue`, which the sender
+            // normally drives on its cycle — but nothing here waits for the sender, and the runtime
+            // is about to go away. Without this the stop event was simply lost, so the server never
+            // learned the session ended and the web UI showed "Recording" indefinitely.
+            //
+            // Enqueue is synchronous and writes to `queue/batches.jsonl`, so the stop survives the
+            // exit and ships on the next launch even when quitting offline. (Sending it *now* isn't
+            // possible: the async sender can't be awaited from this handler.) The server-side
+            // stale-session reaper is what covers the harder cases — a crash or power loss, where
+            // this handler never runs at all.
+            let seq = crate::cycle::assemble_and_enqueue(&state);
+            tracing::info!(batch_seq = seq, "shutdown: queued the final batch (timer stop)");
+
             // The session is still *closed* on the server (the TimerStopped event above): the offline
             // period must not be billed, since nothing was captured during it. Reopening starts a
             // fresh session on the same task, and today's total comes from the folded entries.
