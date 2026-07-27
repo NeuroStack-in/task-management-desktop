@@ -4,13 +4,20 @@
 > a fresh install to a trusted, tenant-scoped, revocable identity — and **closes the gap
 > that the backend today issues only user JWTs, with no device identity model.**
 >
-> **Status: DEFERRED (proposed) — and the case for it got weaker, not stronger.**
+> **Status (updated 2026-07-27): device *auth* for batches is still DEFERRED; a per-install device
+> *credential* now exists — but for the MQTT rail, not for batch auth.** `POST /v1/agent/batch` is
+> still a plain user-JWT route (below). What changed: the agent now also calls **`POST /v1/agent/enroll`**
+> once per install (first signed-in run) and gets a **per-install X.509 credential** — an IoT Thing name,
+> cert + private key, broker endpoint, and topics — persisted in the OS keyring (`api/enroll.rs`). That
+> credential authenticates the **MQTT downlink only** (mutual-TLS to AWS IoT Core for
+> `config_changed` / `capture_now` / presence — `mqtt/`, backend MQTT-MIGRATION Phase 3). Batches are
+> untouched by it. The device-JWT / `monitoring:submit` model this document proposes remains unbuilt.
 >
-> **What actually ships:** the agent **signs in as the user** with the same Cognito login the web app
-> uses, and sends the **ID token** (the claims ride the ID token, not the access token). Tokens live in
-> the **OS keyring**; refresh is automatic and de-duplicated; a 401 tears the session down. So
+> **What ships for batch auth:** the agent **signs in as the user** with the same Cognito login the web
+> app uses, and sends the **ID token** (the claims ride the ID token, not the access token). Tokens live
+> in the **OS keyring**; refresh is automatic and de-duplicated; a 401 tears the session down. So
 > `POST /v1/agent/batch` is a normal user-JWT route and each batch is attributed to `auth.user_id`.
-> **There is no device credential and no `monitoring:submit` permission.**
+> **There is no device credential in the batch path and no `monitoring:submit` permission.**
 >
 > **`agent_id` is not a credential.** It is a **per-install UUIDv4**, generated once at first boot and
 > persisted next to the outbox sequence. It *identifies* the install; it does not *authenticate* it.

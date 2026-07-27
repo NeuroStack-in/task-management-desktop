@@ -55,8 +55,9 @@ While the timer runs, three loops:
   capped at 30). Each tick adds a second to `active_sec` **or** `idle_sec`, so the invariant is
   **`active_sec + idle_sec ≤ 60`**. Buckets seal on the minute boundary, on timer-stop, and on a
   screenshot early-flush.
-- **Screenshot** — every `Cadence::interval_secs()` (`Off / 3m / 5m / 10m`) **± up to 60 s of
-  jitter**, so the timing isn't predictable or gameable. `Off` means the loop doesn't run at all.
+- **Screenshot** — every `Cadence::interval_secs()` (`Off / 3m / 5m / 10m`, or `Custom { minutes }`)
+  **± up to 60 s of jitter**, so the timing isn't predictable or gameable. `Off` means the loop
+  doesn't run at all. Screenshots cover **all displays** (xcap), not just the primary.
 
 **`device_query` is a 1 s sampler, not a low-level hook.** It polls rather than intercepting — which
 is deliberate (it avoids `rdev`'s blocking listener and its macOS main-thread/run-loop requirement),

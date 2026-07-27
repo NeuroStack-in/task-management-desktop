@@ -1,6 +1,9 @@
 # AGENT.md — WorkPulse Desktop Agent Architecture
 
-> **Rewritten 2026-07-16.** The **single source of truth for the desktop agent**.
+> **Rewritten 2026-07-16; status/module details refreshed 2026-07-27.** The **single source of truth
+> for the desktop agent**. The design below is current; **implementation status: M0–M8 are done**, the
+> single-process tree compiles and produces installers, and device enrollment + an MQTT downlink (§6)
+> now exist. See [`BUILD-PLAN.md`](BUILD-PLAN.md) "Where we actually are".
 >
 > **Backend canon:** [`WorkPulse-LLD.md`](../../backend/WorkPulse-LLD.md) (feature behaviour — §4
 > timer, §10 screenshots, §14 rules, §18 fleet) + [`WorkPulse-HLD.md`](../../backend/WorkPulse-HLD.md)
@@ -87,18 +90,23 @@ One Tauri process: a Preact webview for the UI, a Rust core for everything else.
 
 ```
 src-tauri/src/
-  main.rs  lib.rs           # lib split so integration tests can link
-  error.rs  events.rs  lifecycle.rs  window_size.rs
+  main.rs  lib.rs           # lib split so integration tests can link; lib.rs also builds the tray
+  clock.rs error.rs events.rs lifecycle.rs window_size.rs
+  state.rs session_state.rs privacy_log.rs cycle.rs heartbeat.rs location.rs
   config/                   # AgentConfig cache; ETag pull on version mismatch
-  auth/{mod,cognito,keyring}.rs
-  api/{mod,client,batch,config,tasks}.rs
-  state/  commands/{auth,timer,data,system,update}_cmds.rs
-  timer/engine.rs           # one running session max; crash-safe
+  auth/{mod,cognito,config,token,token_store}.rs   # keyring token store (chunked)
+  api/{mod,client,batch,config,tasks,projects,timesheet,enroll}.rs
+  commands/{mod,panel}.rs   # the webview's #[command] surface
+  timer/{mod,engine}.rs     # one running session max; crash-safe
   outbox/{mod,store}.rs     # queue/batches.jsonl; seq + watermark prune
   monitor/{mod,idle,input,active_window,screenshot,session,bucket}.rs
-  rules/classifier.rs       # synced category rules, applied on-device
-  tray/  updater/{mod,verify,install}
+  rules/{mod,classifier}.rs # synced category rules, applied on-device
+  mqtt/{mod,capture}.rs     # AWS IoT downlink: config_changed / capture_now / presence
+  updater/mod.rs            # signed GitHub-Releases self-update
 ```
+
+> The tray is built inline in `lib.rs` (there is no separate `tray/` dir), and `commands/` is
+> `{mod,panel}.rs` rather than the per-domain `*_cmds.rs` sketch above's earlier drafts implied.
 
 **The monitor is timer-gated.** `monitor::reflect()` starts/stops idempotently on
 `TimerEngine::is_running()`.
@@ -151,9 +159,10 @@ settings. No business logic: the Rust core is authoritative.
 
 ## 6. Dependencies on the backend
 
-- **Pin `wp-agent-contract`.** It is today an **unpinned path-dep to a sibling checkout** — which is
-  why this workspace does not compile (the backend moved the contract; nobody noticed). Git dep at a
-  rev, or a CI drift check. Non-negotiable.
+- **Pin `wp-agent-contract`.** It is still an **unpinned path-dep to a sibling checkout** (`../backend/
+  crates/wp-agent-contract`). This once made the workspace stop compiling (the backend moved the
+  contract; nobody noticed) — that's fixed and the tree builds today, but the pin (git dep at a rev, or
+  a CI drift check) is still the standing to-do. Non-negotiable for CI/release.
 - **Contract PR required before the timer ships** ([`BUILD-PLAN.md`](BUILD-PLAN.md) §6):
   `TimerStarted.description`; `task_id`/`project_id` → `Option` (meeting mode);
   `ScreenshotMeta.bucket_minute`; `TrackingConfig.auto_update`; `BatchAck.tasks_version` +
@@ -170,5 +179,7 @@ settings. No business logic: the Rust core is authoritative.
 - [`INGESTION.md`](INGESTION.md) — the wire contract + upload protocol
 - [`CONFIG.md`](CONFIG.md) — settings + remote policy sync
 - [`PRIVACY.md`](PRIVACY.md) — consent, indicator, exceptions, retention
-- [`ENROLLMENT.md`](ENROLLMENT.md) — identity; the per-device credential (**deferred**)
+- [`ENROLLMENT.md`](ENROLLMENT.md) — identity. Batch auth is user-JWT (device-JWT enrollment stays
+  **deferred**), but a **per-install X.509 device credential is now issued** by `POST /v1/agent/enroll`
+  for the MQTT downlink (`api/enroll.rs` + `mqtt/`)
 - [`UPDATES-SECURITY.md`](UPDATES-SECURITY.md) — updates, signing, endpoint security

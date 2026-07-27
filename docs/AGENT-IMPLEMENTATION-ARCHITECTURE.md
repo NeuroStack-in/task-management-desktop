@@ -18,12 +18,12 @@
 | # | Topic | Doc |
 |---|---|---|
 | — | **Start here.** Architecture, the 1-process model, the LLD Appendix A amendment + what it costs | [`AGENT.md`](AGENT.md) |
-| — | **Build sequence (M0–M8)** + the current state (the workspace does not compile) | [`BUILD-PLAN.md`](BUILD-PLAN.md) |
+| — | **Build sequence (M0–M8)** + the current state (M0–M8 implemented; compiles + builds installers) | [`BUILD-PLAN.md`](BUILD-PLAN.md) |
 | 1 | Capture — the timer gate, the 1 s sampler, per-minute rollups, screenshots | [`CAPTURE.md`](CAPTURE.md) |
 | 2 | Ingestion — `POST /v1/agent/batch`, `(agent_id, batch_seq)`, the jsonl outbox | [`INGESTION.md`](INGESTION.md) |
 | 3 | Config & policy — the ETag rail, the redefined `Cadence` | [`CONFIG.md`](CONFIG.md) |
 | 4 | Privacy & ethics — counts-not-content, the timer gate, exceptions | [`PRIVACY.md`](PRIVACY.md) |
-| 5 | Identity — the user's Cognito ID token; the device credential (**deferred**) | [`ENROLLMENT.md`](ENROLLMENT.md) |
+| 5 | Identity — the user's Cognito ID token (batch auth); the per-install X.509 device credential now issued for the **MQTT rail** (device-JWT batch auth still **deferred**) | [`ENROLLMENT.md`](ENROLLMENT.md) |
 | 6 | Updates & endpoint security — fail-closed updater, host pinning | [`UPDATES-SECURITY.md`](UPDATES-SECURITY.md) |
 
 **Authority:** [`WorkPulse-LLD.md`](../../backend/WorkPulse-LLD.md) +

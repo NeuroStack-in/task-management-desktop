@@ -29,14 +29,15 @@ desktop/
       ├─ clock.rs error.rs events.rs lifecycle.rs window_size.rs
       ├─ state.rs        # Tauri-managed AppState (timer · outbox · config)
       ├─ config/         # AgentConfig cache; ETag pull on version mismatch
-      ├─ auth/           # M1 — Cognito USER_PASSWORD_AUTH + OS keyring
-      ├─ api/            # M2 — reqwest: POST /v1/agent/batch, config pull, S3 PUT
-      ├─ commands/       # the webview's #[command] surface
+      ├─ auth/           # Cognito USER_PASSWORD_AUTH + chunked OS-keyring tokens
+      ├─ api/            # reqwest: POST /v1/agent/batch, config pull, S3 PUT, enroll
+      ├─ commands/       # the webview's #[command] surface (mod + panel)
       ├─ timer/engine.rs # one running session max; carries started_at
-      ├─ outbox/         # in-memory now → queue/batches.jsonl (M2); per-install agent_id
-      ├─ monitor/        # input (counts-only) + idle/active_window/screenshot/session/bucket seams
+      ├─ outbox/         # queue/batches.jsonl (seq + watermark prune); per-install agent_id
+      ├─ monitor/        # input (counts-only) + idle/active_window/screenshot/session/bucket
       ├─ rules/          # on-device app/URL classifier
-      └─ updater/        # M7 — signed GitHub-Releases self-update
+      ├─ mqtt/           # AWS IoT downlink: config_changed / capture_now / presence
+      └─ updater/        # signed GitHub-Releases self-update
 ```
 
 Data flow: `monitor` (timer-gated) → per-minute `ActivityRollup`s + events → `outbox` →
@@ -92,22 +93,30 @@ just dev     # run the app (Tauri CLI + ui/ deps required)
 just build   # packaged installer
 ```
 
-## Status — M0 complete
+## Status — M0–M8 implemented (as of 2026-07-27)
 
-The single-process workspace **compiles** (`cargo check --workspace`) and its **unit tests pass**
-(the four migrated real slices — `outbox`, `timer::engine`, `monitor::input`, `rules::classifier` —
-plus `config`). The privacy shape (counts-not-keys) is enforced by the types.
+The single-process workspace **compiles** (`cargo check --workspace`), its **unit tests pass**
+(`just test` — ~74 `#[test]`s across auth/api/monitor/timer/outbox/rules/…), and a local
+`cargo tauri build` produces `workpulse-agent.exe` plus **NSIS and MSI installers** under
+`target/release/`. The privacy shape (counts-not-keys) is enforced by the types.
 
-Everything else is a documented seam. The build-out is milestoned in
-[docs/BUILD-PLAN.md](docs/BUILD-PLAN.md):
+All the milestones from [docs/BUILD-PLAN.md](docs/BUILD-PLAN.md) are built:
 
 - **M1** Auth — Cognito `USER_PASSWORD_AUTH` (hand-rolled over `reqwest`) + chunked OS-keyring tokens.
 - **M2** Heartbeat rail — cycle + jsonl outbox + `POST /v1/agent/batch` (the one milestone the live backend confirms today).
-- **M3** Timer + project→task selector (mandatory description, meeting mode) — gated on the §6 contract PR.
+- **M3** Timer + project→task selector (mandatory description, meeting mode).
 - **M4** Monitor — 1 s thread (`device_query` / `user-idle` / `x-win`), per-minute buckets, idle prompt + hard auto-stop.
-- **M5** Screenshots — `xcap` → 768 WebP + blur + pHash → host-pinned S3 PUT (+ macOS permission UX).
-- **M6** Shell — tray reflection, minimize-to-tray, auto-sign-out, autostart, single-instance, Wayland probe + DTO field-name tests.
-- **M7** Updater — signed GitHub Releases (SHA-256 + Ed25519).
-- **M8** Tests + CI — envelope goldens, bucket rotation (incl. midnight), outbox replay, classifier precedence, cross-platform matrix.
+- **M5** Screenshots — `xcap` (all displays) → WebP + blur + pHash → host-pinned S3 PUT.
+- **M6** Shell — tray reflection, minimize-to-tray, auto-sign-out, autostart, single-instance, per-feature entitlement gating.
+- **M7** Updater — signed GitHub Releases (SHA-256 + Ed25519), pubkey baked in, periodic check.
+- **M8** Tests + CI — `.github/workflows/ci.yml` + `release.yml`; goldens, bucket rotation, outbox replay, classifier precedence, `clippy -D warnings`.
+
+**Beyond the M0–M8 plan:** per-install **device enrollment** (`POST /v1/agent/enroll` → X.509
+credential in the keyring) and an **MQTT downlink** (AWS IoT Core mutual-TLS: `config_changed` /
+`capture_now` + presence) — the agent side of backend MQTT-MIGRATION Phase 3. Screenshot cadence now
+also supports a **`Custom`** interval alongside the `Off / 3m / 5m / 10m` presets.
+
+What still can't be checked from a dev box is the live-backend confirmation — see
+[docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 Live dev backend: `https://oqlla6l5oc.execute-api.ap-south-1.amazonaws.com` (pool `ap-south-1_0ep998OVt`).

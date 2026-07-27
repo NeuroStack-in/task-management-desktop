@@ -71,7 +71,7 @@ real items; `AgentConfig` bundles them behind one version token.
 
 | Setting | Default | Source | Used by |
 |---------|---------|--------|---------|
-| `cadence` — **screenshot** interval, timer-gated | `Min5` (`Off / 3m / 5m / 10m`) | `TrackingConfig` | [CAPTURE.md](CAPTURE.md) screenshot loop |
+| `cadence` — **screenshot** interval, timer-gated | `Min5` (`Off / 3m / 5m / 10m`, or `Custom { minutes }`) | `TrackingConfig` | [CAPTURE.md](CAPTURE.md) screenshot loop |
 | Screenshot jitter | ±60 s (fixed, not configurable) | code | anti-evasion |
 | `blur_level` | 0 | `TrackingConfig` | on-device blur before upload |
 | `retention_days` | 90 | `TrackingConfig` | server-side lifecycle |

@@ -1,6 +1,7 @@
 # BUILD-PLAN.md — Desktop Agent Build-Out
 
-> **Status:** Rewritten 2026-07-16. Supersedes the earlier 3-process roadmap.
+> **Status:** Rewritten 2026-07-16; **status narrative refreshed 2026-07-27** (M0–M8 are now
+> implemented — see "Where we actually are"). Supersedes the earlier 3-process roadmap.
 > **Model:** [`REFERENCE-TASKFLOW.md`](REFERENCE-TASKFLOW.md) — **TaskFlow Desktop v0.1.4**, a complete,
 > shipping Tauri v2 + Preact activity-monitoring agent (~3,160 L Rust, ~5,150 L TS, CI-released).
 > It is the same product category as this agent, already working. We model on it and speak **our**
@@ -19,19 +20,45 @@
 
 ## Where we actually are
 
-`cargo check --workspace` **fails** — verified:
+> **Updated 2026-07-27.** The paragraphs below describe the *starting* state this plan was written
+> against (pre-M0). **That state no longer holds — M0–M8 are implemented.** Kept for the history;
+> read the box first.
+
+> ✅ **Current state (2026-07-27).** The single-process refactor is **done** and the tree **compiles**:
+> `cargo check --workspace` is green, and a local `cargo tauri build` produces a signed
+> `workpulse-agent.exe` plus NSIS (`WorkPulse_0.1.0_x64-setup.exe`) and MSI installers under
+> `target/release/`. The former `crates/agentd` + `crates/capture-helper` + `crates/agent-shared` +
+> `tray/` split is **gone**; the whole Rust core is ~6.3k lines across 46 files under `src-tauri/src/`
+> (`auth api monitor timer outbox rules config commands mqtt updater` + `lib.rs`), with the Preact
+> webview (~3.3k lines) under `ui/`. `wp-agent-contract` is a path-dep to the sibling `backend/`
+> checkout (pin it for CI/release per §1 — still non-negotiable).
+>
+> **All milestones M0–M8 are implemented:** Cognito `USER_PASSWORD_AUTH` login + chunked keyring
+> tokens (M1); heartbeat/batch cycle + jsonl outbox (M2); timer + project/task picker with mandatory
+> description + meeting mode (M3); the 1 s monitor thread — idle/input-counts/foreground-app, minute
+> buckets, classifier (M4); screenshots — xcap all-display → WebP + blur + pHash → host-pinned S3 PUT
+> (M5); shell/tray polish, autostart, single-instance, per-feature entitlement gating (M6); the
+> GitHub-Releases signed updater with a baked-in pubkey + periodic check (M7); and tests + CI (M8 —
+> `.github/workflows/ci.yml` + `release.yml`, ~74 `#[test]`s including monitor jitter, screenshot
+> host-pin, and batch-ack parsing).
+>
+> **Beyond the original M0–M8 plan:** per-install **device enrollment** (`POST /v1/agent/enroll` →
+> X.509 credential in the keyring, `api/enroll.rs`) and the **MQTT downlink** push rail (AWS IoT
+> Core mutual-TLS: `config_changed`/`capture_now` commands + presence, `src-tauri/src/mqtt/`) are now
+> built — the agent-side counterpart to backend MQTT-MIGRATION Phase 3. **Screenshot cadence gained a
+> `Custom` variant** (`Cadence::Custom` in the shared contract, mirrored by the panel's `cadence` type).
+
+**Pre-M0 starting state (historical):** `cargo check --workspace` **failed** —
 
 ```
 error[E0063]: missing fields `idle` and `outbox_mb` in initializer of `Heartbeat`
 error[E0063]: missing field `started_at` in initializer of `AgentEvent`
 ```
 
-The backend moved `wp-agent-contract`; this repo never followed, because it's an **unpinned path-dep
-to a sibling checkout**. Nobody noticed. That mechanism — not the two errors — is the real bug, and
-M0 closes it.
-
-Only **4 slices are real** (`outbox` in-memory, `timer_engine`, `input_counts`, `rule_classifier`).
-Everything else is a stub. **Zero** OS/IO deps are declared.
+The backend had moved `wp-agent-contract`; this repo never followed, because it's an **unpinned
+path-dep to a sibling checkout**. Nobody noticed. That mechanism — not the two errors — was the real
+bug, and M0 closed it. At that point only **4 slices were real** (`outbox` in-memory, `timer_engine`,
+`input_counts`, `rule_classifier`); everything else was a stub and **zero** OS/IO deps were declared.
 
 ---
 
@@ -55,33 +82,41 @@ rewrite.
 
 ## 1. Target architecture
 
-**Delete:** `crates/agentd`, `crates/capture-helper`, `crates/agent-shared` (a re-export +
+> ✅ **Done (2026-07-27).** The delete happened; the layout below is what shipped, with a couple of
+> pragmatic differences called out inline (`commands/` is `{mod,panel}.rs`; the tray lives in `lib.rs`,
+> not a `tray/` dir; `mqtt/` was added for the push rail). `wp-agent-contract` is still a path-dep —
+> **pin it for CI/release** (the one remaining item here).
+
+**Deleted (M0):** `crates/agentd`, `crates/capture-helper`, `crates/agent-shared` (a re-export +
 `ipc.rs` — one process means no IPC; depend on `wp-agent-contract` **directly and pinned**), and
-`tray/` (186 L of hardcoded-value HTML, superseded by `ui/`). Archive the three root
-`*_Architecture.md` essays.
+`tray/` (186 L of hardcoded-value HTML, superseded by `ui/`). The three root `*_Architecture.md`
+essays were archived.
 
 ```
 desktop/
   Cargo.toml                      # workspace, members = ["src-tauri"]
   ui/                             # Preact + Vite + Tailwind + TS
   src-tauri/
-    tauri.conf.json               # 500x600, max 550x650 — a companion widget, not a dashboard
+    tauri.conf.json               # a companion widget, not a dashboard
     src/
-      main.rs  lib.rs             # lib split (the sample is a plain bin) so tests can link
-      error.rs  events.rs  lifecycle.rs  window_size.rs
+      main.rs  lib.rs             # lib split (the sample is a plain bin) so tests can link;
+                                  #   lib.rs also builds the tray (no separate tray/ dir)
+      clock.rs error.rs events.rs lifecycle.rs window_size.rs
+      state.rs session_state.rs privacy_log.rs cycle.rs heartbeat.rs location.rs
       config/                     # AgentConfig cache, ETag pull on version mismatch
-      auth/{mod,cognito,keyring}.rs
-      api/{mod,client,batch,config,tasks}.rs
-      state/  commands/{auth,timer,data,system,update}_cmds.rs
-      timer/engine.rs             <- agentd/features/timer_engine.rs
-      outbox/{mod,store}.rs       <- agentd/features/outbox.rs  (+ jsonl)
+      auth/{mod,cognito,config,token,token_store}.rs
+      api/{mod,client,batch,config,tasks,projects,timesheet,enroll}.rs
+      commands/{mod,panel}.rs     # the webview's #[command] surface (kishore's panel UI)
+      timer/{mod,engine}.rs       <- agentd/features/timer_engine.rs
+      outbox/{mod,store}.rs       # queue/batches.jsonl (+ seq/watermark prune)
       monitor/{mod,idle,input,active_window,screenshot,session,bucket}.rs
-      rules/classifier.rs         <- capture-helper/features/rule_classifier.rs
-      tray/  updater/{mod,verify,install}
+      rules/{mod,classifier}.rs   <- capture-helper/features/rule_classifier.rs
+      mqtt/{mod,capture}.rs       # NEW: AWS IoT downlink (config_changed / capture_now / presence)
+      updater/mod.rs
 ```
 
 **Pin `wp-agent-contract`** — git dep at a rev, or path-dep plus a CI job that fails on drift.
-Non-negotiable; this failure mode recurs otherwise.
+Non-negotiable; this failure mode recurs otherwise. **(Still a path-dep as of 2026-07-27.)**
 
 ## 2. What survives — all 4 real slices, with their tests
 
@@ -218,6 +253,11 @@ lossy encode; blur via `image::imageops::blur` (`blur_level → sigma` map); pHa
 
 ## 7. Milestones
 
+> ✅ **All of M0–M8 are implemented as of 2026-07-27** (plus device enrollment + the MQTT downlink,
+> which post-date this table). The "Verify" column is the acceptance bar each was built against; what
+> still can't be checked from a dev box without AWS access is the live-backend confirmation in
+> [`RUNBOOK.md`](RUNBOOK.md). The narrative below is the original forward-looking plan.
+
 **Only heartbeat folds today — a 200 proves nothing.** Every proof is an observable AgentDevice row, a
 local artifact, or a recorded request body. Live: `https://oqlla6l5oc.execute-api.ap-south-1.amazonaws.com`,
 pool `ap-south-1_0ep998OVt`, `--profile company`.
@@ -233,7 +273,7 @@ pool `ap-south-1_0ep998OVt`, `--profile company`.
 | **M5** | Screenshots — xcap → 768 WebP + blur + pHash → host-pinned PUT; early-flush link. **+ the macOS permissions UX** (below) | Object in the bucket (`aws s3 ls --profile company`), format/size asserted; `screenshots` flag off → **zero** shots (fails closed); **denied macOS grant → a visible "grant permission" state, not silence** |
 | **M6** | Shell — tray (tooltip reflects tracking/idle), minimize-to-tray, **auto-sign-out on quit** (idempotent, 5 s-bounded, tray-Quit/Ctrl-C/SIGTERM), notifications + policy, autostart, window-size (400 ms debounce), single-instance, Wayland probe **+ the DTO field-name test**, dashboard-URL sanitization | |
 | **M7** | Updater — GitHub Releases + SHA-256 + Ed25519; release builds refuse unsigned; **point `GITHUB_REPO` at our repo** (the sample's points at the legacy Go repo) | |
-| **M8** | Tests + CI — the sample has **zero**. Floor: envelope goldens, bucket rotation across minute **and midnight**, outbox prune/replay, classifier precedence (URL beats app), DTO field-name tests, `clippy -D warnings`, cross-platform matrix | |
+| **M8** | Tests + CI — the *sample* (TaskFlow) shipped with **zero**; **this repo does not** — ~74 `#[test]`s exist (monitor jitter, screenshot host-pin, batch-ack parsing, bucket rotation, outbox prune/replay, classifier precedence, DTO field-name goldens), run by `.github/workflows/ci.yml` under `clippy -D warnings` | Done: `just test` green; CI on push to `main` |
 
 ## 8. Risks
 
@@ -255,6 +295,8 @@ pool `ap-south-1_0ep998OVt`, `--profile company`.
    sample's own open item #1 is *"detect denial, gate `monitor::start`, surface a 'grant permission'
    hint"* — **unbuilt, so we inherit the gap.** A denied Mac silently collects nothing. Build it at M5.
 6. **Screenshots are primary-display only** in the sample. Decide deliberately; don't inherit it.
+   *(Resolved: the agent captures **all displays** via `xcap::Monitor::all()`; `capture_primary` is
+   kept for the on-demand `capture_now` path.)*
 7. **Zero tamper-resistance** — the accepted cost of §0. Keep `monitor/` Tauri-free so it's reversible.
 6. **`agent_id` collision** — fix in M0, not "later". It corrupts the live dev table.
 7. **Screenshot re-presign loop** — a permanently-failing PUT re-declares its meta forever. Attempt cap,
