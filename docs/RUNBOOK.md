@@ -28,8 +28,21 @@ aws cognito-idp describe-user-pool-client \
 # expect ALLOW_USER_PASSWORD_AUTH in the list
 ```
 
-### 2. Desktop — set the App Client ID
-Get the client id (a CDK stack output):
+### 2. Desktop — the App Client ID *(no longer required)*
+
+Since `auth/config.rs` gained build-time defaults, the agent already knows the dev stack's client id,
+region and API URL — `just dev` and a downloaded installer both work with no `.env` at all. Set the
+values below only to point a run at a **different** stack.
+
+> **Why this changed.** `client_id` used to have no default, the NSIS bundle ships no `.env`, and
+> `release.yml` injected nothing — so every employee who installed the published agent saw *"This
+> agent isn't configured for your organization yet"* and could never sign in. It only looked like a
+> per-machine config problem because developers happened to run from a directory containing `.env`.
+> Published builds now bake the values from the repo variables `WP_COGNITO_CLIENT_ID` /
+> `WP_COGNITO_REGION` / `WP_INGEST_URL` (Settings → Secrets and variables → Actions → Variables);
+> unset, a build falls back to the shared dev stack.
+
+To override, get the client id (a CDK stack output):
 ```bash
 aws cloudformation describe-stacks --profile company \
   --query "Stacks[].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" --output text
@@ -71,7 +84,11 @@ Sign in as **`owner@acme.test`**. First login for an admin-created user hits
 
 ## Gotchas
 
-- **`auth:not_configured`** → `WP_COGNITO_CLIENT_ID` is empty. Set it in `.env`.
+- **`auth:not_configured`** ("This agent isn't configured for your organization yet") → the resolved
+  `client_id` is empty. Since the build-time default landed this should be unreachable; if you see it,
+  a build stripped the default (`WP_COGNITO_CLIENT_ID=` set to blank at build time) or an OS
+  environment variable is set to an empty string. Note a `.env` is only read when the process starts
+  in that directory — an installed agent launched from the Start menu never sees this repo's `.env`.
 - **`auth:cognito:400 … USER_PASSWORD_AUTH is not enabled`** → step 1 wasn't deployed.
 - **`.env` not picked up** → it must sit in `desktop/` (or the cwd the binary runs from); dotenvy
   walks up from cwd. Real OS env vars override `.env`.

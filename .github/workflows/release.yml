@@ -127,6 +127,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Which backend the published agent talks to, baked in at build time (auth/config.rs reads
+          # these via `option_env!`). Without them a downloaded installer had no app-client id at all
+          # and every employee hit "This agent isn't configured for your organization yet" — the
+          # bundle ships no `.env`, so runtime env was the only source and a clean machine has none.
+          # These are public identifiers, not secrets, hence repo **variables**: set them under
+          # Settings → Secrets and variables → Actions → Variables. Left unset, the build falls back
+          # to the shared dev stack (auth/config.rs::DEV_CLIENT_ID) — fine for dev, wrong for prod, so
+          # set them before cutting a customer-facing tag.
+          WP_COGNITO_CLIENT_ID: ${{ vars.WP_COGNITO_CLIENT_ID }}
+          WP_COGNITO_REGION: ${{ vars.WP_COGNITO_REGION }}
+          WP_INGEST_URL: ${{ vars.WP_INGEST_URL }}
         with:
           projectPath: desktop
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
