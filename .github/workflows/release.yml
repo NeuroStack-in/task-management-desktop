@@ -121,8 +121,13 @@ jobs:
 
       # tauri-action builds the constrained bundle set + the updater artifacts (latest.json + minisign
       # .sig), and uploads them to the DRAFT release for this tag.
+      # PINNED to a SHA, not the floating `@v0`. That tag moved between the v0.1.0 release and the
+      # v0.1.1 attempt, bringing a Tauri CLI that runs `beforeBuildCommand` from the **frontend**
+      # directory instead of the project root — which broke all three platforms at once on a commit
+      # that touched nothing but a version string. A release workflow that can break without anyone
+      # changing the repo is not a release workflow. Bump this deliberately, and read the changelog.
       - name: Build bundles + updater artifacts
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
