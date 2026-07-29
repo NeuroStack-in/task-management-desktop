@@ -272,3 +272,32 @@ export function getAutoStart(): Promise<boolean> {
 export async function setAutoStart(enabled: boolean): Promise<void> {
   await invoke<void>("set_auto_start", { enabled });
 }
+
+// ── self-update ────────────────────────────────────────────────────────────────────────────────
+
+export interface UpdateStatus {
+  /** The version running right now. */
+  current: string;
+  /** Whether the check actually reached the manifest. `false` = offline or no signing key. */
+  checked: boolean;
+  /** Newer version available, or `null` when already current. */
+  latest: string | null;
+  /** Why the check failed, when it did. */
+  error: string | null;
+}
+
+/**
+ * Ask whether a newer signed build exists — **without installing it**.
+ *
+ * The agent already self-updates on its own (at launch, then every 6 h). This exists so the panel
+ * can *say so*: before it, the only evidence an update had happened was the version silently
+ * changing, and there was no way to answer "am I on the latest?" without reading a log file.
+ */
+export function updateStatus(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("update_status");
+}
+
+/** Install the pending update now. Resolves with the version installed; the app then relaunches. */
+export function updateInstall(): Promise<string> {
+  return invoke<string>("update_install");
+}

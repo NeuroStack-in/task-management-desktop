@@ -125,6 +125,47 @@ pub fn consent_status(state: State<'_, AppState>) -> bool {
 
 // ---- updater (M7) ----
 
+/// What the panel shows about updates: the running version, and whether a newer one exists.
+///
+/// `checked` distinguishes "we asked and there is nothing newer" from "we could not ask" — offline,
+/// or a build with no public key. Without it both render as *up to date*, which is a claim we
+/// haven't earned and the one an employee would rely on before assuming they have the latest fix.
+#[derive(serde::Serialize)]
+pub struct UpdateStatus {
+    pub current: String,
+    pub checked: bool,
+    pub latest: Option<String>,
+    /// Present only when the check failed; the panel shows it as a quiet hint, not an alarm.
+    pub error: Option<String>,
+}
+
+/// Report update availability **without installing**. Never errors: a failed check is a state the
+/// panel renders, not an exception it has to catch.
+#[tauri::command]
+pub async fn update_status(app: tauri::AppHandle) -> UpdateStatus {
+    let current = crate::updater::current_version().to_string();
+    match crate::updater::check_only(&app).await {
+        Ok(latest) => UpdateStatus {
+            current,
+            checked: true,
+            latest,
+            error: None,
+        },
+        Err(e) => UpdateStatus {
+            current,
+            checked: false,
+            latest: None,
+            error: Some(e),
+        },
+    }
+}
+
+/// Install the pending update on request. Returns the version installed; the app relaunches into it.
+#[tauri::command]
+pub async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
+    crate::updater::install_now(&app).await
+}
+
 /// Manually check for a newer signed release (respects `auto_update` for whether it installs).
 #[tauri::command]
 pub async fn check_for_updates(

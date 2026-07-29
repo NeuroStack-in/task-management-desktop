@@ -113,6 +113,8 @@ pub fn run() {
             commands::timer_status,
             commands::agent_id,
             commands::check_for_updates,
+            commands::update_status,
+            commands::update_install,
             commands::set_auto_start,
             commands::get_auto_start,
             // Panel (kishore's tray UI) command surface.

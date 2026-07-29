@@ -53,6 +53,51 @@ fn pubkey() -> String {
     }
 }
 
+/// Build a configured updater, or explain why we can't.
+fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let pk = pubkey();
+    if pk.is_empty() {
+        return Err("updater:no_pubkey".into());
+    }
+    let endpoint = url::Url::parse(&endpoint()).map_err(|e| format!("updater:url:{e}"))?;
+    app.updater_builder()
+        .endpoints(vec![endpoint])
+        .map_err(|e| format!("updater:endpoints:{e}"))?
+        .pubkey(pk)
+        .build()
+        .map_err(|e| format!("updater:build:{e}"))
+}
+
+/// Look for a newer signed build **without installing anything** — `Some(version)` when one exists.
+///
+/// Separate from [`check_and_maybe_install`] because a UI needs to say *"up to date"* or *"0.1.4 is
+/// available"* before the user has agreed to anything. Folding the two together, as the original
+/// single entry point did, meant the only way to learn a version existed was to have already
+/// installed it.
+pub async fn check_only(app: &AppHandle) -> Result<Option<String>, String> {
+    let update = updater_for(app)?
+        .check()
+        .await
+        .map_err(|e| format!("updater:check:{e}"))?;
+    Ok(update.map(|u| u.version))
+}
+
+/// Download and install the pending update. Errors when there is none, rather than reporting a
+/// success that did nothing — a button that silently no-ops is worse than one that explains itself.
+pub async fn install_now(app: &AppHandle) -> Result<String, String> {
+    let update = updater_for(app)?
+        .check()
+        .await
+        .map_err(|e| format!("updater:check:{e}"))?
+        .ok_or("updater:none_available")?;
+    let version = update.version.clone();
+    update
+        .download_and_install(|_downloaded, _total| {}, || {})
+        .await
+        .map_err(|e| format!("updater:install:{e}"))?;
+    Ok(version)
+}
+
 /// Check GitHub Releases for a newer **signed** build. Returns whether an update is available. When
 /// `auto_update` is on, it is downloaded + installed (signature verified by the plugin first). With no
 /// public key configured this refuses to proceed — never an unsigned update.

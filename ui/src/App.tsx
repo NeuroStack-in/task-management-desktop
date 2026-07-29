@@ -1,5 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LogOut } from "lucide-react";
+
+import {
+  updateInstall,
+  updateStatus,
+  type UpdateStatus,
+} from "@/lib/agent";
 
 import { ConsentCard } from "@/cards/ConsentCard";
 import { LoginCard } from "@/cards/LoginCard";
@@ -268,8 +274,107 @@ function Panel() {
 
         {/* Renders only when something has actually been done to this machine — see the card. */}
         <PrivacyLogCard events={privacyLog} />
+
+        <UpdateStrip />
       </div>
     </>
+  );
+}
+
+/**
+ * The version line, and the only place an employee can see whether their agent is current.
+ *
+ * The agent already self-updates — at launch, then every 6 h — so this is deliberately **not** the
+ * mechanism, just the window onto it. Before it existed the sole evidence of an update was the
+ * version quietly changing, and "am I on the latest?" could only be answered by reading a log file.
+ *
+ * Three states, and the distinction between the last two is the point:
+ *   - **up to date** — we asked, and there is nothing newer.
+ *   - **update available** — offered as a button, because waiting up to 6 h for the next automatic
+ *     check is a poor answer to someone who has just been told a fix exists.
+ *   - **couldn't check** — offline, or a build with no signing key. Never rendered as "up to date":
+ *     that is a claim we haven't earned, and it is exactly the one someone would rely on.
+ */
+function UpdateStrip() {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [installed, setInstalled] = useState<string | null>(null);
+
+  const check = useCallback(() => {
+    setBusy(true);
+    updateStatus()
+      .then(setStatus)
+      .catch(() => setStatus(null))
+      .finally(() => setBusy(false));
+  }, []);
+
+  useEffect(check, [check]);
+
+  const install = () => {
+    setBusy(true);
+    updateInstall()
+      .then((v) => setInstalled(v))
+      .catch((e: unknown) =>
+        setStatus((s) =>
+          s ? { ...s, checked: false, error: String(e) } : s,
+        ),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  // The core can't tell us anything yet — say nothing rather than guess.
+  if (!status) return null;
+
+  const available = status.latest !== null;
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 px-0.5 text-[11px] text-muted-foreground">
+      <span className="font-mono">v{status.current}</span>
+      <span aria-hidden>·</span>
+
+      {installed ? (
+        <span className="text-foreground">
+          Updated to {installed} — restart to finish
+        </span>
+      ) : available ? (
+        <>
+          <span className="text-foreground">Version {status.latest} available</span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-auto h-6 px-2 text-[11px]"
+            disabled={busy}
+            onClick={install}
+          >
+            {busy ? "Updating…" : "Update now"}
+          </Button>
+        </>
+      ) : status.checked ? (
+        <>
+          <span>Up to date</span>
+          <button
+            type="button"
+            onClick={check}
+            disabled={busy}
+            className="ml-auto transition-colors hover:text-foreground disabled:opacity-50"
+          >
+            {busy ? "Checking…" : "Check again"}
+          </button>
+        </>
+      ) : (
+        <>
+          <span title={status.error ?? undefined}>Couldn&apos;t check for updates</span>
+          <button
+            type="button"
+            onClick={check}
+            disabled={busy}
+            className="ml-auto transition-colors hover:text-foreground disabled:opacity-50"
+          >
+            {busy ? "Checking…" : "Retry"}
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 
