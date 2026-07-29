@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WorkPulse",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.workpulse.agent",
   "build": {
     "frontendDist": "../ui/dist",
@@ -32,13 +32,14 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/NeuroStack-in/task-management-desktop/releases/latest/download/latest.json"
+        "https://wp-downloads-dev.s3.ap-south-1.amazonaws.com/agent/latest/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFNjFCQjdCNzM5MkQyNQpSV1FsTFRtM3R4dm1CcUFjK3ljNUpHMm9wcGVHbmxTZWJrcXoyY2ZjMmFGM1FaOUt0RVR0ay9XOAo="
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",

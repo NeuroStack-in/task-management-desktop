@@ -42,6 +42,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `.sig` files are collected alongside the installers: they are what the updater verifies,
+          # and `latest.json` embeds their contents (see the `updater-manifest` job).
           - os: windows-latest
             label: windows
             bundles: nsis
@@ -49,6 +51,7 @@ jobs:
             rust_targets: ""
             artifacts: |
               desktop/target/release/bundle/nsis/*-setup.exe
+              desktop/target/release/bundle/nsis/*-setup.exe.sig
           - os: ubuntu-22.04
             label: linux
             bundles: deb,appimage
@@ -56,18 +59,25 @@ jobs:
             rust_targets: ""
             artifacts: |
               desktop/target/release/bundle/appimage/*.AppImage
+              desktop/target/release/bundle/appimage/*.AppImage.sig
               desktop/target/release/bundle/deb/*.deb
           # One macOS job → a UNIVERSAL dmg (Intel + Apple Silicon lipo'd together) on the arm64
           # runner. Don't split off a macos-13 Intel job: GitHub retired the Intel runners.
+          #
+          # `app` is bundled as well as `dmg` because **Tauri's macOS updater ships the `.app.tar.gz`,
+          # not the dmg** — a dmg-only build produces no updater artifact for macOS at all, so Macs
+          # would silently never receive an update while Windows and Linux did.
           - os: macos-latest
             label: macos
-            bundles: dmg
+            bundles: app,dmg
             targetArg: "--target universal-apple-darwin"
             # Space-separated — `rustup target add` takes multiple targets as separate args, not a
             # comma list (a comma makes it one bogus target name and the step fails).
             rust_targets: "aarch64-apple-darwin x86_64-apple-darwin"
             artifacts: |
               desktop/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+              desktop/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+              desktop/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout desktop
@@ -270,3 +280,67 @@ jobs:
             aws s3 cp "$f" "s3://$BUCKET/agent/latest/$stable"  --content-type "$ct"
           done < <(find staged -type f \( -name '*-setup.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \))
           [ "$found" = 1 ] && echo "mirrored to s3://$BUCKET/agent/" || echo "::warning::no installers found to mirror"
+
+      # ── The updater manifest ────────────────────────────────────────────────────────────────────
+      #
+      # Written here rather than reused from the GitHub release, because tauri-action's `latest.json`
+      # points at **github.com release assets** — and this repo is private, so an installed agent
+      # (which has no GitHub credentials) gets 404 on every check. Self-update was configured,
+      # signed, and entirely non-functional; every upgrade meant asking each employee to download
+      # the installer by hand.
+      #
+      # So the same manifest is rebuilt with **S3 URLs**, pointing at the immutable `agent/v<version>/`
+      # copies — never `agent/latest/`, whose contents are replaced by the next release and would
+      # then no longer match the signature recorded here.
+      #
+      # The `.sig` files are minisign signatures produced by TAURI_SIGNING_PRIVATE_KEY; the agent
+      # verifies them against the public key baked into the binary. Serving the manifest from a
+      # public bucket changes only *where the manifest is read*, never *whether an artifact is
+      # trusted* — an attacker who replaced a file in the bucket still could not forge its signature.
+      - name: Build and upload latest.json
+        env:
+          BUCKET: wp-downloads-dev
+          BASE: https://wp-downloads-dev.s3.ap-south-1.amazonaws.com
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # Pair each updater artifact with its signature. Keys are Tauri's platform identifiers;
+          # `darwin-universal` covers both Intel and Apple Silicon from the one lipo'd bundle.
+          entries=""
+          add() {  # $1 = platform key, $2 = artifact path
+            [ -f "$2" ] || return 0
+            [ -f "$2.sig" ] || { echo "::warning::no signature for $(basename "$2") — $1 omitted"; return 0; }
+            sig="$(cat "$2.sig")"
+            url="$BASE/agent/v$VERSION/$(basename "$2")"
+            [ -n "$entries" ] && entries="$entries,"
+            entries="$entries\"$1\":{\"signature\":\"$sig\",\"url\":\"$url\"}"
+            echo "  $1 -> $(basename "$2")"
+          }
+
+          add "windows-x86_64" "$(find staged -name '*-setup.exe' | head -1)"
+          add "linux-x86_64"   "$(find staged -name '*.AppImage'  | head -1)"
+          add "darwin-universal" "$(find staged -name '*.app.tar.gz' | head -1)"
+
+          if [ -z "$entries" ]; then
+            echo "::warning::no signed updater artifacts — latest.json NOT written, existing manifest left alone"
+            exit 0
+          fi
+
+          printf '{"version":"%s","notes":"WorkPulse agent %s","pub_date":"%s","platforms":{%s}}\n' \
+            "$VERSION" "$VERSION" "$PUB_DATE" "$entries" > latest.json
+          cat latest.json
+
+          # `--cache-control no-cache`: agents poll this file, and a cached manifest means an update
+          # that has shipped stays invisible for as long as the CDN/browser cache holds it.
+          aws s3 cp latest.json "s3://$BUCKET/agent/latest/latest.json" \
+            --content-type application/json --cache-control no-cache
+          aws s3 cp latest.json "s3://$BUCKET/agent/v$VERSION/latest.json" \
+            --content-type application/json
+
+          # The updater downloads the artifact named in the manifest, so those must be in S3 too —
+          # the installer loop above only mirrors the four user-facing installer formats.
+          for f in $(find staged -name '*.app.tar.gz' -o -name '*.sig'); do
+            aws s3 cp "$f" "s3://$BUCKET/agent/v$VERSION/$(basename "$f")" --content-type application/octet-stream
+          done

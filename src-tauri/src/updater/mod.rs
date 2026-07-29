@@ -16,9 +16,29 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// GitHub Releases update manifest for THIS repo (the plugin fetches `latest.json`).
+/// Where the update manifest lives — the **public downloads bucket**, not GitHub Releases.
+///
+/// It used to point at `github.com/NeuroStack-in/task-management-desktop/releases/latest/download/
+/// latest.json`. That repo is private, so an installed agent — which has no GitHub credentials and
+/// never will — got **404 on every check**. Self-update was configured, signed, and completely
+/// non-functional: every upgrade meant asking each employee to re-download the installer by hand.
+///
+/// The same bucket already serves the installers the Download page links to, for exactly the same
+/// reason, and it costs nothing extra: the release pipeline mirrors `latest.json` there alongside
+/// them. Signatures still gate the install (`PUBKEY` below) — a public bucket changes *where* the
+/// manifest is read from, never *whether* an artifact is trusted.
+///
+/// `WP_UPDATER_ENDPOINT` overrides it, so a build can be pointed at a staging manifest without a
+/// recompile.
 const RELEASES_ENDPOINT: &str =
-    "https://github.com/NeuroStack-in/task-management-desktop/releases/latest/download/latest.json";
+    "https://wp-downloads-dev.s3.ap-south-1.amazonaws.com/agent/latest/latest.json";
+
+fn endpoint() -> String {
+    match std::env::var("WP_UPDATER_ENDPOINT") {
+        Ok(v) if !v.is_empty() => v,
+        _ => RELEASES_ENDPOINT.to_string(),
+    }
+}
 
 /// Baked-in minisign public key — **must be the public half of the CI `TAURI_SIGNING_PRIVATE_KEY`
 /// secret**, and identical to `tauri.conf.json` `plugins.updater.pubkey` (the plugin verifies each
@@ -41,7 +61,7 @@ pub async fn check_and_maybe_install(app: &AppHandle, auto_update: bool) -> Resu
     if pk.is_empty() {
         return Err("updater:no_pubkey".into());
     }
-    let endpoint = url::Url::parse(RELEASES_ENDPOINT).map_err(|e| format!("updater:url:{e}"))?;
+    let endpoint = url::Url::parse(&endpoint()).map_err(|e| format!("updater:url:{e}"))?;
 
     let updater = app
         .updater_builder()
