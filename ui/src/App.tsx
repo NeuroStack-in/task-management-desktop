@@ -89,6 +89,23 @@ function Panel() {
   // Silent mode suppresses the capture indicator by policy — the disclosure already covered it.
   const showLive = capture.capturing && !config.silent;
 
+  /**
+   * Is any banner occupying the top of the panel right now?
+   *
+   * This decides **which element scrolls**. The window is a fixed size, so there is only ever room
+   * for one scroller: with no banner the panel fits and Today's sessions scrolls inside its own cap;
+   * a banner takes that room away, so the cap is lifted and the panel scrolls as a whole instead.
+   *
+   * Keep this list in step with the banners rendered below — a banner missing from it takes height
+   * without releasing the cap, which is precisely the state where content became unreachable.
+   */
+  const hasBanner =
+    Boolean(actionError) ||
+    (idleSecs !== null && timer.running) ||
+    Boolean(restrictedHit) ||
+    Boolean(adminCapture) ||
+    Boolean(screenshotBlocked);
+
   // Resume from a session row: start a new session on that row's (project, description) — the
   // grain the server folds on, so the time lands in the same timesheet row. While a timer runs,
   // resuming another row re-attributes to it (same semantics as the hero's pickers).
@@ -147,7 +164,14 @@ function Panel() {
           anything is missing. A scrollbar that appears only when something genuinely overflows is a
           visible, recoverable failure instead of an invisible, lossy one.
 
-          `min-h-0` still matters: without it the flex child refuses to shrink at all. */}
+          `min-h-0` still matters: without it the flex child refuses to shrink at all.
+
+          **Which element scrolls depends on whether a banner is up** — see `hasBanner` above. With
+          no banner the panel is meant to fit, and Today's sessions absorbs a long day inside its own
+          capped box. Once a banner takes height at the top there is no longer room to fit, so the
+          cap comes off and this container becomes the single scroller. The two are never scrollable
+          at the same time, which is what stops a wheel over the session list from being swallowed
+          instead of moving the panel. */}
       <div className="wp-enter flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overflow-x-hidden">
         {/* A user action (start/stop/switch/consent/pause) failed. Without this the button simply
             does nothing and the user has no idea why — the single highest-value beta feedback fix. */}
@@ -239,15 +263,18 @@ function Panel() {
           </div>
         )}
 
-        {/* Capture denied at the OS level. Silence here would read as "screenshots are off by
-            policy", which is a very different thing from "the OS is refusing" (monitor risk #5). */}
+        {/* Capture produced nothing. Silence here would read as "screenshots are off by policy",
+            which is a very different thing from "capture is failing" (monitor risk #5).
+
+            The text comes from the core (`events::capture_failure_hint`) rather than being written
+            here, because only macOS has a screen-recording permission to grant — this banner used
+            to tell Windows and Linux users to grant one anyway. */}
         {screenshotBlocked && (
           <div
             role="alert"
             className="shrink-0 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px]"
           >
-            Screen capture is blocked by your operating system. Grant screen-recording permission to
-            WorkPulse, then restart the agent.
+            {screenshotBlocked}
           </div>
         )}
 
@@ -268,6 +295,7 @@ function Panel() {
           projects={projects}
           timer={timer}
           onResume={resumeSession}
+          capped={!hasBanner}
         />
 
         <PauseCard pause={pause} refused={pauseRefused} onRequest={requestPause} />

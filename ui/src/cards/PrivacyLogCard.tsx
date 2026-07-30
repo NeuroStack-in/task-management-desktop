@@ -29,7 +29,12 @@ export function PrivacyLogCard({ events }: { events: LocalEvent[] }) {
         <CardTitleRow icon={<ShieldAlert />} label="Privacy log" />
       </CardHeader>
       <CardContent>
-        <ul className="max-h-[104px] space-y-1.5 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
+        {/* Not a nested scroller — same fix as SessionsCard. A `max-h` + `overflow-y-auto` here
+            swallowed wheel events instead of chaining out to the panel's single scroll column
+            (App.tsx), which is what made the panel feel stuck once a banner pushed content down.
+            The gutter reservation went with it: `scrollbar-gutter` only applies to scroll
+            containers, so it would be inert now. */}
+        <ul className="space-y-1.5 pr-1">
           {events.map((e) => (
             <li key={`${e.ts}-${e.kind}`} className="flex items-start gap-2">
               <span
