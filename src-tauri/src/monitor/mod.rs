@@ -167,8 +167,13 @@ pub fn spawn_screenshots(app: AppHandle) {
             .unwrap_or_default();
 
             if shots.is_empty() {
-                // Capture failed where it shouldn't (e.g. macOS grant denied) — surface, not silence.
-                let _ = app.emit(events::SCREENSHOT_UNAVAILABLE, ());
+                // Capture failed where it shouldn't — surface, not silence. The *reason* is logged
+                // by `screenshot::capture_all`; this carries the employee-facing sentence, which is
+                // platform-specific (only macOS has a permission to grant).
+                let _ = app.emit(
+                    events::SCREENSHOT_UNAVAILABLE,
+                    events::capture_failure_hint(),
+                );
             } else {
                 let state = app.state::<AppState>();
                 let mut store = state.screenshots.lock().unwrap();

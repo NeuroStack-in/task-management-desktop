@@ -64,10 +64,7 @@ impl CognitoConfig {
                 "WP_COGNITO_CLIENT_ID",
                 baked_or(BUILD_CLIENT_ID, DEV_CLIENT_ID),
             ),
-            ingest_url: env_or(
-                "WP_INGEST_URL",
-                baked_or(BUILD_INGEST_URL, DEV_INGEST_URL),
-            ),
+            ingest_url: env_or("WP_INGEST_URL", baked_or(BUILD_INGEST_URL, DEV_INGEST_URL)),
         }
     }
 

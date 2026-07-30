@@ -185,8 +185,11 @@ pub async fn handle(
             .ok()
             .flatten();
     let Some((mut meta, path)) = shot else {
-        // Same surfacing as the periodic loop: a denied OS grant is a state the UI shows, not silence.
-        let _ = app.emit(events::SCREENSHOT_UNAVAILABLE, ());
+        // Same surfacing as the periodic loop: a capture failure is a state the UI shows, not silence.
+        let _ = app.emit(
+            events::SCREENSHOT_UNAVAILABLE,
+            events::capture_failure_hint(),
+        );
         return refuse(app, screenshot_id, requested_by, Refusal::CaptureFailed);
     };
 

@@ -14,8 +14,11 @@ export interface Agent {
   pauseRefused: boolean;
   /** Idle seconds reported by the last `monitor:idle-prompt`; null when not prompting. */
   idleSecs: number | null;
-  /** True after `monitor:screenshot-unavailable` — capture is denied at the OS level. */
-  screenshotBlocked: boolean;
+  /**
+   * The employee-facing sentence from the last `monitor:screenshot-unavailable`; null = capture is
+   * fine. The core supplies the text because the correct wording is platform-specific.
+   */
+  screenshotBlocked: string | null;
   /** The restricted app/site last focused during tracking (`monitor:policy-blocked`); null = none. */
   restrictedHit: string | null;
   /** The last admin on-demand capture notice (`privacy:admin-capture`); null = nothing to show. */
@@ -55,7 +58,7 @@ export function useAgent(): Agent {
   const [error, setError] = useState<string | null>(null);
   const [pauseRefused, setPauseRefused] = useState(false);
   const [idleSecs, setIdleSecs] = useState<number | null>(null);
-  const [screenshotBlocked, setScreenshotBlocked] = useState(false);
+  const [screenshotBlocked, setScreenshotBlocked] = useState<string | null>(null);
   const [restrictedHit, setRestrictedHit] = useState<string | null>(null);
   const [adminCapture, setAdminCapture] = useState<string | null>(null);
   // User-action feedback: set when an explicit action (start/stop/switch/consent/pause) fails, so the
@@ -97,9 +100,11 @@ export function useAgent(): Agent {
       agent.listen(EVENTS.authExpired, () => void refresh()),
       // Tracking started/stopped outside the panel (idle auto-stop, tray).
       agent.listen(EVENTS.trackingChanged, () => void refresh()),
-      // Capture is denied at the OS level (e.g. macOS Screen Recording). Sticky: it stays until the
+      // Capture produced nothing. The core sends the sentence to show, because the right wording is
+      // platform-specific — only macOS has a permission to grant, and telling a Windows user to
+      // grant one sent them looking for a setting that does not exist. Sticky: it stays until the
       // user acts, because the next capture attempt is a whole cadence away.
-      agent.listen(EVENTS.screenshotUnavailable, () => setScreenshotBlocked(true)),
+      agent.listen<string>(EVENTS.screenshotUnavailable, (hint) => setScreenshotBlocked(hint)),
       agent.listen<number>(EVENTS.idlePrompt, (secs) => setIdleSecs(secs)),
       // A restricted app/site was focused mid-session. The core already queued the violation for
       // the server; this is the employee-facing half of the warning.

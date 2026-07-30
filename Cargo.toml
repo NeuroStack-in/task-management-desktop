@@ -22,6 +22,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Rolling file logs. Required, not optional: a release Windows build has no console
+# (`windows_subsystem = "windows"`), so without a file sink its logs go nowhere at all.
+tracing-appender = "0.2"
 time = { version = "0.3", features = ["serde", "formatting"] }
 thiserror = "1"
 uuid = { version = "1", features = ["v4"] }
@@ -60,7 +63,7 @@ wp-agent-contract = { path = "../backend/crates/wp-agent-contract" }
 # CI must also run a job that fails on contract drift (compile the agent against the pinned rev).
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "UNLICENSED"
 

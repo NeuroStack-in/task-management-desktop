@@ -81,13 +81,97 @@ pub fn dump_cycle() {
     eprintln!("dump-cycle: {} rollups, active+idle ≤ 60 ✓", rollups.len());
 }
 
+/// Headless capture self-test — `workpulse-agent --test-capture`.
+///
+/// Runs the **real** capture pipeline once (enumerate displays → grab → downscale → blur → WebP →
+/// pHash → write to the spool) and reports what happened, then deletes what it wrote.
+///
+/// This exists because "screenshots stopped" was, until now, undiagnosable in the field: capture is
+/// gated behind sign-in, consent, an entitlement, a cadence and a running timer, so proving the
+/// *capture* itself works meant reproducing all five. Every failure path also swallowed its error,
+/// and a release Windows build has no console. One command that answers "can this machine capture,
+/// yes or no, and if not why" is worth more than any amount of inference from file timestamps.
+///
+/// Deliberately bypasses the gates — it captures nothing that leaves the machine and uploads
+/// nothing. Exit code is 0 on success, 1 on failure, so it can be scripted.
+pub fn test_capture() -> i32 {
+    init_tracing();
+
+    let dir = crate::outbox::state_dir().join("screenshots");
+    eprintln!("capture self-test");
+    eprintln!("  spool: {}", dir.display());
+
+    let shots = monitor::screenshot::capture_all("self-test", 0, clock::now_epoch_ms());
+    if shots.is_empty() {
+        eprintln!("  RESULT: FAILED — no frames captured. The reason is logged above.");
+        eprintln!(
+            "  If this is macOS, grant Screen Recording in System Settings → Privacy & Security."
+        );
+        return 1;
+    }
+
+    eprintln!("  RESULT: OK — {} display(s) captured", shots.len());
+    for (meta, path) in &shots {
+        let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "    display {} → {} bytes, phash {}",
+            meta.display, bytes, meta.phash
+        );
+        // Leave nothing behind: this is a diagnostic, not a capture. A frame written here would
+        // otherwise be declared on the next batch and uploaded as if it were tracked work.
+        let _ = std::fs::remove_file(path);
+    }
+    0
+}
+
+/// Install the tracing subscriber: stderr **and** a rolling file.
+///
+/// The file half is not a nicety. `main.rs` sets `windows_subsystem = "windows"` for release
+/// builds, so a shipped Windows agent has no console attached and **every line written to stderr is
+/// discarded**. Combined with a capture path that swallowed its errors, that left a field failure
+/// with literally no evidence — a stopped agent could only be diagnosed by reading file timestamps
+/// in the spool directory. macOS and Linux keep stderr when launched from a terminal, but an agent
+/// started at login has no terminal there either, so the file is the only reliable record on all
+/// three platforms.
+///
+/// Logs live beside the rest of the agent's state (`state_dir()/logs`), rotate daily, and are
+/// best-effort: if the file can't be opened the agent still runs and still logs to stderr. Losing
+/// logging must never cost someone their tracked time.
+fn init_tracing() {
+    use tracing_subscriber::prelude::*;
+
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    let dir = crate::outbox::state_dir().join("logs");
+    let file_layer = match std::fs::create_dir_all(&dir) {
+        Ok(()) => {
+            let appender = tracing_appender::rolling::daily(&dir, "agent.log");
+            // The guard is deliberately leaked: it must outlive `run()` (which never returns until
+            // the process exits), and there is nowhere to park it that the whole program can reach.
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            std::mem::forget(guard);
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(writer),
+            )
+        }
+        Err(_) => None,
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(file_layer)
+        .init();
+
+    tracing::info!(dir = %dir.display(), "agent starting; file logging active");
+}
+
 /// Build and run the Tauri app.
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    init_tracing();
 
     let app = tauri::Builder::default()
         // single-instance must be registered first: a second launch focuses the running one.
@@ -104,6 +188,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::auth_login,
             commands::auth_complete_new_password,
+            commands::auth_complete_mfa,
             commands::auth_logout,
             commands::auth_status,
             commands::set_consent,
@@ -339,7 +424,10 @@ pub fn run() {
             // stale-session reaper is what covers the harder cases — a crash or power loss, where
             // this handler never runs at all.
             let seq = crate::cycle::assemble_and_enqueue(&state);
-            tracing::info!(batch_seq = seq, "shutdown: queued the final batch (timer stop)");
+            tracing::info!(
+                batch_seq = seq,
+                "shutdown: queued the final batch (timer stop)"
+            );
 
             // The session is still *closed* on the server (the TimerStopped event above): the offline
             // period must not be billed, since nothing was captured during it. Reopening starts a

@@ -104,12 +104,32 @@ pub fn capture_primary(
 /// prologue of both capture entry points. `None` when the OS yields no monitors or the spool can't
 /// be created.
 fn displays_and_dir() -> Option<(Vec<xcap::Monitor>, PathBuf)> {
-    let mut monitors = xcap::Monitor::all().ok()?;
+    // **Every failure below is logged, never swallowed.** These four `?`s used to be bare `.ok()?`,
+    // so an empty result was indistinguishable from a denied macOS grant — and the UI said exactly
+    // that on every platform. A Windows agent then spent a day reporting "grant screen-recording
+    // permission" for a failure that had nothing to do with permissions, with no log to contradict
+    // it. If capture stops, the reason must be in the log.
+    let mut monitors = match xcap::Monitor::all() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "capture: could not enumerate displays");
+            return None;
+        }
+    };
+    if monitors.is_empty() {
+        tracing::error!("capture: the OS reported no connected displays");
+        return None;
+    }
     // Primary display first, so it is always `display = 0` ("Monitor 1"); the index is then the
     // stable physical position (a monitor that fails to capture leaves a gap rather than renumbering).
     monitors.sort_by_key(|m| !m.is_primary().unwrap_or(false));
     let dir = screenshots_dir();
-    std::fs::create_dir_all(&dir).ok()?;
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        // The spool path is CWD-relative unless `WP_STATE_DIR` is set, so an installed build whose
+        // working directory isn't writable fails right here — silently, before any pixel is read.
+        tracing::error!(dir = %dir.display(), error = %e, "capture: could not create the screenshot spool");
+        return None;
+    }
     // Lock the buffer down (once per process) so *other* users on the machine can't read or swap the
     // pending images. This complements the upload-time SHA-256 check: hashing catches the monitored
     // user's own scripts (same identity as the agent), ACLs stop everyone else.
@@ -190,10 +210,22 @@ fn process_monitor(
     app: &str,
     blur_level: u8,
     captured_at: i64,
-    display: u8,
+    // Named `display_index`, not `display`: inside a `tracing` macro a bare `display` resolves to
+    // that crate's own `field::display()` helper rather than to the local, which fails to compile
+    // with a thoroughly misleading trait error.
+    display_index: u8,
     dir: &Path,
 ) -> Option<(ScreenshotMeta, PathBuf)> {
-    let rgba = monitor.capture_image().ok()?;
+    // On macOS this is where a denied Screen-Recording grant lands. Everywhere else it is a real
+    // capture failure (driver reset, RDP/locked session, resource pressure) — which is why the
+    // error text matters and a bare `.ok()?` did not.
+    let rgba = match monitor.capture_image() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(display_index, error = %e, "capture: display grab failed");
+            return None;
+        }
+    };
 
     let mut img = image::DynamicImage::ImageRgba8(rgba);
     let (w, h) = scaled_dims(img.width(), img.height());
@@ -220,7 +252,11 @@ fn process_monitor(
 
     let id = uuid::Uuid::new_v4().to_string();
     let path = dir.join(format!("{id}.webp"));
-    std::fs::write(&path, &*webp_bytes).ok()?;
+    if let Err(e) = std::fs::write(&path, &*webp_bytes) {
+        // Disk full, or the spool became unwritable after `create_dir_all` succeeded.
+        tracing::error!(path = %path.display(), error = %e, "capture: could not write the frame");
+        return None;
+    }
 
     let meta = ScreenshotMeta {
         id,
@@ -229,7 +265,7 @@ fn process_monitor(
         phash,
         blur_level,
         bucket_minute: captured_at.div_euclid(60_000),
-        display,
+        display: display_index,
         content_sha256,
     };
     Some((meta, path))
