@@ -14,6 +14,15 @@ import * as agent from "@/lib/agent";
  * whether it worked. An admin-created account comes back with `newPasswordSession` instead of a
  * session, which switches this card into its set-a-password second leg.
  */
+/**
+ * The Cognito pool's minimum password length (`infra/stacks/auth_stack.py`).
+ *
+ * **8, not 12.** This file enforced 12 — a stale value the pool moved off on 2026-07-22, when the
+ * frontend's `lib/password.ts` was updated and the agent was not. It rejected valid 8–11 character
+ * passwords before they ever reached Cognito. Keep all three in step.
+ */
+const MIN_PASSWORD = 8;
+
 export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -26,11 +35,15 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
   const [newPassword, setNewPassword] = useState("");
   const [confirm, setConfirm] = useState("");
 
+  /** Set when Cognito demands a second factor; carries the session + which challenge to answer. */
+  const [mfa, setMfa] = useState<{ session: string; challenge: string } | null>(null);
+  const [code, setCode] = useState("");
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (pending) return;
 
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
       setError("Enter the work email your organization issued you.");
       return;
     }
@@ -38,14 +51,43 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
       setError("Enter your password.");
       return;
     }
+    // **The invite code is not the password.** An invite email carries a 6-digit OTP
+    // (`wp_platform::invites::new_otp`), and people reasonably read "the credentials in the email"
+    // as meaning it. Cognito answers `NotAuthorizedException`, which used to render as "that email
+    // and password didn't match" — sending them off to re-check a password they never set.
+    //
+    // This is decidable locally and costs no round-trip: the pool's minimum password length is 8
+    // (infra/stacks/auth_stack.py), so six digits cannot be anyone's password.
+    if (/^\d{6}$/.test(password)) {
+      setError(
+        "That looks like the 6-digit code from your invite email, which isn't your password. Open the invite link in a browser, finish setting up your account, then sign in here with the password you chose.",
+      );
+      return;
+    }
+    if (password.length < MIN_PASSWORD) {
+      setError(`Passwords are at least ${MIN_PASSWORD} characters, so that one can't be right.`);
+      return;
+    }
 
     setError(null);
     setPending(true);
     try {
-      const status = await agent.login(email, password);
+      // Trimmed, never case-folded. The Cognito username **is** the email exactly as the admin
+      // typed it into the invite (`identity::shared::cognito` passes it verbatim to
+      // `AdminCreateUser`), and the pool is case-sensitive, so lower-casing here would break a
+      // mixed-case account. A stray space from a paste or an autocorrect, though, is never intended
+      // and produces `UserNotFoundException` — which reads to the user as "wrong password".
+      const status = await agent.login(email.trim(), password);
       if (status.newPasswordSession) {
         // Not an error: the account is real, it has just never had a password set.
         setChallenge(status.newPasswordSession);
+        return;
+      }
+      if (status.mfaSession && status.mfaChallenge) {
+        // Also not an error: the password was correct and a second factor is outstanding. Before
+        // this branch existed the challenge fell through as `auth:unexpected_challenge`, so anyone
+        // with TOTP enrolled was told their password was wrong.
+        setMfa({ session: status.mfaSession, challenge: status.mfaChallenge });
         return;
       }
       if (status.signedIn) {
@@ -60,14 +102,44 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
     }
   }
 
+  async function onSubmitCode(e: FormEvent) {
+    e.preventDefault();
+    if (pending || !mfa) return;
+
+    const trimmed = code.trim();
+    if (!/^\d{6}$/.test(trimmed)) {
+      setError("Enter the 6-digit code.");
+      return;
+    }
+
+    setError(null);
+    setPending(true);
+    try {
+      const status = await agent.completeMfa(mfa.challenge, email, trimmed, mfa.session);
+      if (status.signedIn) {
+        onSignedIn();
+        return;
+      }
+      setError("Sign-in didn't complete. Try again.");
+    } catch (e) {
+      setError(explain(e));
+      setCode("");
+      // A Cognito MFA session is single-use and short-lived: once it is spent or expired the only
+      // recovery is a fresh sign-in, so don't leave the user retyping codes against a dead session.
+      if (/expired|NotAuthorized/i.test(String(e))) setMfa(null);
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function onSetPassword(e: FormEvent) {
     e.preventDefault();
     if (pending || !challenge) return;
 
-    if (newPassword.length < 12) {
-      // Matches the Cognito pool policy (infra auth_stack.py) — failing here beats a round-trip
-      // that comes back as an opaque InvalidPasswordException.
-      setError("Choose a password of at least 12 characters.");
+    if (newPassword.length < MIN_PASSWORD) {
+      // Mirrors the Cognito pool policy — failing here beats a round-trip that comes back as an
+      // opaque InvalidPasswordException.
+      setError(`Choose a password of at least ${MIN_PASSWORD} characters.`);
       return;
     }
     if (newPassword !== confirm) {
@@ -117,12 +189,16 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
           panel background and the whole screen reads as unstyled. */}
       <div className="flex min-h-0 flex-1 flex-col justify-center rounded-2xl border border-border bg-card px-7 py-6 shadow-sm">
           <h2 className="font-heading text-[19px] font-semibold tracking-[0.2px]">
-            {challenge ? "Choose a password" : "Sign in"}
+            {mfa ? "Two-step verification" : challenge ? "Choose a password" : "Sign in"}
           </h2>
           <p className="mt-1 text-[12.5px] leading-[1.45] text-muted-foreground">
-            {challenge
-              ? "Your account was created by an admin. Set a password to finish signing in."
-              : "Use the work account your organization set up for you."}
+            {mfa
+              ? mfa.challenge === "SMS_MFA"
+                ? "Enter the 6-digit code we texted you."
+                : "Enter the 6-digit code from your authenticator app."
+              : challenge
+                ? "Your account was created by an admin. Set a password to finish signing in."
+                : "Use the work account your organization set up for you."}
           </p>
 
           {error && (
@@ -135,7 +211,41 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
             </div>
           )}
 
-          {challenge ? (
+          {mfa ? (
+            <form onSubmit={onSubmitCode} className="mt-5 space-y-4">
+              <Field
+                id="wp-mfa-code"
+                label="Verification code"
+                type="text"
+                // `one-time-code` lets the OS offer the code from the Messages/Keychain autofill.
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                placeholder="123456"
+                value={code}
+                onChange={(v) => {
+                  // Digits only, capped at six — stops a pasted "123 456" failing as malformed.
+                  setCode(v.replace(/\D/g, "").slice(0, 6));
+                  setError(null);
+                }}
+              />
+              <Button type="submit" className="h-11 w-full text-[14px]" disabled={pending}>
+                {pending ? "Verifying…" : "Verify and sign in"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-9 w-full text-[13px]"
+                disabled={pending}
+                onClick={() => {
+                  setMfa(null);
+                  setCode("");
+                  setError(null);
+                }}
+              >
+                Back to sign in
+              </Button>
+            </form>
+          ) : challenge ? (
             <form onSubmit={onSetPassword} className="mt-5 space-y-4">
               <Field
                 id="wp-new-password"
@@ -173,6 +283,13 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
                 label="Work email"
                 type="email"
                 autoComplete="username"
+                // macOS/iOS Tauri runs on **WKWebView**, which unlike WebView2 (Windows) and
+                // WebKitGTK applies autocapitalize and autocorrect to text inputs by default. The
+                // pool signs in case-sensitively on the email, so a capitalized first letter is a
+                // failed sign-in that looks like a wrong password — and only ever on a Mac.
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 placeholder="you@company.com"
                 value={email}
                 onChange={(v) => {
@@ -223,8 +340,6 @@ function explain(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e);
   if (raw.includes("not_configured"))
     return "This agent isn't configured for your organization yet (missing Cognito client id). Contact your admin.";
-  if (raw.includes("NotAuthorized") || raw.includes("UserNotFound"))
-    return "That email and password didn't match. Check them and try again.";
   if (raw.includes("UserNotConfirmed"))
     return "This account hasn't been confirmed yet. Ask your admin to finish setting it up.";
   if (raw.includes("PasswordResetRequired"))
@@ -235,6 +350,27 @@ function explain(e: unknown): string {
     return "That password doesn't meet your organization's policy. Try a longer one with mixed characters.";
   if (raw.includes("network") || raw.includes("timed out"))
     return "Couldn't reach the sign-in service. Check your connection and try again.";
+
+  // An MFA challenge the agent can't answer — most likely `MFA_SETUP`, which needs an enrolment
+  // round-trip we don't implement. Naming it beats "wrong password", which is what this used to say.
+  const unsupported = /auth:unsupported_challenge:(\w+)/.exec(raw);
+  if (unsupported)
+    return `This account needs a sign-in step the agent doesn't support yet (${unsupported[1]}). Sign in on the web portal, or ask your admin.`;
+
+  // `NotAuthorizedException` covers several very different situations and Cognito distinguishes them
+  // ONLY in its `message`. Conflating them is what sent someone with an expired invite off to
+  // re-check a password that was never going to work.
+  if (raw.includes("NotAuthorized")) {
+    if (/temporary password/i.test(raw))
+      return "Your temporary password has expired. Ask your workspace admin to send a new invite.";
+    if (/disabled/i.test(raw))
+      return "This account is disabled. Contact your workspace admin.";
+    return "That email and password didn't match. If you normally sign in with Google or Microsoft, your account has no password — use the web portal instead.";
+  }
+  // Distinct from the above: the address itself isn't in the directory.
+  if (raw.includes("UserNotFound"))
+    return "No account with that email. Check the address, or ask your admin to invite you.";
+
   return raw;
 }
 
@@ -246,6 +382,10 @@ function Field({
   onChange,
   autoComplete,
   placeholder,
+  inputMode,
+  autoCapitalize,
+  autoCorrect,
+  spellCheck,
   reveal,
   onToggleReveal,
 }: {
@@ -256,6 +396,12 @@ function Field({
   onChange: (v: string) => void;
   autoComplete?: string;
   placeholder?: string;
+  /** Hints the on-screen keyboard — `numeric` for the MFA code. */
+  inputMode?: "numeric" | "text";
+  /** WKWebView (macOS) autocapitalizes by default; `none` for identifiers like an email. */
+  autoCapitalize?: "none" | "sentences";
+  autoCorrect?: "on" | "off";
+  spellCheck?: boolean;
   reveal?: boolean;
   onToggleReveal?: () => void;
 }) {
@@ -269,6 +415,10 @@ function Field({
           id={id}
           type={type}
           autoComplete={autoComplete}
+          inputMode={inputMode}
+          autoCapitalize={autoCapitalize}
+          autoCorrect={autoCorrect}
+          spellCheck={spellCheck}
           placeholder={placeholder}
           className={onToggleReveal ? "h-11 px-3.5 pr-11 text-[13.5px]" : "h-11 px-3.5 text-[13.5px]"}
           value={value}

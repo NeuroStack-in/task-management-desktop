@@ -150,6 +150,10 @@ export interface AuthStatus {
   username?: string;
   /** Present when Cognito demands a new password (admin-created first login). */
   newPasswordSession?: string;
+  /** Present when Cognito demands a second factor — answer with `completeMfa`. */
+  mfaSession?: string;
+  /** `SOFTWARE_TOKEN_MFA` (authenticator app) or `SMS_MFA` (text message). */
+  mfaChallenge?: string;
 }
 
 /** What `start_timer` needs. `task_id` is optional core-side — a project alone is a valid session. */

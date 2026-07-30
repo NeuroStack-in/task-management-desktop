@@ -73,6 +73,28 @@ pub async fn auth_complete_new_password(
     Ok(status)
 }
 
+/// Answer an outstanding MFA challenge (`SOFTWARE_TOKEN_MFA` / `SMS_MFA`) with the user's code.
+///
+/// Same post-sign-in flush as the other two paths: an agent that has just authenticated should
+/// appear in the fleet now, not a cadence later.
+#[tauri::command]
+pub async fn auth_complete_mfa(
+    state: State<'_, AppState>,
+    challenge: String,
+    username: String,
+    code: String,
+    session: String,
+) -> Result<AuthStatus, String> {
+    let status = state
+        .auth
+        .complete_mfa(&challenge, &username, &code, &session)
+        .await?;
+    if status.signed_in {
+        state.flush.notify_one();
+    }
+    Ok(status)
+}
+
 #[tauri::command]
 pub fn auth_logout(state: State<'_, AppState>) {
     // Full teardown so the next person to sign in on this device starts clean — the timer, queued

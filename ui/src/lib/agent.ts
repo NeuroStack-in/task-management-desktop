@@ -190,6 +190,21 @@ export function completeNewPassword(
   return invoke<AuthStatus>("auth_complete_new_password", { username, newPassword, session });
 }
 
+/**
+ * Answer an MFA challenge with the user's 6-digit code, using the session from `login`.
+ *
+ * `challenge` is echoed back rather than assumed: the answer field Cognito expects differs between
+ * TOTP and SMS, and sending the wrong one fails as a generic parameter error.
+ */
+export function completeMfa(
+  challenge: string,
+  username: string,
+  code: string,
+  session: string,
+): Promise<AuthStatus> {
+  return invoke<AuthStatus>("auth_complete_mfa", { challenge, username, code, session });
+}
+
 export async function logout(): Promise<void> {
   await invoke<void>("auth_logout");
 }

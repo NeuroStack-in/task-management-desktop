@@ -97,7 +97,33 @@ impl AuthManager {
             cognito::LoginOutcome::NewPasswordRequired { session } => {
                 Ok(AuthStatus::new_password(session))
             }
+            cognito::LoginOutcome::MfaRequired { challenge, session } => {
+                Ok(AuthStatus::mfa(challenge, session))
+            }
         }
+    }
+
+    /// Answer an outstanding MFA challenge. On success the tokens are stored exactly as a
+    /// password-only login would store them, so everything downstream is unchanged.
+    pub async fn complete_mfa(
+        &self,
+        challenge: &str,
+        username: &str,
+        code: &str,
+        session: &str,
+    ) -> Result<AuthStatus, String> {
+        let t = cognito::respond_mfa(
+            &self.http,
+            &self.cfg,
+            challenge,
+            username,
+            code,
+            session,
+            now_secs(),
+        )
+        .await?;
+        self.set(t);
+        Ok(self.status())
     }
 
     pub async fn complete_new_password(
@@ -169,7 +195,7 @@ impl AuthManager {
                     signed_in: true,
                     tenant_id: claims.as_ref().map(|c| c.tenant_id.clone()),
                     username: claims.as_ref().map(|c| c.username.clone()),
-                    new_password_session: None,
+                    ..AuthStatus::signed_out()
                 }
             }
         }
@@ -231,15 +257,29 @@ pub struct AuthStatus {
     /// and calls `auth_complete_new_password` with this session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_password_session: Option<String>,
+    /// Present when Cognito requires a second factor — the UI collects a 6-digit code and calls
+    /// `auth_complete_mfa` with this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mfa_session: Option<String>,
+    /// Which challenge is outstanding (`SOFTWARE_TOKEN_MFA` | `SMS_MFA`). Echoed back on the answer,
+    /// and it decides the prompt wording ("authenticator app" vs "text message").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mfa_challenge: Option<String>,
 }
 
 impl AuthStatus {
     fn new_password(session: String) -> Self {
         AuthStatus {
-            signed_in: false,
-            tenant_id: None,
-            username: None,
             new_password_session: Some(session),
+            ..AuthStatus::signed_out()
+        }
+    }
+
+    fn mfa(challenge: String, session: String) -> Self {
+        AuthStatus {
+            mfa_session: Some(session),
+            mfa_challenge: Some(challenge),
+            ..AuthStatus::signed_out()
         }
     }
 
@@ -249,6 +289,8 @@ impl AuthStatus {
             tenant_id: None,
             username: None,
             new_password_session: None,
+            mfa_session: None,
+            mfa_challenge: None,
         }
     }
 }
@@ -264,7 +306,7 @@ mod tests {
             signed_in: true,
             tenant_id: Some("t1".into()),
             username: Some("u".into()),
-            new_password_session: None,
+            ..AuthStatus::signed_out()
         };
         let j = serde_json::to_value(&s).unwrap();
         assert_eq!(j.get("signedIn"), Some(&serde_json::json!(true)));
