@@ -143,16 +143,102 @@ impl Default for Outbox {
     }
 }
 
-/// Local agent-state dir. M0/M2: a dot-dir (gitignored), overridable via `WP_STATE_DIR`. Later:
-/// Tauri's per-user app-data dir.
+/// Local agent-state dir — identity, session, screenshot spool, outbox queue and logs.
 ///
 /// `pub(crate)` so `session_state` writes beside the outbox instead of re-deriving the path — two
-/// copies of the `WP_STATE_DIR` rule would drift, and the symptom would be state silently saved to
-/// one directory and read from another.
+/// copies of this rule would drift, and the symptom would be state silently saved to one directory
+/// and read from another.
+///
+/// ## Why this is not just `.agent-state`
+///
+/// It used to be exactly that: a **CWD-relative** path. A process's working directory is not its
+/// install directory, and nothing guarantees it is writable. Launched from the Windows `Run` key at
+/// login — which is how "launch at login" works, and which carries no working directory — the agent
+/// inherits `C:\Windows\System32`. Creating `.agent-state` there is refused, so the screenshot spool
+/// could not be made, capture produced nothing, and the UI reported "screen capture failed" with no
+/// explanation. The file log lands in the same directory, so **the log that would have named the
+/// cause could not be written either**. Running the same build by double-clicking it worked, which
+/// made it look like an intermittent capture fault rather than a path problem.
+///
+/// See [`resolve_state_dir`] for the order and why migration comes before correctness.
 pub(crate) fn state_dir() -> PathBuf {
-    std::env::var_os("WP_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".agent-state"))
+    let exe_legacy = exe_dir().map(|d| d.join(LEGACY_DIR));
+    let cwd_legacy = PathBuf::from(LEGACY_DIR);
+    resolve_state_dir(
+        std::env::var_os("WP_STATE_DIR").map(PathBuf::from),
+        exe_legacy.filter(|p| p.is_dir()),
+        Some(cwd_legacy).filter(|p| p.is_dir()),
+        app_data_dir(),
+        exe_dir().map(|d| d.join(LEGACY_DIR)),
+    )
+}
+
+const LEGACY_DIR: &str = ".agent-state";
+
+/// The directory the resolution rules pick from, given the facts. Pure, so the precedence is
+/// testable without touching the filesystem or the environment.
+///
+/// Order, and the reasoning:
+/// 1. **`WP_STATE_DIR`** — an explicit instruction always wins.
+/// 2. **An existing `.agent-state` beside the executable** — an install that already has one keeps
+///    it. This is migration, and it comes first for a reason: the directory holds `agent_id`, so
+///    moving an existing install to a new path would enrol it as a *second* device and strand the
+///    old one in the fleet, plus abandon any queued batches that had not uploaded.
+/// 3. **An existing `.agent-state` in the working directory** — the same courtesy for developer
+///    checkouts, which have accumulated one from `cargo run`.
+/// 4. **The per-user application-data directory** — where a fresh install belongs, and the whole
+///    point of the change: writable regardless of how the process was launched.
+/// 5. **Beside the executable** — only if the platform gave us no app-data path at all.
+fn resolve_state_dir(
+    env_override: Option<PathBuf>,
+    exe_legacy: Option<PathBuf>,
+    cwd_legacy: Option<PathBuf>,
+    app_data: Option<PathBuf>,
+    exe_fallback: Option<PathBuf>,
+) -> PathBuf {
+    env_override
+        .or(exe_legacy)
+        .or(cwd_legacy)
+        .or(app_data)
+        .or(exe_fallback)
+        // Only reachable if the OS reports no executable path and no home — keep the old behaviour
+        // rather than panicking, since losing the agent is worse than losing the ideal location.
+        .unwrap_or_else(|| PathBuf::from(LEGACY_DIR))
+}
+
+/// The directory the running executable lives in — **not** the working directory, which is the whole
+/// bug this module now guards against.
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+}
+
+/// Per-user application data, by platform convention. Derived from the environment rather than a
+/// crate: it is three lookups, and the agent already avoids dependencies it does not need.
+fn app_data_dir() -> Option<PathBuf> {
+    const APP: &str = "com.workpulse.agent";
+
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|b| PathBuf::from(b).join(APP).join("state"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|h| {
+            PathBuf::from(h)
+                .join("Library/Application Support")
+                .join(APP)
+        })
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .map(|b| b.join(APP))
+    }
 }
 
 fn outbox_path() -> PathBuf {
@@ -185,6 +271,66 @@ fn agent_id() -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn p(s: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(s))
+    }
+
+    /// The regression. Launched from the Windows `Run` key at login the process inherits
+    /// `C:\Windows\System32` as its working directory, so a CWD-relative state dir could not be
+    /// created: no spool, no capture, and no log to say why. Resolution must never depend on CWD
+    /// unless a state dir is genuinely already there.
+    #[test]
+    fn a_fresh_install_uses_app_data_not_the_working_directory() {
+        let got = resolve_state_dir(
+            None,
+            None,
+            None,
+            p("/appdata/wp"),
+            p("/install/.agent-state"),
+        );
+        assert_eq!(got, PathBuf::from("/appdata/wp"));
+    }
+
+    /// Migration beats correctness: the directory holds `agent_id`, so relocating an existing
+    /// install would enrol it as a second device and abandon any queued batches.
+    #[test]
+    fn an_existing_install_keeps_its_directory() {
+        let got = resolve_state_dir(
+            None,
+            p("/install/.agent-state"),
+            None,
+            p("/appdata/wp"),
+            p("/install/.agent-state"),
+        );
+        assert_eq!(got, PathBuf::from("/install/.agent-state"));
+    }
+
+    /// A developer checkout that already has one from `cargo run` keeps working unchanged.
+    #[test]
+    fn an_existing_checkout_dir_is_preferred_over_app_data() {
+        let got = resolve_state_dir(None, None, p(".agent-state"), p("/appdata/wp"), None);
+        assert_eq!(got, PathBuf::from(".agent-state"));
+    }
+
+    #[test]
+    fn an_explicit_override_wins_over_everything() {
+        let got = resolve_state_dir(
+            p("/tmp/forced"),
+            p("/install/.agent-state"),
+            p(".agent-state"),
+            p("/appdata/wp"),
+            p("/install/.agent-state"),
+        );
+        assert_eq!(got, PathBuf::from("/tmp/forced"));
+    }
+
+    /// No app-data path (no HOME/LOCALAPPDATA) falls back beside the executable — still not CWD.
+    #[test]
+    fn without_app_data_it_falls_back_beside_the_executable() {
+        let got = resolve_state_dir(None, None, None, None, p("/install/.agent-state"));
+        assert_eq!(got, PathBuf::from("/install/.agent-state"));
+    }
 
     fn hb() -> Heartbeat {
         Heartbeat {
