@@ -53,6 +53,9 @@
         "installerHooks": "installer-hooks.nsh",
         "installerIcon": "icons/icon.ico"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     }
   }
 }

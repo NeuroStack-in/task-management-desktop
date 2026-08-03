@@ -92,7 +92,7 @@ One Tauri process: a Preact webview for the UI, a Rust core for everything else.
 src-tauri/src/
   main.rs  lib.rs           # lib split so integration tests can link; lib.rs also builds the tray
   clock.rs error.rs events.rs lifecycle.rs window_size.rs
-  state.rs session_state.rs privacy_log.rs cycle.rs heartbeat.rs location.rs
+  state.rs session_state.rs privacy_log.rs cycle.rs heartbeat.rs location/
   config/                   # AgentConfig cache; ETag pull on version mismatch
   auth/{mod,cognito,config,token,token_store}.rs   # keyring token store (chunked)
   api/{mod,client,batch,config,tasks,projects,timesheet,enroll}.rs

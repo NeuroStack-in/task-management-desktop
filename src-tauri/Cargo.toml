@@ -52,11 +52,31 @@ image_hasher = { workspace = true }
 sha2 = "0.10"
 wp-agent-contract = { workspace = true }
 
-# Native device geolocation (precise GPS / OS positioning) for the heartbeat. Windows only for now —
-# WinRT `Windows.Devices.Geolocation`; macOS/Linux return no fix (documented gap). Reuses the `windows`
-# crate version already in the tree (tauri), just enabling the Geolocation feature modules.
+# Native device geolocation (precise GPS / OS positioning) for the heartbeat — one platform-standard
+# backend per OS, each behind the same `location::capture()` seam (see `src/location/`).
+#
+# Every crate below was **already resolved in Cargo.lock** as a transitive Tauri dependency, so these
+# entries pin what the tree already carries rather than pulling new stacks. That matters: it keeps the
+# version choice consistent with Tauri's own, and adds no download.
+
+# Windows — WinRT `Windows.Devices.Geolocation`.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.57", features = ["Devices_Geolocation", "Foundation"] }
+
+# macOS — CoreLocation, the only sanctioned positioning API on the platform. `objc2-core-foundation`
+# is for the run loop: CLLocationManager delivers fixes through a run loop, so a worker thread that
+# never turns one is handed nothing, forever.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-location = { version = "0.3", features = ["CLLocation", "CLLocationManager"] }
+objc2-foundation = { version = "0.3", features = ["NSDate"] }
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
+
+# Linux — GeoClue2 over D-Bus (`org.freedesktop.GeoClue2`), the freedesktop standard every desktop
+# location consumer uses. `blocking-api` because `capture()` is called from `spawn_blocking`, so the
+# synchronous proxy is the honest fit — no nested runtime.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }
 
 # Real OS/IO backends are added with their milestones (kept out of M0 so the tree builds without
 # system libs): M1 reqwest + keyring · M4 device_query + user-idle + x-win + sysinfo ·

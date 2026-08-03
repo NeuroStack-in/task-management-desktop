@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS usage descriptions. Tauri merges this into the bundled app's Info.plist.
+
+  NSLocationWhenInUseUsageDescription is NOT optional once the agent calls CoreLocation: macOS
+  *terminates* a process that requests location authorization without a usage string, rather than
+  showing the prompt. The crash looks nothing like a permissions problem, which is why this file
+  exists alongside the backend rather than being left to whoever notices first.
+
+  Screen Recording and Accessibility deliberately have no keys here — macOS has never used
+  Info.plist strings for those two. They are TCC grants the user makes in System Settings, and the
+  system supplies its own prompt text. See docs/BUILDING.md §7 for why an unsigned build makes those
+  grants fragile across updates.
+
+  The strings are user-facing: they appear verbatim in the macOS permission dialog, so they say what
+  the agent does with the data and tie it to the timer, which is the whole consent story.
+-->
+<plist version="1.0">
+  <dict>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>WorkPulse records your work location only while your timer is running, so time entries can be attributed to a work site. Turning the timer off stops location capture.</string>
+  </dict>
+</plist>
