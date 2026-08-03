@@ -65,7 +65,7 @@ pub fn dump_cycle() {
     }
     b.seal();
     let rollups = b.take_sealed();
-    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), 0.0, false, None);
+    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), 0.0, false, None, None);
 
     let cycle = serde_json::json!({ "heartbeat": hb, "activity": rollups });
     println!("{}", serde_json::to_string_pretty(&cycle).unwrap());

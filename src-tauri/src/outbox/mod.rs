@@ -344,6 +344,8 @@ mod tests {
             outbox_mb: 0.0,
             idle: false,
             location: None,
+            active_session: None,
+            reports_timer_state: true,
         }
     }
 

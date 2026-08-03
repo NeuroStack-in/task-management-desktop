@@ -80,6 +80,8 @@ mod tests {
                 outbox_mb: 0.0,
                 idle: false,
                 location: None,
+                active_session: None,
+                reports_timer_state: true,
             },
             activity: vec![ActivityRollup {
                 minute: 1,
@@ -145,7 +147,11 @@ mod tests {
                 "mem_pct",
                 "os",
                 "os_version",
-                "outbox_mb"
+                "outbox_mb",
+                // Always on the wire (no skip_serializing_if): it is how the server distinguishes
+                // "this agent has no timer running" from "this agent is too old to say". Omitting it
+                // would make the server ignore this agent's timer state entirely.
+                "reports_timer_state"
             ]
         );
         assert_eq!(

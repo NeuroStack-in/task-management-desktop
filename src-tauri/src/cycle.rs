@@ -38,7 +38,17 @@ pub fn assemble_and_enqueue(state: &AppState) -> u64 {
     // Real machine-idle signal published by the monitor thread (was hardcoded `false`, which left the
     // fleet dashboard's online/idle status permanently "not idle").
     let idle = state.idle.load(std::sync::atomic::Ordering::Relaxed);
-    let hb = heartbeat::collect(env!("CARGO_PKG_VERSION"), outbox_mb, idle, location);
+    // The timer state this agent believes in, declared every cycle so the server can reconcile a
+    // session whose TimerStopped was lost (agent killed, crashed, or restarted without resuming).
+    let paused = state.pause.lock().unwrap().is_paused(now_epoch_ms());
+    let active_session = state.timer.lock().unwrap().active_session(paused);
+    let hb = heartbeat::collect(
+        env!("CARGO_PKG_VERSION"),
+        outbox_mb,
+        idle,
+        location,
+        active_session,
+    );
     outbox.enqueue_cycle(
         now_epoch_ms(),
         config_version,

@@ -66,6 +66,21 @@ impl TimerEngine {
         self.running.is_some()
     }
 
+    /// The running session as the **heartbeat** declares it, or `None` when nothing is running.
+    ///
+    /// `None` here is a positive statement ("no timer"), not an absence of information: the server
+    /// uses it to close a session this agent no longer knows about. `paused` is supplied by the
+    /// caller because the privacy pause lives outside the engine.
+    pub fn active_session(&self, paused: bool) -> Option<wp_agent_contract::ActiveSession> {
+        self.running
+            .as_ref()
+            .map(|r| wp_agent_contract::ActiveSession {
+                session_id: r.session_id.clone(),
+                started_at: r.started_at,
+                paused,
+            })
+    }
+
     /// The running session's shape for the panel's `timer_state` command. `task_id`/`project_id` are
     /// `None` when stopped or when that field is empty (meeting/ad-hoc mode); `elapsed_secs` is the
     /// current session's length. `description` is what the user typed ("what are you working on?").
