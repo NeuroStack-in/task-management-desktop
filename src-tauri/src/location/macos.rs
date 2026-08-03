@@ -49,11 +49,11 @@ fn read_fix() -> Option<Fix> {
     // usable off the main thread — CoreLocation's own documentation requires only that the thread
     // have an active run loop, which is precisely what this function provides.
     unsafe {
-        if !CLLocationManager::locationServicesEnabled() {
-            tracing::debug!("location: Location Services is switched off");
-            return None;
-        }
-
+        // No `locationServicesEnabled()` pre-check. Apple deprecated it, and the reason is that it
+        // was always the wrong gate: it answers a system-wide question that the authorization status
+        // below already subsumes, and calling it on the main thread can block. Services switched off
+        // surface here as a non-authorized status, or simply as no fix before the deadline — both of
+        // which this function already handles, and both of which fail closed.
         let manager = CLLocationManager::new();
 
         // Ask once; macOS shows the prompt on first call and ignores it thereafter. The status is
