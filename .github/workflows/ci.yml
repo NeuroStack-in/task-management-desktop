@@ -37,7 +37,15 @@ jobs:
           # SHA-256, …) lives on the backend's current integration branch `kishore/new` — `feat/giri`
           # is stale (missing the SHA-256 field the desktop's tamper-evidence code needs) and `main`
           # is staler still. Repin once the backend fast-forwards a stable branch to the contract.
-          ref: kishore/new
+          # The branch that actually owns the wire contract. This said `kishore/new`, a branch the
+          # backend stopped moving long ago (99ec2e6), so every build compiled the agent against a
+          # STALE `wp-agent-contract` while appearing to pass. That is the anti-drift check pointed
+          # at the wrong target: it only looked healthy because the contract had not changed since.
+          # The first real contract change broke all three OS jobs at once.
+          #
+          # Still a moving branch, not the tag `Cargo.toml` asks for - but a branch that is actually
+          # maintained beats a pinned-looking one that is not. Pinning a tag remains the open task.
+          ref: main
           path: backend
           token: ${{ secrets.BACKEND_REPO_TOKEN }}
 
