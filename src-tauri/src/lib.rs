@@ -97,7 +97,10 @@ pub fn dump_cycle() {
 pub fn test_capture() -> i32 {
     init_tracing();
 
-    let dir = crate::outbox::state_dir().join("screenshots");
+    // Ask capture where it spools rather than re-deriving it. When these were two expressions they
+    // disagreed, and this diagnostic — the one command whose whole job is answering "can this machine
+    // capture, and if not why" — printed a directory the capture path never wrote to.
+    let dir = monitor::screenshot::screenshots_dir();
     eprintln!("capture self-test");
     eprintln!("  spool: {}", dir.display());
 

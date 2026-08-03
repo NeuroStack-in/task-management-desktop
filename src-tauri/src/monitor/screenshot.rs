@@ -271,11 +271,21 @@ fn process_monitor(
     Some((meta, path))
 }
 
-fn screenshots_dir() -> PathBuf {
-    std::env::var_os("WP_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".agent-state"))
-        .join("screenshots")
+/// The screenshot spool — **one rule, resolved in `outbox::state_dir()`**.
+///
+/// This used to re-derive the path itself (`WP_STATE_DIR` or a CWD-relative `.agent-state`). That is
+/// exactly the duplicate the state-dir fix warned about, and it is why "screen capture failed"
+/// survived that fix: `outbox::state_dir()` learned to resolve per-user app data, but capture kept
+/// writing relative to the working directory. Started from the Windows `Run` key at login the CWD is
+/// `C:\Windows\System32`, `create_dir_all` is refused, and `capture_all` returns empty.
+///
+/// Worse, the two paths disagreed *silently*: `lib.rs` prunes and the self-test reports
+/// `state_dir()/screenshots`, so the built-in diagnostic pointed at a directory capture never used.
+///
+/// Deriving it here keeps the agent's whole state — identity, queue, session, logs, spool — in one
+/// place, so an install that migrates carries its screenshots with it.
+pub(crate) fn screenshots_dir() -> PathBuf {
+    crate::outbox::state_dir().join("screenshots")
 }
 
 #[cfg(test)]
