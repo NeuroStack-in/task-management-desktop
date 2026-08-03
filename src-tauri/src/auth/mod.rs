@@ -78,11 +78,19 @@ impl AuthManager {
                 true
             }
             Err(e) => {
-                // A refresh can fail because the token genuinely expired or was revoked — clearing
-                // is right — but it can also be a transient network failure at startup, so say which
-                // rather than silently demanding a password.
-                tracing::warn!("stored session could not be refreshed ({e}) — signing out");
-                let _ = token_store::clear(REFRESH_KEY);
+                // Only forget the refresh token when Cognito actually rejected it. This comment used
+                // to say exactly that while the code cleared unconditionally — so a laptop that woke
+                // or booted before Wi-Fi associated failed the startup refresh with a *network*
+                // error, threw away a perfectly good refresh token, and demanded a password. The
+                // token was never the problem, and re-typing it "fixed" nothing.
+                if refresh_failure_is_terminal(&e) {
+                    tracing::warn!("stored session was rejected ({e}) — signing out");
+                    let _ = token_store::clear(REFRESH_KEY);
+                } else {
+                    // Keep the token and stay signed out for this attempt; the next restore, or the
+                    // sender's own refresh once the network is back, picks the session up again.
+                    tracing::warn!("could not reach Cognito to restore the session ({e}) — keeping the stored token and retrying later");
+                }
                 false
             }
         }
@@ -177,8 +185,26 @@ impl AuthManager {
                 self.set(t);
                 Some(id)
             }
-            Err(_) => {
+            Err(e) if refresh_failure_is_terminal(&e) => {
+                // Cognito rejected the token: the session really is over.
+                tracing::warn!("session refresh was rejected ({e}) — signing out");
                 self.logout();
+                None
+            }
+            Err(e) => {
+                // We could not *reach* Cognito. This ran on every send cycle and called `logout()`,
+                // which wipes the keyring — so one blip while the ID token happened to be within its
+                // 60 s expiry skew (a laptop resuming, a VPN reconnecting, a captive portal) ended
+                // the session and made the user sign in again. Nothing was wrong with the
+                // credentials, and the outbox had work it could have sent minutes later.
+                //
+                // Returning `None` skips this cycle without touching stored state: the tokens stay in
+                // memory and in the keyring, and the next cycle refreshes normally.
+                //
+                // The caller treats `None` as "signed out" for the `auth:expired` edge, which is
+                // still the honest signal — the agent cannot send right now. What it must not do is
+                // make that momentary truth permanent.
+                tracing::warn!("could not reach Cognito to refresh ({e}) — keeping the session and retrying next cycle");
                 None
             }
         }
@@ -295,9 +321,75 @@ impl AuthStatus {
     }
 }
 
+/// Did Cognito *reject* the refresh token, or did we merely fail to ask?
+///
+/// Only a rejection justifies deleting the stored token, because only a rejection means it will
+/// never work again. Everything else — no DNS, captive portal, TLS failure, a 5xx, a malformed body
+/// — is a statement about the network at that instant, and the same token will very likely refresh
+/// fine a minute later.
+///
+/// The error strings come from `cognito.rs`, which prefixes them by cause: `auth:network:…`,
+/// `auth:parse:…`, and `auth:cognito:<Type>[:message]` for anything Cognito itself answered. Note
+/// that the `auth:cognito:` prefix alone is *not* enough — `cognito_error` also falls back to
+/// `auth:cognito:<status>:<body>` for a raw gateway 5xx, which is a transport failure wearing
+/// Cognito's prefix. So this matches the two exception types that are genuinely terminal.
+fn refresh_failure_is_terminal(err: &str) -> bool {
+    const TERMINAL: [&str; 2] = [
+        // The refresh token was revoked, expired, or belongs to a disabled user.
+        "auth:cognito:NotAuthorizedException",
+        // The user was deleted from the pool — no future refresh can succeed either.
+        "auth:cognito:UserNotFoundException",
+    ];
+    TERMINAL.iter().any(|t| err.starts_with(t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this guards: a machine that boots or wakes before Wi-Fi associates fails the startup
+    /// refresh on the network, and used to have its refresh token deleted for it — turning a
+    /// momentary outage into a password prompt.
+    #[test]
+    fn a_network_failure_never_discards_the_stored_session() {
+        assert!(!refresh_failure_is_terminal(
+            "auth:network:error sending request for url (https://cognito-idp…)"
+        ));
+        assert!(!refresh_failure_is_terminal(
+            "auth:parse:expected value at line 1"
+        ));
+    }
+
+    /// A gateway 5xx arrives under the `auth:cognito:` prefix via `cognito_error`'s status fallback.
+    /// Prefix-matching alone would read it as a rejection and sign the user out over a bad minute at
+    /// the load balancer.
+    #[test]
+    fn a_gateway_error_wearing_the_cognito_prefix_is_not_terminal() {
+        assert!(!refresh_failure_is_terminal(
+            "auth:cognito:503:<html>gateway</html>"
+        ));
+        assert!(!refresh_failure_is_terminal("auth:cognito:500:internal"));
+    }
+
+    /// A revoked or expired refresh token, and a deleted user, are the two cases where the stored
+    /// token really is dead and keeping it would just fail forever.
+    #[test]
+    fn a_real_rejection_is_terminal() {
+        assert!(refresh_failure_is_terminal(
+            "auth:cognito:NotAuthorizedException:Refresh Token has expired."
+        ));
+        assert!(refresh_failure_is_terminal(
+            "auth:cognito:UserNotFoundException:User does not exist."
+        ));
+    }
+
+    /// Throttling is explicitly survivable — Cognito asking us to slow down must not cost the session.
+    #[test]
+    fn throttling_is_not_terminal() {
+        assert!(!refresh_failure_is_terminal(
+            "auth:cognito:TooManyRequestsException:Rate exceeded"
+        ));
+    }
 
     /// UI-read DTO: the serialized names must be camelCase (the boundary the TS side reads).
     #[test]

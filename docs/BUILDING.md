@@ -212,12 +212,19 @@ the minisign signature is checked against the key inside the binary.
 - One job, one **universal** binary (Intel + Apple Silicon lipo'd together) on the arm64 runner. Do
   not add a `macos-13` Intel job; GitHub retired those runners.
 - Bundle **`app,dmg`** — `app` is what yields the `.app.tar.gz` the updater needs (§1).
-- **Unsigned and un-notarised.** Gatekeeper blocks first launch with *"Apple could not verify this
-  app"*; the user must approve it under System Settings → Privacy & Security, or run
+- **Ad-hoc signed** (`APPLE_SIGNING_IDENTITY: "-"` in `release.yml`), **not notarised.** The ad-hoc
+  signature is not cosmetic: **Apple Silicon refuses to execute unsigned arm64 code**, so a build with
+  no signature at all is killed on launch on every M-series Mac and reports *"the app is damaged"* —
+  which reads as a corrupt download, not a signing gap. Ad-hoc signing is the minimum that makes the
+  bundle run.
+- Gatekeeper still blocks first launch with *"Apple could not verify this app"* (ad-hoc is not a
+  Developer ID); the user must approve it under System Settings → Privacy & Security, or run
   `xattr -dr com.apple.quarantine /Applications/WorkPulse.app`.
-- **The real cost isn't the warning — it's permissions.** macOS binds Screen Recording and
-  Accessibility grants to an app's *signing identity*. Unsigned, that identity can change on every
-  auto-update, so capture can silently stop after an update with nothing on screen explaining why.
+- **The real cost isn't the warning — it's permissions, and ad-hoc signing does NOT fix it.** macOS
+  binds Screen Recording and Accessibility grants to an app's *signing identity*. An ad-hoc signature
+  carries no stable identity, so the grants still reset on every auto-update: capture stops silently
+  after an update with nothing on screen explaining why. Tell users to expect a re-grant after each
+  macOS update, and point them at `WorkPulse --test-capture`, which names the cause.
   Fixing this needs the **Apple Developer Program ($99/yr)** and a Developer ID certificate; there is
   no free tier for distribution certificates. Add `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
   `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` and `tauri-action` notarises

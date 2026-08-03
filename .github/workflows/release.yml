@@ -153,6 +153,21 @@ jobs:
           WP_COGNITO_CLIENT_ID: ${{ vars.WP_COGNITO_CLIENT_ID }}
           WP_COGNITO_REGION: ${{ vars.WP_COGNITO_REGION }}
           WP_INGEST_URL: ${{ vars.WP_INGEST_URL }}
+          # macOS **ad-hoc** code signing ("-" is codesign's ad-hoc identity). Empty on Windows and
+          # Linux, where it is ignored.
+          #
+          # This is not a substitute for a Developer ID and does not fix the TCC problem (§7): an
+          # ad-hoc signature carries no stable identity, so Screen Recording and Accessibility grants
+          # still reset when the app updates. It is here for a harder reason — **Apple Silicon refuses
+          # to execute unsigned arm64 code at all.** A universal binary shipped with no signature
+          # whatsoever is killed on launch on every M-series Mac, which presents as "the app is
+          # damaged and can't be opened", not as a signing warning. Ad-hoc signing is the minimum that
+          # makes the build *run* on half the Macs in the field.
+          #
+          # Set APPLE_SIGNING_IDENTITY (plus APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_ID,
+          # APPLE_PASSWORD, APPLE_TEAM_ID) as secrets to upgrade this to a real Developer ID and
+          # notarisation — tauri-action picks them up and the value below stops applying.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
         with:
           projectPath: desktop
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
