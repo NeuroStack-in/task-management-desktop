@@ -26,10 +26,21 @@ use wp_agent_contract::ScreenshotMeta;
 /// This weakens the "minimum useful fidelity" position in `PRIVACY.md:76`; the fidelity is now
 /// *useful* rather than *minimum*. **The LLD should be amended to match** — do not silently revert
 /// this to 768 to close the gap, and do not raise it further without the same conversation.
-const MAX_WIDTH: u32 = 1280;
-/// Lossy WebP quality (0–100). Not specified by the LLD (which fixes only the width); raised from
-/// 75 alongside the width bump, since a sharper downscale is wasted on a soft encode.
-const WEBP_QUALITY: f32 = 85.0;
+///
+/// **1280 → 1920 (owner decision, 2026-08-04).** Frames still went soft when a reviewer zoomed, and
+/// the cause was the resample itself, not the encode: 1280 is 67% of the commonest display there is,
+/// and text is the one content type where that is immediately visible. 1920 makes the common case
+/// lossless in geometry — [`scaled_dims`] resamples nothing at or under the cap, so a 1920×1080
+/// display is stored pixel-for-pixel and only larger panels are reduced.
+const MAX_WIDTH: u32 = 1920;
+/// Resampling filter for displays above [`MAX_WIDTH`]. `Triangle` (bilinear) samples 2×2, which is
+/// fine for photographs and reads as a blur on the 9pt UI text these frames actually contain;
+/// Lanczos3 holds stroke contrast through a 2:1 reduction. A few ms per frame, once per cycle.
+const DOWNSCALE_FILTER: FilterType = FilterType::Lanczos3;
+/// Lossy WebP quality (0–100). Not specified by the LLD (which fixes only the width); 85 → 90 with
+/// the width bump — below ~90 WebP rings around high-contrast glyph edges, which survives zooming
+/// and reads as blur even at full resolution.
+const WEBP_QUALITY: f32 = 90.0;
 
 /// Map a blur level to a Gaussian sigma. 0 = no blur.
 fn blur_sigma(blur_level: u8) -> f32 {
@@ -230,7 +241,7 @@ fn process_monitor(
     let mut img = image::DynamicImage::ImageRgba8(rgba);
     let (w, h) = scaled_dims(img.width(), img.height());
     if (w, h) != (img.width(), img.height()) {
-        img = img.resize_exact(w, h, FilterType::Triangle);
+        img = img.resize_exact(w, h, DOWNSCALE_FILTER);
     }
     if blur_level > 0 {
         img = img.blur(blur_sigma(blur_level));
@@ -300,9 +311,12 @@ mod tests {
 
     #[test]
     fn scaled_dims_preserve_aspect_and_cap_width() {
-        assert_eq!(scaled_dims(1920, 1080), (1280, 720)); // 16:9 stays 16:9
-        assert_eq!(scaled_dims(2560, 1600), (1280, 800)); // 16:10 stays 16:10
+        assert_eq!(scaled_dims(2560, 1600), (1920, 1200)); // 16:10 stays 16:10
+        assert_eq!(scaled_dims(3840, 2160), (1920, 1080)); // 4K halves cleanly
         assert_eq!(scaled_dims(640, 480), (640, 480)); // already under cap
+                                                       // The commonest display is not resampled at all — the point of the 1920 cap, since any
+                                                       // resample of 1080p text is what shows up as blur under zoom.
+        assert_eq!(scaled_dims(1920, 1080), (1920, 1080));
     }
 
     #[test]
