@@ -33,6 +33,12 @@ use crate::state::AppState;
 /// key inside it is returned by the server exactly once, so this blob is the only copy.
 const CREDENTIAL_KEY: &str = "device_credential";
 
+/// The device credential, read from the keyring **once per process** and then served from memory.
+/// Each keyring read is a macOS Keychain access prompt, and `ensure_credential` runs on every
+/// (re)connection attempt — so without this cache a dropped connection re-prompts the user on each
+/// retry. Populated on first load or enrollment; cleared by [`clear_credential`].
+static CREDENTIAL_CACHE: std::sync::Mutex<Option<DeviceCredential>> = std::sync::Mutex::new(None);
+
 /// Amazon Root CA 1 — the public root that signs AWS IoT Core's ATS server certificates
 /// (https://www.amazontrust.com/repository/AmazonRootCA1.pem). Embedded so the agent needs no
 /// system trust store for the broker connection.
@@ -156,7 +162,13 @@ async fn ensure_credential(
     app: &tauri::AppHandle,
     http: &reqwest::Client,
 ) -> Option<DeviceCredential> {
+    // Serve from memory first: each keyring read is a macOS Keychain prompt, and this runs on every
+    // (re)connection attempt — cache it so the user is asked at most once per process, not per retry.
+    if let Some(cred) = CREDENTIAL_CACHE.lock().unwrap().clone() {
+        return Some(cred);
+    }
     if let Some(cred) = load_credential() {
+        *CREDENTIAL_CACHE.lock().unwrap() = Some(cred.clone());
         return Some(cred);
     }
 
@@ -177,6 +189,7 @@ async fn ensure_credential(
             } else {
                 tracing::info!(thing = %cred.thing_name, "mqtt: enrolled device");
             }
+            *CREDENTIAL_CACHE.lock().unwrap() = Some(cred.clone());
             Some(cred)
         }
         Err(e) => {
@@ -372,6 +385,7 @@ fn store_credential(cred: &DeviceCredential) -> keyring::Result<()> {
 /// deactivation on `workforce.employee_deactivated` — but a local wipe belongs beside store/load).
 fn clear_credential() {
     let _ = token_store::clear(CREDENTIAL_KEY);
+    *CREDENTIAL_CACHE.lock().unwrap() = None;
 }
 
 #[cfg(test)]

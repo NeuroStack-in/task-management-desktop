@@ -27,7 +27,16 @@ const SERVICE: &str = "com.workpulse.agent";
 ///
 /// 1024 keeps a deliberate margin under 1280 — a chunk boundary landing badly should cost an extra
 /// entry, never a silently unsaved session.
+///
+/// **Windows only.** macOS Keychain and the Linux Secret Service impose no such small per-item cap,
+/// and on macOS **every keyring item is a separate access-approval prompt** — a chunked credential
+/// (cert + private key ≈ 6 items) means ~6 password prompts per sign-in. So off Windows we store the
+/// whole blob in a single chunk: one item, one prompt. The `.count` sidecar still exists (always 1),
+/// keeping the store/load format identical across platforms.
+#[cfg(windows)]
 const CHUNK: usize = 1024;
+#[cfg(not(windows))]
+const CHUNK: usize = 1_048_576; // 1 MiB — effectively unlimited for a token/credential blob
 
 fn b64(blob: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(blob)
@@ -103,8 +112,10 @@ mod tests {
 
     #[test]
     fn chunk_round_trip_over_the_limit() {
-        // A blob whose base64 exceeds one chunk → must split into >1 and rejoin exactly.
-        let blob: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        // A blob whose base64 exceeds one chunk → must split into >1 and rejoin exactly. Sized off
+        // `CHUNK` so it splits on every platform (Windows chunks at 1 KiB, macOS/Linux at 1 MiB):
+        // CHUNK bytes base64-encode to ~1.33·CHUNK chars, comfortably past one chunk.
+        let blob: Vec<u8> = (0..CHUNK).map(|i| (i % 251) as u8).collect();
         let chunks = split(&blob);
         assert!(chunks.len() > 1, "should split past the chunk limit");
         assert!(chunks.iter().all(|c| c.len() <= CHUNK));
@@ -128,6 +139,10 @@ mod tests {
     /// `CRED_MAX_CREDENTIAL_BLOB_SIZE` is 2560 **bytes** and the value is stored **UTF-16**, so an
     /// ASCII chunk costs two bytes per character. Verified empirically on Windows 11: a 1280-char
     /// password stores, 1400 fails.
+    ///
+    /// **Windows only:** off Windows `CHUNK` is 1 MiB by design (no small per-item cap, and fewer
+    /// items means fewer macOS Keychain prompts), so this blob-size invariant simply doesn't apply.
+    #[cfg(windows)]
     #[test]
     fn chunks_fit_the_windows_credential_blob_limit() {
         const CRED_MAX_CREDENTIAL_BLOB_SIZE: usize = 2560;
