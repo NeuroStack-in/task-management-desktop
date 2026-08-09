@@ -122,7 +122,7 @@ pub fn spawn_screenshots(app: AppHandle) {
             let focus = active_window::current();
 
             // Gates (scoped so `state` isn't held across the blocking capture).
-            let (go, blur, excepted) = {
+            let (go, blur, excepted, silent) = {
                 let state = app.state::<AppState>();
                 let running = state.timer.lock().unwrap().is_running();
                 let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
@@ -151,6 +151,7 @@ pub fn spawn_screenshots(app: AppHandle) {
                     running && consented && on && !paused,
                     c.tracking.blur_level,
                     excepted,
+                    c.tracking.silent,
                 )
             };
             if !go || excepted {
@@ -167,13 +168,16 @@ pub fn spawn_screenshots(app: AppHandle) {
             .unwrap_or_default();
 
             if shots.is_empty() {
-                // Capture failed where it shouldn't — surface, not silence. The *reason* is logged
-                // by `screenshot::capture_all`; this carries the employee-facing sentence, which is
-                // platform-specific (only macOS has a permission to grant).
-                let _ = app.emit(
-                    events::SCREENSHOT_UNAVAILABLE,
-                    events::capture_failure_hint(),
-                );
+                // Capture failed where it shouldn't. The *reason* is always logged by
+                // `screenshot::capture_all`; normally we also surface an employee-facing sentence.
+                // Under silent mode (owner policy) it is logged only, never shown — a visible
+                // "capture blocked" message would itself reveal that monitoring is happening.
+                if !silent {
+                    let _ = app.emit(
+                        events::SCREENSHOT_UNAVAILABLE,
+                        events::capture_failure_hint(),
+                    );
+                }
             } else {
                 let state = app.state::<AppState>();
                 let mut store = state.screenshots.lock().unwrap();
@@ -235,7 +239,11 @@ fn run(app: AppHandle) {
 
             if tick.is_multiple_of(WINDOW_SAMPLE_EVERY) {
                 if let Some(f) = active_window::current() {
-                    let rules = state.config.lock().unwrap().get().rules.clone();
+                    let (rules, silent) = {
+                        let cfg = state.config.lock().unwrap();
+                        let c = cfg.get();
+                        (c.rules.clone(), c.tracking.silent)
+                    };
 
                     // Restricted-list enforcement (LLD §14) — timer-gated by this whole branch,
                     // and checked BEFORE the untracked filter (the three rule lists are
@@ -268,10 +276,15 @@ fn run(app: AppHandle) {
                             // The visible warning: surface the panel and tell the webview which
                             // site/app tripped the policy. Deliberately shown, not focus-stolen —
                             // the point is "you were seen", not yanking the keyboard mid-keystroke.
-                            if let Some(w) = app.get_webview_window("panel") {
-                                let _ = w.show();
+                            // Suppressed under silent mode (owner policy): the violation is still
+                            // reported to the server (the PolicyViolation event above), but the
+                            // employee is shown nothing.
+                            if !silent {
+                                if let Some(w) = app.get_webview_window("panel") {
+                                    let _ = w.show();
+                                }
+                                let _ = app.emit(events::POLICY_BLOCKED, identifier);
                             }
-                            let _ = app.emit(events::POLICY_BLOCKED, identifier);
                         }
                     }
 

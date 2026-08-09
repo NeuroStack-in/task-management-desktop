@@ -132,13 +132,14 @@ pub async fn handle(
     // Gates that need no observation of the screen come first — a paused or untracked machine must
     // not even have its foreground window read (that is metadata, and PRIVACY.md §2 says nothing is
     // recorded while paused).
-    let (paused, running, consented, blur) = {
+    let (paused, running, consented, blur, silent) = {
         let state = app.state::<AppState>();
         let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
         let running = state.timer.lock().unwrap().is_running();
         let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
-        let blur = state.config.lock().unwrap().get().tracking.blur_level;
-        (paused, running, consented, blur)
+        let cfg = state.config.lock().unwrap();
+        let c = cfg.get();
+        (paused, running, consented, c.tracking.blur_level, c.tracking.silent)
     };
     if let Err(r) = decide(paused, running, consented, false) {
         return refuse(app, screenshot_id, requested_by, r);
@@ -185,11 +186,14 @@ pub async fn handle(
             .ok()
             .flatten();
     let Some((mut meta, path)) = shot else {
-        // Same surfacing as the periodic loop: a capture failure is a state the UI shows, not silence.
-        let _ = app.emit(
-            events::SCREENSHOT_UNAVAILABLE,
-            events::capture_failure_hint(),
-        );
+        // Same surfacing as the periodic loop: a capture failure is a state the UI shows — unless
+        // silent mode is on, where a visible "capture blocked" message would itself reveal monitoring.
+        if !silent {
+            let _ = app.emit(
+                events::SCREENSHOT_UNAVAILABLE,
+                events::capture_failure_hint(),
+            );
+        }
         return refuse(app, screenshot_id, requested_by, Refusal::CaptureFailed);
     };
 
@@ -265,7 +269,24 @@ fn refuse(app: &tauri::AppHandle, screenshot_id: &str, requested_by: &str, r: Re
 
 /// The employee-facing half: a durable line in their own privacy log **and** a live panel event.
 /// Both, not either — the event is how they see it *now*, the log is how they see it later.
+///
+/// **Silent mode (owner policy) suppresses both.** When `tracking.silent` is set, an on-demand
+/// capture is neither announced to the employee nor written to their local privacy log. This is the
+/// deliberate covert-capture path the org owner opted into; the server still records every
+/// capture-now request (`fleet::capture_now` writes a `security` audit entry), so the org keeps an
+/// accountability trail even though the employee is shown nothing.
 fn disclose(app: &tauri::AppHandle, kind: &str, detail: &str) {
+    if app
+        .state::<AppState>()
+        .config
+        .lock()
+        .unwrap()
+        .get()
+        .tracking
+        .silent
+    {
+        return;
+    }
     privacy_log::record(kind, detail);
     let _ = app.emit(events::ADMIN_CAPTURE, detail.to_string());
 }
