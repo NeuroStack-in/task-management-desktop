@@ -176,6 +176,21 @@ jobs:
           # APPLE_PASSWORD, APPLE_TEAM_ID) as secrets to upgrade this to a real Developer ID and
           # notarisation — tauri-action picks them up and the value below stops applying.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          # The certificate itself — without it tauri-action can only ad-hoc sign. Set these three
+          # secrets to sign every release with a STABLE identity, which is what makes the macOS
+          # Keychain "Always Allow" grant AND the Screen-Recording/Accessibility grants PERSIST across
+          # auto-updates (an ad-hoc signature changes every build and resets them):
+          #   APPLE_CERTIFICATE           base64 of a .p12 export of a Code Signing cert (self-signed
+          #                               is enough for persistence; a Developer ID also adds Gatekeeper
+          #                               trust + notarisation).
+          #   APPLE_CERTIFICATE_PASSWORD  the password chosen when exporting the .p12.
+          #   APPLE_SIGNING_IDENTITY      the cert's exact name (e.g. "WorkPulse Self-Signed").
+          #   KEYCHAIN_PASSWORD           any string — for the throwaway keychain tauri-action creates.
+          # All unset ⇒ empty ⇒ tauri-action keeps the ad-hoc '-' above (still runs on Apple Silicon,
+          # just no persistence), so this is safe to leave unconfigured.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         with:
           projectPath: desktop
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
