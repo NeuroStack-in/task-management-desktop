@@ -7,7 +7,6 @@ import {
   type UpdateStatus,
 } from "@/lib/agent";
 
-import { ConsentCard } from "@/cards/ConsentCard";
 import { LoginCard } from "@/cards/LoginCard";
 import { PauseCard } from "@/cards/PauseCard";
 import { PrivacyLogCard } from "@/cards/PrivacyLogCard";
@@ -52,6 +51,16 @@ function Panel() {
   const { theme, toggle: toggleTheme } = useTheme();
   useResumeLastTask(snapshot?.auth.signedIn === true, snapshot?.timer.running === true, refresh);
 
+  // The monitoring notice has been removed from the panel, but the core still gates activity and
+  // screenshot capture on consent (monitor/mod.rs — fails closed). Record it silently once the user
+  // is signed in so capture keeps running; it's persisted, so this is a one-time write per policy
+  // version, not a call on every launch.
+  const signedIn = snapshot?.auth.signedIn === true;
+  const consentGranted = snapshot?.consent.granted === true;
+  useEffect(() => {
+    if (signedIn && !consentGranted) grantConsent();
+  }, [signedIn, consentGranted, grantConsent]);
+
   if (error && !snapshot) {
     return (
       <div className="flex flex-1 items-center justify-center p-6 text-center">
@@ -71,19 +80,13 @@ function Panel() {
     );
   }
 
-  const { auth, consent, capture, config, timer, pause, projects, tasks, sessions, privacyLog } =
-    snapshot;
+  const { auth, capture, config, timer, pause, projects, tasks, sessions, privacyLog } = snapshot;
 
-  // Sign-in gates everything, ahead of consent — there's no user to attribute consent to yet.
-  // `refresh` rather than a local flag: the core owns auth state, so re-reading it is what proves
-  // the sign-in actually took.
+  // Sign-in gates everything. `refresh` rather than a local flag: the core owns auth state, so
+  // re-reading it is what proves the sign-in actually took. (There is no separate consent gate any
+  // more — the monitoring notice was removed; consent is recorded silently above.)
   if (!auth.signedIn) {
     return <LoginCard onSignedIn={() => void refresh()} />;
-  }
-
-  // Consent gates the rest of the panel: nothing else is actionable until it's acknowledged.
-  if (!consent.granted) {
-    return <ConsentCard consent={consent} silent={config.silent} onGrant={grantConsent} />;
   }
 
   // Silent mode suppresses the capture indicator by policy — the disclosure already covered it.
@@ -149,6 +152,11 @@ function Panel() {
           <LogOut className="size-4" />
         </button>
       </header>
+
+      {/* Version + update status, pinned directly under the header — the first thing on screen, not
+          the last. Sits outside the scroller so it never scrolls away; renders nothing until the
+          core can report a status (see the component). */}
+      <UpdateStrip />
 
       {/* The window is a fixed 420×560 companion widget (tauri.conf.json), sized so this content
           fits without scrolling — that remains the target, and any card added here should still earn
@@ -302,8 +310,6 @@ function Panel() {
 
         {/* Renders only when something has actually been done to this machine — see the card. */}
         <PrivacyLogCard events={privacyLog} />
-
-        <UpdateStrip />
       </div>
     </>
   );
@@ -356,7 +362,7 @@ function UpdateStrip() {
   const available = status.latest !== null;
 
   return (
-    <div className="flex shrink-0 items-center gap-2 px-0.5 text-[11px] text-muted-foreground">
+    <div className="mb-2.5 flex shrink-0 items-center gap-2 border-b border-border/60 px-0.5 pb-2.5 text-[11px] text-muted-foreground">
       <span className="font-mono">v{status.current}</span>
       <span aria-hidden>·</span>
 

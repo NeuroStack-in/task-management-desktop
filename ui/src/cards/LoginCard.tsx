@@ -318,14 +318,10 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
           )}
       </div>
 
-      {/* Compact footer: one line of assurance, not a full-width rule plus two lines of prose.
-          The shield carries the "managed device" meaning the divider label used to. */}
+      {/* Compact footer: one line of assurance. */}
       <p className="mt-3 flex shrink-0 items-start justify-center gap-1.5 px-2 text-center text-[11px] leading-[1.45] text-muted-foreground/70">
         <ShieldCheck aria-hidden className="mt-[1px] size-3.5 shrink-0" />
-        <span>
-          Nothing is recorded until you sign in and accept the monitoring notice. Forgotten your
-          password? Your workspace admin can reset it.
-        </span>
+        <span>Forgotten your password? Your workspace admin can reset it.</span>
       </p>
     </div>
   );
