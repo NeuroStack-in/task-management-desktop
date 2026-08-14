@@ -137,6 +137,46 @@ jobs:
         working-directory: desktop/ui
         run: npm ci
 
+      # macOS signing is DECIDED HERE, not inline in the build step's `env:`. A bare
+      #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      # still **defines the variable as an empty string** when the secret is unset — and Tauri's
+      # bundler treats a *defined* APPLE_CERTIFICATE as "import this certificate and sign with it",
+      # then fails `security import` on the empty value:
+      #   security: SecKeychainItemImport: One or more parameters passed to a function were not valid.
+      #   failed codesign application: failed to import keychain certificate
+      # That broke every macOS release the moment the cert vars were added while no cert secret
+      # existed (v0.1.12). The "unset ⇒ empty ⇒ ad-hoc fallback" assumption is exactly the bug: empty
+      # is not the same as absent.
+      #
+      # So export the cert vars to the build ONLY when a certificate is genuinely present; otherwise
+      # export just APPLE_SIGNING_IDENTITY=- (ad-hoc), which is what shipped every release before
+      # signing was wired up — it still runs on Apple Silicon, just without grant persistence. When
+      # the APPLE_CERTIFICATE secret is later configured, this lights the stable-identity path up with
+      # no further change.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "macOS: certificate present — signing with a stable identity"
+            # Delimiter form: a base64 .p12 may span lines, which the KEY=VALUE form can't carry.
+            {
+              echo "APPLE_CERTIFICATE<<__WP_EOF__"
+              echo "$APPLE_CERTIFICATE"
+              echo "__WP_EOF__"
+              echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+              echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY:--}"
+            } >> "$GITHUB_ENV"
+          else
+            echo "macOS: no APPLE_CERTIFICATE secret — ad-hoc signing (runs on Apple Silicon, no grant persistence)"
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+          fi
+
       # tauri-action builds the constrained bundle set + the updater artifacts (latest.json + minisign
       # .sig), and uploads them to the DRAFT release for this tag.
       # PINNED to a SHA, not the floating `@v0`. That tag moved between the v0.1.0 release and the
@@ -161,36 +201,13 @@ jobs:
           WP_COGNITO_CLIENT_ID: ${{ vars.WP_COGNITO_CLIENT_ID }}
           WP_COGNITO_REGION: ${{ vars.WP_COGNITO_REGION }}
           WP_INGEST_URL: ${{ vars.WP_INGEST_URL }}
-          # macOS **ad-hoc** code signing ("-" is codesign's ad-hoc identity). Empty on Windows and
-          # Linux, where it is ignored.
-          #
-          # This is not a substitute for a Developer ID and does not fix the TCC problem (§7): an
-          # ad-hoc signature carries no stable identity, so Screen Recording and Accessibility grants
-          # still reset when the app updates. It is here for a harder reason — **Apple Silicon refuses
-          # to execute unsigned arm64 code at all.** A universal binary shipped with no signature
-          # whatsoever is killed on launch on every M-series Mac, which presents as "the app is
-          # damaged and can't be opened", not as a signing warning. Ad-hoc signing is the minimum that
-          # makes the build *run* on half the Macs in the field.
-          #
-          # Set APPLE_SIGNING_IDENTITY (plus APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_ID,
-          # APPLE_PASSWORD, APPLE_TEAM_ID) as secrets to upgrade this to a real Developer ID and
-          # notarisation — tauri-action picks them up and the value below stops applying.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          # The certificate itself — without it tauri-action can only ad-hoc sign. Set these three
-          # secrets to sign every release with a STABLE identity, which is what makes the macOS
-          # Keychain "Always Allow" grant AND the Screen-Recording/Accessibility grants PERSIST across
-          # auto-updates (an ad-hoc signature changes every build and resets them):
-          #   APPLE_CERTIFICATE           base64 of a .p12 export of a Code Signing cert (self-signed
-          #                               is enough for persistence; a Developer ID also adds Gatekeeper
-          #                               trust + notarisation).
-          #   APPLE_CERTIFICATE_PASSWORD  the password chosen when exporting the .p12.
-          #   APPLE_SIGNING_IDENTITY      the cert's exact name (e.g. "WorkPulse Self-Signed").
-          #   KEYCHAIN_PASSWORD           any string — for the throwaway keychain tauri-action creates.
-          # All unset ⇒ empty ⇒ tauri-action keeps the ad-hoc '-' above (still runs on Apple Silicon,
-          # just no persistence), so this is safe to leave unconfigured.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          # macOS signing (APPLE_SIGNING_IDENTITY / APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD /
+          # KEYCHAIN_PASSWORD) is supplied by the "Configure macOS signing" step above via
+          # $GITHUB_ENV — deliberately NOT inline here. Setting APPLE_CERTIFICATE inline defines it as
+          # an empty string when the secret is unset, which Tauri treats as "sign with this cert" and
+          # then fails to import (see that step). Ad-hoc ("-") is the default; a configured cert
+          # secret upgrades it to a stable identity with no change here. On Windows/Linux the step is
+          # skipped and these are simply absent (ignored on those platforms).
         with:
           projectPath: desktop
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
