@@ -139,7 +139,13 @@ pub async fn handle(
         let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
         let cfg = state.config.lock().unwrap();
         let c = cfg.get();
-        (paused, running, consented, c.tracking.blur_level, c.tracking.silent)
+        (
+            paused,
+            running,
+            consented,
+            c.tracking.blur_level,
+            c.tracking.silent,
+        )
     };
     if let Err(r) = decide(paused, running, consented, false) {
         return refuse(app, screenshot_id, requested_by, r);
