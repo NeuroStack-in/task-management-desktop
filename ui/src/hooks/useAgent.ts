@@ -7,6 +7,30 @@ import type { AgentSnapshot, TimerSelection } from "@/lib/types";
 
 const POLL_MS = 1000;
 
+/**
+ * Turn a core error into something a person can act on.
+ *
+ * Tauri commands surface failures as `timer:<engine message>` — an internal code that was being
+ * rendered verbatim, so the panel said **"That didn't work. timer:a session is already running"**.
+ * It names the module that failed rather than what the reader should do about it.
+ *
+ * "Already running" is the one that matters, because it is usually not a user mistake: the panel
+ * auto-resumes the last task on launch (`useResumeLastTask`), and a Start pressed while that is in
+ * flight loses the race. The timer *is* running — the message should say so, and the refresh that
+ * now follows every action makes the panel agree.
+ */
+function humanizeActionError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  if (raw.includes("already running")) {
+    return "A timer is already running — the panel has been refreshed to show it.";
+  }
+  if (raw.includes("not_running") || raw.includes("no session")) {
+    return "No timer is running.";
+  }
+  // Strip the `module:` prefix rather than inventing wording for an error we do not know.
+  return raw.replace(/^[a-z_]+:/, "");
+}
+
 export interface Agent {
   snapshot: AgentSnapshot | null;
   error: string | null;
@@ -143,7 +167,7 @@ export function useAgent(): Agent {
   }, [snapshot?.auth.signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const reportAction = useCallback((e: unknown) => {
-    setActionError(e instanceof Error ? e.message : String(e));
+    setActionError(humanizeActionError(e));
   }, []);
 
   // Run a write action single-flight, surfacing any failure. The ref guard is checked synchronously,
@@ -155,8 +179,14 @@ export function useAgent(): Agent {
       setBusy(true);
       setActionError(null);
       void fn()
-        .then(refresh)
         .catch(reportAction)
+        // **Refresh after a failure too, not just a success.** A refused action is exactly when the
+        // panel is most likely to be out of step with the core: the timer is refused *because*
+        // something already started one, so the snapshot that made the button look pressable is
+        // stale by definition. Refreshing only in `.then` left the panel showing READY 00:00:00
+        // beside "a session is already running" — the two halves of one contradiction on screen at
+        // once, with no way to reconcile short of restarting the app.
+        .then(() => refresh())
         .finally(() => {
           busyRef.current = false;
           setBusy(false);
