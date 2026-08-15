@@ -68,6 +68,27 @@ impl MinuteBucket {
         // Top-N by seconds (desc); tie-break by app for determinism (golden tests).
         spans.sort_by(|x, y| y.seconds.cmp(&x.seconds).then_with(|| x.app.cmp(&y.app)));
         spans.truncate(MAX_APPS_PER_BUCKET);
+        // **Σ spans ≤ active_sec**, enforced here rather than hoped for.
+        //
+        // The caller now only samples while someone is at the keyboard, which removes the cause —
+        // but a sample credits `WINDOW_SAMPLE_EVERY` seconds *retroactively* for a window it only
+        // observed at one instant, so going idle mid-window can still overshoot by a few seconds.
+        // The server divides category seconds by `active_sec` (Q, and the dashboard's productive
+        // share) and a ratio above 1 is meaningless there, so the invariant is made true at the
+        // only place that can see both numbers.
+        //
+        // Scaled proportionally, not truncated: Q is about the *mix* of categories, so shrinking
+        // every span by the same factor keeps the answer while fixing the total. Trimming the tail
+        // instead would delete whole apps and quietly reclassify the minute.
+        let total: u32 = spans.iter().map(|s| s.seconds).sum();
+        let active = u32::from(self.active_sec);
+        if total > active {
+            for s in &mut spans {
+                // Ratio first, then round — `seconds * active / total` in u64 to avoid overflow on
+                // a pathological accumulation.
+                s.seconds = ((u64::from(s.seconds) * u64::from(active)) / u64::from(total)) as u32;
+            }
+        }
         ActivityRollup {
             minute: self.minute,
             keystrokes: self.keystrokes,
@@ -210,18 +231,25 @@ mod tests {
     #[test]
     fn top_apps_accumulate_and_cap_top_n_by_seconds() {
         let mut b = Bucketer::new();
-        // App "code" gets 3 samples (30s), "chrome" 1 (5s); plus 40 filler apps of 1s each.
-        b.sample_app(MIN0, "code".into(), None, None, Category::Productive, 10);
-        b.sample_app(MIN0, "code".into(), None, None, Category::Productive, 20);
+        // A full minute of activity, so the spans below have room to be real. The fixture used to
+        // omit this and spend 75 seconds inside a 60-second minute — impossible, and now caught by
+        // the Σ spans ≤ active_sec invariant, which would scale every span down and mask what this
+        // test is actually about (accumulation and top-N ordering).
+        for s in 0..60 {
+            b.tick(MIN0 + s * 1000, 0, 1, 0);
+        }
+        // "code" gets 2 samples (20s), "chrome" 1 (5s), plus 35 filler apps of 1s each = 60s exactly.
+        b.sample_app(MIN0, "code".into(), None, None, Category::Productive, 5);
+        b.sample_app(MIN0, "code".into(), None, None, Category::Productive, 15);
         b.sample_app(MIN0, "chrome".into(), None, None, Category::Neutral, 5);
-        for i in 0..40 {
+        for i in 0..35 {
             b.sample_app(MIN0, format!("filler{i}"), None, None, Category::Neutral, 1);
         }
         b.seal();
         let r = &b.take_sealed()[0];
         assert_eq!(r.top_apps.len(), MAX_APPS_PER_BUCKET, "capped");
         assert_eq!(r.top_apps[0].app, "code");
-        assert_eq!(r.top_apps[0].seconds, 30, "samples accumulate");
+        assert_eq!(r.top_apps[0].seconds, 20, "samples accumulate");
         assert_eq!(r.top_apps[1].app, "chrome");
     }
 
@@ -249,5 +277,73 @@ mod tests {
         assert_eq!(sealed.len(), 2);
         assert_eq!(sealed[0].minute + 1, sealed[1].minute);
         assert_eq!(sealed[1].minute, midnight_ms / 60_000);
+    }
+
+    /// The invariant the server divides by: category seconds can never exceed active seconds.
+    /// Violating it rendered a real day as "Productive % : 108" on the dashboard, and pushed Q to
+    /// its cap inside every score for that day.
+    #[test]
+    fn app_spans_never_exceed_active_seconds() {
+        let mut b = Bucketer::new();
+        let t0 = 0i64;
+        // Ten active seconds...
+        for i in 0..10 {
+            b.tick(t0 + i * 1_000, 0, 1, 0);
+        }
+        // ...but sampling credited five seconds per sample, four times over: 20s of spans.
+        for i in 0..4 {
+            b.sample_app(
+                t0 + i * 1_000,
+                "code.exe".into(),
+                None,
+                None,
+                Category::Productive,
+                5,
+            );
+        }
+        b.seal();
+        let r = &b.take_sealed()[0];
+        let total: u32 = r.top_apps.iter().map(|s| s.seconds).sum();
+        assert!(
+            total <= u32::from(r.active_sec),
+            "spans {total}s exceeded active {}s",
+            r.active_sec
+        );
+    }
+
+    /// Scaled, not truncated: the *mix* is what Q measures, so an over-total must shrink every span
+    /// by the same factor rather than deleting the smaller apps.
+    #[test]
+    fn overshoot_scales_spans_and_keeps_their_mix() {
+        let mut b = Bucketer::new();
+        for i in 0..10 {
+            b.tick(i * 1_000, 0, 1, 0);
+        }
+        // 30s productive + 10s distracting against 10 active seconds — a 4x overshoot at 3:1.
+        b.sample_app(0, "code.exe".into(), None, None, Category::Productive, 30);
+        b.sample_app(0, "game.exe".into(), None, None, Category::Distracting, 10);
+        b.seal();
+        let r = &b.take_sealed()[0];
+        let by = |n: &str| {
+            r.top_apps
+                .iter()
+                .find(|s| s.app == n)
+                .map(|s| s.seconds)
+                .unwrap_or(0)
+        };
+        // Both apps survive, and the 3:1 ratio does too.
+        assert_eq!(by("code.exe"), 7);
+        assert_eq!(by("game.exe"), 2);
+    }
+
+    /// A minute with spans but no active seconds contributes nothing rather than everything.
+    #[test]
+    fn spans_with_no_active_time_collapse_to_zero() {
+        let mut b = Bucketer::new();
+        b.sample_app(0, "code.exe".into(), None, None, Category::Productive, 5);
+        b.seal();
+        let r = &b.take_sealed()[0];
+        assert_eq!(r.active_sec, 0);
+        assert_eq!(r.top_apps.iter().map(|s| s.seconds).sum::<u32>(), 0);
     }
 }

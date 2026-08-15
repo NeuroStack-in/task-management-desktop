@@ -292,8 +292,18 @@ fn run(app: AppHandle) {
                     // is focused, record nothing about it — no activity span (the screenshot loop
                     // applies the same carve-out to its capture). Orthogonal to `is_untracked`, so
                     // check it independently on the full app+title+url haystack.
+                    // Idle-gated, exactly as `tick` gates `active_sec`. Without this the foreground
+                    // app accrued WINDOW_SAMPLE_EVERY seconds every sample regardless of whether
+                    // anyone was there, while `active_sec` counted none of them — so an app left
+                    // focused while the machine sat idle produced more span seconds than active
+                    // seconds. The server divides one by the other (Q, and the dashboard's
+                    // productive share), which is how a real day rendered as **108%**.
+                    //
+                    // Same threshold as `tick`, deliberately: two different definitions of "active"
+                    // in one bucket is what caused this.
+                    let at_keyboard = idle <= idle::IDLE_THRESHOLD_SECS;
                     let excepted = crate::rules::is_excepted(&haystack, &rules);
-                    if !excepted && !crate::rules::is_untracked(&f.app, &rules) {
+                    if at_keyboard && !excepted && !crate::rules::is_untracked(&f.app, &rules) {
                         let cat = crate::rules::classify_focus(&f.app, &rules);
                         bucketer.sample_app(
                             now,
