@@ -1,4 +1,13 @@
-import { Check, ChevronDown, FolderKanban, ListChecks, Play, RefreshCw, Square } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  FolderKanban,
+  Hand,
+  ListChecks,
+  Play,
+  RefreshCw,
+  Square,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
@@ -11,6 +20,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { recordHistory, suggestHistory } from "@/lib/descriptionHistory";
@@ -83,6 +93,10 @@ export function TimerCard({
 
   const project = projects.find((p) => p.id === projectId) ?? null;
   const inProject = tasks.filter((t) => t.project_id === projectId);
+  // Yours first, then what nobody has taken. Two groups rather than one mixed list: the picker is
+  // scanned, not read, and an unclaimed task sitting between two of your own reads as yours.
+  const assigned = inProject.filter((t) => !t.unassigned);
+  const unclaimed = inProject.filter((t) => t.unassigned);
   const task = inProject.find((t) => t.id === taskId) ?? null;
 
   const selection = (over: Partial<TimerSelection> = {}): TimerSelection => ({
@@ -112,6 +126,72 @@ export function TimerCard({
     // next time (fold grain is (project, description) — retyping variants splits timesheet rows).
     if (!timer.running) recordHistory(description);
     onToggle(selection());
+  };
+
+  /**
+   * One row of the task menu. Lifted out of the map so the assigned and unclaimed groups render
+   * identically — a difference between the two would read as a difference in the task.
+   */
+  const renderTask = (t: Task) => {
+    const isActive = timer.running && timer.task_id === t.id;
+    const isSel = !timer.running && taskId === t.id;
+    return (
+      <DropdownMenuItem
+        key={t.id}
+        onClick={() => chooseTask(t)}
+        className={cn(
+          "items-start gap-2.5 rounded-lg px-1.5 py-1.5",
+          (isActive || isSel) && "bg-accent/60",
+        )}
+      >
+        <span
+          className={cn(
+            "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md",
+            isActive
+              ? "bg-success/15 text-success"
+              : t.unassigned
+                ? "bg-muted text-muted-foreground"
+                : "bg-primary/10 text-primary",
+          )}
+        >
+          {isActive ? (
+            <span className="size-2 animate-pulse rounded-full bg-success" />
+          ) : t.unassigned ? (
+            <Hand className="size-4" />
+          ) : (
+            <ListChecks className="size-4" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="truncate font-medium">{t.title}</span>
+            {t.unassigned && (
+              <Badge
+                variant="secondary"
+                className="shrink-0 px-1.5 py-0 text-[0.65rem] font-normal"
+                // Stated rather than implied by the grouping alone: tracking time against an
+                // unclaimed task does not claim it, so a colleague may be on it too.
+                title="Nobody is assigned — tracking time won't claim it"
+              >
+                Unassigned
+              </Badge>
+            )}
+            {t.billable && (
+              <Badge
+                variant="secondary"
+                className="shrink-0 px-1.5 py-0 text-[0.65rem] font-normal"
+              >
+                Billable
+              </Badge>
+            )}
+          </span>
+          <span className="tabular block truncate text-[0.7rem] text-muted-foreground">
+            {t.id}
+          </span>
+        </span>
+        {isSel && <Check className="mt-0.5 size-4 shrink-0 text-primary" />}
+      </DropdownMenuItem>
+    );
   };
 
   const canStart = Boolean(projectId);
@@ -239,50 +319,20 @@ export function TimerCard({
               Tasks
               <span className="font-normal text-muted-foreground/70">· {project?.name ?? "—"}</span>
             </p>
-            {inProject.map((t) => {
-              const isActive = timer.running && timer.task_id === t.id;
-              const isSel = !timer.running && taskId === t.id;
-              return (
-                <DropdownMenuItem
-                  key={t.id}
-                  onClick={() => chooseTask(t)}
-                  className={cn(
-                    "items-start gap-2.5 rounded-lg px-1.5 py-1.5",
-                    (isActive || isSel) && "bg-accent/60",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md",
-                      isActive ? "bg-success/15 text-success" : "bg-primary/10 text-primary",
-                    )}
-                  >
-                    {isActive ? (
-                      <span className="size-2 animate-pulse rounded-full bg-success" />
-                    ) : (
-                      <ListChecks className="size-4" />
-                    )}
+            {assigned.map((t) => renderTask(t))}
+
+            {unclaimed.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                <p className="flex items-center gap-1.5 px-1.5 pb-1 pt-1 text-xs font-medium text-muted-foreground">
+                  Up for grabs
+                  <span className="font-normal text-muted-foreground/70">
+                    · nobody assigned
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-2">
-                      <span className="truncate font-medium">{t.title}</span>
-                      {t.billable && (
-                        <Badge
-                          variant="secondary"
-                          className="shrink-0 px-1.5 py-0 text-[0.65rem] font-normal"
-                        >
-                          Billable
-                        </Badge>
-                      )}
-                    </span>
-                    <span className="tabular block truncate text-[0.7rem] text-muted-foreground">
-                      {t.id}
-                    </span>
-                  </span>
-                  {isSel && <Check className="mt-0.5 size-4 shrink-0 text-primary" />}
-                </DropdownMenuItem>
-              );
-            })}
+                </p>
+                {unclaimed.map((t) => renderTask(t))}
+              </>
+            )}
           </HeroPicker>
 
           {/* Same translucent treatment as the pickers either side — a semantic fill would

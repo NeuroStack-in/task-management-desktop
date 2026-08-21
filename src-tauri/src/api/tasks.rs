@@ -1,6 +1,15 @@
-//! `GET /v1/me/tasks` — the caller's assigned tasks (across projects), so the panel's task picker
-//! shows real tasks. Same user Cognito JWT as the batch rail. The agent needs `id`/`title`/
-//! `project_id`; `status`/`due` are ignored (serde drops unknown fields).
+//! `GET /v1/me/tasks` — the tasks the panel's picker offers. Same user Cognito JWT as the batch
+//! rail. The agent needs `id`/`title`/`project_id`/`unassigned`; `status`/`due` are ignored (serde
+//! drops unknown fields).
+//!
+//! **`?include_unassigned=true`.** The panel asks a different question from the web app's "My
+//! tasks" card: not *what am I responsible for* but *what could I be working on right now*. A task
+//! nobody has taken is exactly that, so the picker offers every project member the unclaimed work in
+//! their projects. The flag is opt-in server-side precisely so the web surfaces keep their narrower
+//! meaning — see `projects::my_tasks`.
+//!
+//! Picking one does **not** claim it. Starting a timer records time against the task and leaves it
+//! unassigned, so it stays available to everyone; assigning is still a deliberate act on the board.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +21,12 @@ pub struct TaskDto {
     pub title: String,
     #[serde(default)]
     pub project_id: String,
+    /// Nobody has taken this one — it came from the project, not from an assignment.
+    ///
+    /// Defaults to `false` so a panel talking to a backend that predates the field shows every task
+    /// as assigned rather than every task as up-for-grabs. Wrong in the quiet direction.
+    #[serde(default)]
+    pub unassigned: bool,
 }
 
 pub async fn fetch_tasks(
@@ -19,7 +34,10 @@ pub async fn fetch_tasks(
     ingest_url: &str,
     id_token: &str,
 ) -> Result<Vec<TaskDto>, String> {
-    let url = format!("{}/v1/me/tasks", ingest_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/v1/me/tasks?include_unassigned=true",
+        ingest_url.trim_end_matches('/')
+    );
     let resp = client
         .get(url)
         .bearer_auth(id_token)
@@ -63,6 +81,22 @@ mod tests {
         assert_eq!(ts.len(), 2);
         assert_eq!(ts[0].title, "Tray redesign");
         assert_eq!(ts[1].project_id, "p1");
+    }
+
+    /// The picker groups on this, so it has to survive the parse — and default the safe way when a
+    /// backend that predates the field answers. Every task reading "up for grabs" would be a far
+    /// louder wrong than none of them doing so.
+    #[test]
+    fn unclaimed_tasks_are_flagged_and_default_to_claimed() {
+        let json = r#"{"data":{"tasks":[
+            {"id":"k-1","title":"Mine","project_id":"p1","unassigned":false},
+            {"id":"k-2","title":"Nobody's","project_id":"p1","unassigned":true},
+            {"id":"k-3","title":"Old backend","project_id":"p1"}
+        ]}}"#;
+        let ts = parse_tasks(json).unwrap();
+        assert!(!ts[0].unassigned);
+        assert!(ts[1].unassigned);
+        assert!(!ts[2].unassigned, "an absent flag must not read as unclaimed");
     }
 
     #[test]

@@ -255,8 +255,8 @@ pub async fn list_projects(
     crate::api::projects::fetch_projects(&client, &ingest_url, &id_token).await
 }
 
-/// The signed-in user's assigned tasks (with titles) for the task picker — `GET /v1/me/tasks`.
-/// Empty when signed out.
+/// The tasks the picker offers — the signed-in user's own, plus the unclaimed work in projects
+/// they belong to (`GET /v1/me/tasks?include_unassigned=true`). Empty when signed out.
 #[tauri::command]
 pub async fn list_tasks(
     state: State<'_, AppState>,

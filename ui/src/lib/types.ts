@@ -93,6 +93,13 @@ export interface Task {
   project_id: string;
   project_name: string;
   billable: boolean;
+  /**
+   * Nobody has taken this task — it is offered to every member of its project.
+   *
+   * Starting a timer on one does **not** claim it: the time is recorded against the task and it
+   * stays available to everyone, which is why the picker labels it rather than hiding the fact.
+   */
+  unassigned: boolean;
 }
 
 /**

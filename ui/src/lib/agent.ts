@@ -81,6 +81,7 @@ interface TaskRow {
   id: string;
   title: string;
   project_id: string;
+  unassigned?: boolean;
 }
 
 /**
@@ -125,6 +126,9 @@ function joinTasks(rows: TaskRow[], projects: Project[]): Task[] {
       // as a raw id.
       project_name: p?.name ?? "Unassigned",
       billable: p?.billable ?? false,
+      // Absent means the backend predates the flag; read that as "assigned" so an old core doesn't
+      // make the whole picker look like a free-for-all.
+      unassigned: t.unassigned ?? false,
     };
   });
 }
