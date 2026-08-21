@@ -96,7 +96,10 @@ mod tests {
         let ts = parse_tasks(json).unwrap();
         assert!(!ts[0].unassigned);
         assert!(ts[1].unassigned);
-        assert!(!ts[2].unassigned, "an absent flag must not read as unclaimed");
+        assert!(
+            !ts[2].unassigned,
+            "an absent flag must not read as unclaimed"
+        );
     }
 
     #[test]
