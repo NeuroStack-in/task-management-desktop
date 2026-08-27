@@ -8,6 +8,7 @@ import {
   Plus,
   RefreshCw,
   Square,
+  UserCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -58,7 +59,11 @@ export function TimerCard({
   onToggle: (sel: TimerSelection) => void;
   onSwitch: (sel: TimerSelection) => void;
   /** Create a task in a project; resolves to its id (to select) or null on failure. */
-  onCreateTask: (projectId: string, title: string) => Promise<string | null>;
+  onCreateTask: (
+    projectId: string,
+    title: string,
+    opts?: { assignSelf?: boolean; due?: string; priority?: string },
+  ) => Promise<string | null>;
   onRefresh: () => Promise<void>;
 }) {
   // The poll already re-reads every second; this is for when the lists are visibly stale
@@ -91,6 +96,10 @@ export function TimerCard({
   const [creatingTask, setCreatingTask] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [creating, setCreating] = useState(false);
+  // Defaults: a task you make in your own agent is usually yours, at the server's default priority.
+  const [assignSelf, setAssignSelf] = useState(true);
+  const [due, setDue] = useState("");
+  const [priority, setPriority] = useState("medium");
 
   // Keep the controls pointed at whatever the core is actually timing — after a switch, or on a
   // remount while a session is live. Only while running: outside that, these are the user's
@@ -139,25 +148,36 @@ export function TimerCard({
     onToggle(selection());
   };
 
-  const openNewTask = () => {
+  const resetNewTask = () => {
     setNewTaskTitle("");
+    setAssignSelf(true);
+    setDue("");
+    setPriority("medium");
+  };
+
+  const openNewTask = () => {
+    resetNewTask();
     setCreatingTask(true);
   };
 
   const cancelNewTask = () => {
     setCreatingTask(false);
-    setNewTaskTitle("");
+    resetNewTask();
   };
 
   const submitNewTask = async () => {
     const title = newTaskTitle.trim();
     if (!projectId || !title || creating) return;
     setCreating(true);
-    const id = await onCreateTask(projectId, title);
+    const id = await onCreateTask(projectId, title, {
+      assignSelf,
+      due: due || undefined,
+      priority: priority || undefined,
+    });
     setCreating(false);
     if (!id) return; // failure already surfaced as the panel's action-error banner
-    setNewTaskTitle("");
     setCreatingTask(false);
+    resetNewTask();
     // Select the fresh task (and, if the label is empty, adopt its title); re-attribute live.
     setTaskId(id);
     if (!description.trim()) setDescription(title);
@@ -409,36 +429,76 @@ export function TimerCard({
         </div>
 
         {creatingTask && (
-          <div className="flex items-center gap-2">
-            <Input
-              autoFocus
-              aria-label="New task title"
-              placeholder={project ? `New task in ${project.name}` : "New task"}
-              value={newTaskTitle}
-              onValueChange={setNewTaskTitle}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void submitNewTask();
-                else if (e.key === "Escape") cancelNewTask();
-              }}
-              className="h-9 flex-1 border-transparent bg-white/15 px-3 text-[13px] text-feature-foreground ring-1 ring-inset ring-white/15 placeholder:text-feature-foreground/50 focus-visible:ring-2 focus-visible:ring-white/70"
-            />
-            <Button
-              size="sm"
-              onClick={() => void submitNewTask()}
-              disabled={creating || !newTaskTitle.trim()}
-              className="h-9 shrink-0 rounded-xl border-transparent bg-white/15 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25 disabled:opacity-60"
-            >
-              {creating ? "Adding…" : "Add"}
-            </Button>
-            <Button
-              size="sm"
-              onClick={cancelNewTask}
-              aria-label="Cancel new task"
-              title="Cancel"
-              className="size-9 shrink-0 rounded-xl border-transparent bg-white/10 p-0 text-feature-foreground ring-1 ring-inset ring-white/10 hover:bg-white/20"
-            >
-              <span aria-hidden>×</span>
-            </Button>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Input
+                autoFocus
+                aria-label="New task title"
+                placeholder={project ? `New task in ${project.name}` : "New task"}
+                value={newTaskTitle}
+                onValueChange={setNewTaskTitle}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void submitNewTask();
+                  else if (e.key === "Escape") cancelNewTask();
+                }}
+                className="h-9 flex-1 border-transparent bg-white/15 px-3 text-[13px] text-feature-foreground ring-1 ring-inset ring-white/15 placeholder:text-feature-foreground/50 focus-visible:ring-2 focus-visible:ring-white/70"
+              />
+              <Button
+                size="sm"
+                onClick={() => void submitNewTask()}
+                disabled={creating || !newTaskTitle.trim()}
+                className="h-9 shrink-0 rounded-xl border-transparent bg-white/15 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25 disabled:opacity-60"
+              >
+                {creating ? "Adding…" : "Add"}
+              </Button>
+              <Button
+                size="sm"
+                onClick={cancelNewTask}
+                aria-label="Cancel new task"
+                title="Cancel"
+                className="size-9 shrink-0 rounded-xl border-transparent bg-white/10 p-0 text-feature-foreground ring-1 ring-inset ring-white/10 hover:bg-white/20"
+              >
+                <span aria-hidden>×</span>
+              </Button>
+            </div>
+
+            {/* Assignee · due · priority — all optional; native controls, dark-schemed for the teal. */}
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setAssignSelf((v) => !v)}
+                aria-pressed={assignSelf}
+                title={assignSelf ? "Assigned to you — click to leave unassigned" : "Unassigned — click to assign to you"}
+                className={cn(
+                  "flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-[12px] font-medium ring-1 ring-inset transition-colors",
+                  assignSelf
+                    ? "bg-white/25 text-feature-foreground ring-white/30"
+                    : "bg-white/10 text-feature-foreground/70 ring-white/10",
+                )}
+              >
+                <UserCheck className="size-3.5" />
+                {assignSelf ? "Me" : "Unassigned"}
+              </button>
+              <input
+                type="date"
+                aria-label="Due date"
+                title="Due date (optional)"
+                value={due}
+                onChange={(e) => setDue((e.target as HTMLInputElement).value)}
+                className="h-8 min-w-0 flex-1 rounded-lg border-transparent bg-white/15 px-2 text-[12px] text-feature-foreground ring-1 ring-inset ring-white/15 [color-scheme:dark] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+              />
+              <select
+                aria-label="Priority"
+                title="Priority"
+                value={priority}
+                onChange={(e) => setPriority((e.target as HTMLSelectElement).value)}
+                className="h-8 shrink-0 rounded-lg border-transparent bg-white/15 px-2 text-[12px] text-feature-foreground ring-1 ring-inset ring-white/15 [color-scheme:dark] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </div>
           </div>
         )}
 

@@ -238,17 +238,35 @@ export async function stopTimer(): Promise<void> {
   await invoke<TimerState>("stop_timer");
 }
 
+/** Optional fields when creating a task; omitted ones take the server default. */
+export interface NewTaskOptions {
+  description?: string;
+  /** Assign the task to the signed-in user (vs. leaving it unassigned). */
+  assignSelf?: boolean;
+  /** Due date, `YYYY-MM-DD`. */
+  due?: string;
+  /** `low` | `medium` | `high`. */
+  priority?: string;
+}
+
 /**
- * Create a task in a project and return its id. The task lands unassigned (offered to everyone on
- * the project). The caller (useAgent) refreshes the lists after, so the new row arrives fully joined
- * on the next read; the id lets the picker select it immediately without waiting for that.
+ * Create a task in a project and return its id. Unassigned by default (offered to everyone on the
+ * project) unless `assignSelf`. The caller (useAgent) refreshes the lists after, so the new row
+ * arrives fully joined on the next read; the id lets the picker select it immediately.
  */
 export async function createTask(
   projectId: string,
   title: string,
-  description?: string,
+  opts: NewTaskOptions = {},
 ): Promise<string> {
-  const row = await invoke<TaskRow>("create_task", { projectId, title, description });
+  const row = await invoke<TaskRow>("create_task", {
+    projectId,
+    title,
+    description: opts.description,
+    assignSelf: opts.assignSelf,
+    due: opts.due,
+    priority: opts.priority,
+  });
   return row.id;
 }
 

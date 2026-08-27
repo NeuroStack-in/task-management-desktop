@@ -57,7 +57,11 @@ export interface Agent {
   /** Re-attribute a running timer without stopping the clock. */
   switchTo: (sel: TimerSelection) => void;
   /** Create a task in a project; resolves to its id (so the picker can select it) or null on failure. */
-  createTask: (projectId: string, title: string) => Promise<string | null>;
+  createTask: (
+    projectId: string,
+    title: string,
+    opts?: agent.NewTaskOptions,
+  ) => Promise<string | null>;
   requestPause: (secs: number) => void;
   signOut: () => void;
   /** Dismiss the idle prompt, keeping the timer running. */
@@ -221,12 +225,16 @@ export function useAgent(): Agent {
 
   // Not routed through `run` (fire-and-forget): the caller awaits the new task's id to select it.
   const createTask = useCallback(
-    async (projectId: string, title: string): Promise<string | null> => {
+    async (
+      projectId: string,
+      title: string,
+      opts?: agent.NewTaskOptions,
+    ): Promise<string | null> => {
       const t = title.trim();
       if (!projectId || !t) return null;
       setActionError(null);
       try {
-        const id = await agent.createTask(projectId, t);
+        const id = await agent.createTask(projectId, t, opts);
         await refresh(); // the new task joins the picker on the next read
         return id;
       } catch (e) {

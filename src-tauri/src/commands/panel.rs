@@ -279,19 +279,36 @@ pub async fn create_task(
     project_id: String,
     title: String,
     description: Option<String>,
+    assign_self: Option<bool>,
+    due: Option<String>,
+    priority: Option<String>,
 ) -> Result<crate::api::tasks::TaskDto, String> {
     let Some(id_token) = state.auth.id_token().await else {
         return Err("auth:expired".into());
     };
     let ingest_url = state.auth.config().ingest_url.clone();
     let client = crate::api::client::api_client();
+    // "Assign to me" resolves to the caller's own user id — the Cognito `sub`, which is exactly what
+    // the backend stores as the member/assignee id (`wp_platform::auth`: `user_id = sub`).
+    let assignee_id = if assign_self.unwrap_or(false) {
+        crate::auth::token::decode_id_claims(&id_token)
+            .map(|c| c.sub)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     crate::api::tasks::create_task(
         &client,
         &ingest_url,
         &id_token,
         &project_id,
         &title,
-        description.as_deref().unwrap_or(""),
+        crate::api::tasks::NewTaskFields {
+            description: description.as_deref().unwrap_or(""),
+            assignee_id: &assignee_id,
+            due: due.as_deref().unwrap_or(""),
+            priority: priority.as_deref().unwrap_or(""),
+        },
     )
     .await
 }

@@ -67,25 +67,47 @@ fn parse_tasks(text: &str) -> Result<Vec<TaskDto>, String> {
     serde_json::from_value(list).map_err(|e| format!("tasks:parse:{e}"))
 }
 
+/// Optional fields the panel can set when creating a task. Empty strings mean "omit" — the server
+/// then applies its own default (unassigned; no due date; `medium` priority).
+#[derive(Default)]
+pub struct NewTaskFields<'a> {
+    pub description: &'a str,
+    /// User id to assign (the caller's own `sub` for "assign to me"). Empty = unassigned, which is
+    /// the "offer it to everyone on the project" state the picker surfaces.
+    pub assignee_id: &'a str,
+    /// `YYYY-MM-DD`, or empty for no due date.
+    pub due: &'a str,
+    /// `low` | `medium` | `high`, or empty to let the server default to `medium`.
+    pub priority: &'a str,
+}
+
 /// `POST /v1/projects/{project_id}/tasks` — create a task from the panel. Only `title` is required;
-/// the task lands **unassigned** (no `assignee_ids`), which is exactly the "offer it to everyone on
-/// the project" state the picker already surfaces — so a just-created task shows up for the creator
-/// (and their teammates) to pick immediately. Same user Cognito JWT as the reads; the backend gates
-/// on the caller's per-project role.
+/// every field in [`NewTaskFields`] is optional and omitted from the body when empty. Same user
+/// Cognito JWT as the reads; the backend gates on the caller's per-project role (and, for an
+/// assignee, that they belong to the project).
 pub async fn create_task(
     client: &reqwest::Client,
     ingest_url: &str,
     id_token: &str,
     project_id: &str,
     title: &str,
-    description: &str,
+    fields: NewTaskFields<'_>,
 ) -> Result<TaskDto, String> {
     let url = format!(
         "{}/v1/projects/{}/tasks",
         ingest_url.trim_end_matches('/'),
         project_id
     );
-    let body = serde_json::json!({ "title": title, "description": description });
+    let mut body = serde_json::json!({ "title": title, "description": fields.description });
+    if !fields.assignee_id.is_empty() {
+        body["assignee_ids"] = serde_json::json!([fields.assignee_id]);
+    }
+    if !fields.due.is_empty() {
+        body["due"] = serde_json::json!(fields.due);
+    }
+    if !fields.priority.is_empty() {
+        body["priority"] = serde_json::json!(fields.priority);
+    }
     let resp = client
         .post(url)
         .bearer_auth(id_token)
