@@ -67,6 +67,54 @@ fn parse_tasks(text: &str) -> Result<Vec<TaskDto>, String> {
     serde_json::from_value(list).map_err(|e| format!("tasks:parse:{e}"))
 }
 
+/// `POST /v1/projects/{project_id}/tasks` — create a task from the panel. Only `title` is required;
+/// the task lands **unassigned** (no `assignee_ids`), which is exactly the "offer it to everyone on
+/// the project" state the picker already surfaces — so a just-created task shows up for the creator
+/// (and their teammates) to pick immediately. Same user Cognito JWT as the reads; the backend gates
+/// on the caller's per-project role.
+pub async fn create_task(
+    client: &reqwest::Client,
+    ingest_url: &str,
+    id_token: &str,
+    project_id: &str,
+    title: &str,
+    description: &str,
+) -> Result<TaskDto, String> {
+    let url = format!(
+        "{}/v1/projects/{}/tasks",
+        ingest_url.trim_end_matches('/'),
+        project_id
+    );
+    let body = serde_json::json!({ "title": title, "description": description });
+    let resp = client
+        .post(url)
+        .bearer_auth(id_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("create_task:network:{e}"))?;
+    let status = resp.status();
+    if status.as_u16() == 401 {
+        return Err("auth:expired".into());
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("create_task:read:{e}"))?;
+    if !status.is_success() {
+        return Err(format!("create_task:status:{}:{text}", status.as_u16()));
+    }
+    parse_task(&text)
+}
+
+/// Unwrap `{ "data": { ...TaskView } }` into the picker's `TaskDto` (extra fields serde-dropped).
+fn parse_task(text: &str) -> Result<TaskDto, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("create_task:parse:{e}"))?;
+    let inner = value.get("data").cloned().unwrap_or(value);
+    serde_json::from_value(inner).map_err(|e| format!("create_task:parse:{e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -40,6 +40,7 @@ function Panel() {
     grantConsent,
     toggleTimer,
     switchTo,
+    createTask,
     requestPause,
     signOut,
     dismissIdle,
@@ -292,6 +293,7 @@ function Panel() {
           tasks={tasks}
           onToggle={toggleTimer}
           onSwitch={switchTo}
+          onCreateTask={createTask}
           onRefresh={refresh}
         />
 

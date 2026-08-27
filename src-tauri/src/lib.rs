@@ -218,6 +218,7 @@ pub fn run() {
             commands::panel::identity,
             commands::panel::list_projects,
             commands::panel::list_tasks,
+            commands::panel::create_task,
             commands::panel::list_sessions,
             commands::panel::take_pending_resume,
             commands::panel::privacy_log,

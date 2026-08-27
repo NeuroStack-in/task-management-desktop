@@ -238,6 +238,20 @@ export async function stopTimer(): Promise<void> {
   await invoke<TimerState>("stop_timer");
 }
 
+/**
+ * Create a task in a project and return its id. The task lands unassigned (offered to everyone on
+ * the project). The caller (useAgent) refreshes the lists after, so the new row arrives fully joined
+ * on the next read; the id lets the picker select it immediately without waiting for that.
+ */
+export async function createTask(
+  projectId: string,
+  title: string,
+  description?: string,
+): Promise<string> {
+  const row = await invoke<TaskRow>("create_task", { projectId, title, description });
+  return row.id;
+}
+
 /** The task the agent was running when it last closed. See {@link takePendingResume}. */
 export interface PendingResume {
   taskId: string;

@@ -5,6 +5,7 @@ import {
   Hand,
   ListChecks,
   Play,
+  Plus,
   RefreshCw,
   Square,
 } from "lucide-react";
@@ -48,6 +49,7 @@ export function TimerCard({
   tasks,
   onToggle,
   onSwitch,
+  onCreateTask,
   onRefresh,
 }: {
   timer: TimerState;
@@ -55,6 +57,8 @@ export function TimerCard({
   tasks: Task[];
   onToggle: (sel: TimerSelection) => void;
   onSwitch: (sel: TimerSelection) => void;
+  /** Create a task in a project; resolves to its id (to select) or null on failure. */
+  onCreateTask: (projectId: string, title: string) => Promise<string | null>;
   onRefresh: () => Promise<void>;
 }) {
   // The poll already re-reads every second; this is for when the lists are visibly stale
@@ -80,6 +84,13 @@ export function TimerCard({
   // `onMouseDown` so it wins the race against the input's blur closing the list.
   const [descFocused, setDescFocused] = useState(false);
   const suggestions = descFocused && !timer.running ? suggestHistory(description) : [];
+
+  // Inline "New task" composer — a task can be created in the selected project without leaving the
+  // panel (the whole point of "task creation inside the application"). It lands unassigned, then is
+  // selected here so the user can start timing it straight away.
+  const [creatingTask, setCreatingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState("");
+  const [creating, setCreating] = useState(false);
 
   // Keep the controls pointed at whatever the core is actually timing — after a switch, or on a
   // remount while a session is live. Only while running: outside that, these are the user's
@@ -126,6 +137,31 @@ export function TimerCard({
     // next time (fold grain is (project, description) — retyping variants splits timesheet rows).
     if (!timer.running) recordHistory(description);
     onToggle(selection());
+  };
+
+  const openNewTask = () => {
+    setNewTaskTitle("");
+    setCreatingTask(true);
+  };
+
+  const cancelNewTask = () => {
+    setCreatingTask(false);
+    setNewTaskTitle("");
+  };
+
+  const submitNewTask = async () => {
+    const title = newTaskTitle.trim();
+    if (!projectId || !title || creating) return;
+    setCreating(true);
+    const id = await onCreateTask(projectId, title);
+    setCreating(false);
+    if (!id) return; // failure already surfaced as the panel's action-error banner
+    setNewTaskTitle("");
+    setCreatingTask(false);
+    // Select the fresh task (and, if the label is empty, adopt its title); re-attribute live.
+    setTaskId(id);
+    if (!description.trim()) setDescription(title);
+    if (timer.running) onSwitch(selection({ taskId: id }));
   };
 
   /**
@@ -304,7 +340,9 @@ export function TimerCard({
           <HeroPicker
             icon={ListChecks}
             label={task?.title ?? "Select task (optional)"}
-            disabled={inProject.length === 0}
+            // Enabled whenever a project is picked, even with zero tasks — that's how you reach
+            // "New task…" below to create the first one.
+            disabled={!projectId}
             // Matches the project picker. It was `w-[19rem]` (304px): anchored `align="start"` from
             // this trigger — which sits in the right half of the row — a 304px popup overran the
             // 392px content area, so the positioner shifted it ~46px left to keep it on screen. The
@@ -330,6 +368,20 @@ export function TimerCard({
                 {unclaimed.map((t) => renderTask(t))}
               </>
             )}
+
+            {inProject.length === 0 && (
+              <p className="px-1.5 py-1 text-xs text-muted-foreground/70">
+                No tasks in this project yet.
+              </p>
+            )}
+            {/* Create a task without leaving the panel — it lands unassigned and is selected below. */}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={openNewTask} className="gap-2.5 rounded-lg px-1.5 py-1.5">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Plus className="size-4" />
+              </span>
+              <span className="flex-1 font-medium">New task…</span>
+            </DropdownMenuItem>
           </HeroPicker>
 
           {/* Same translucent treatment as the pickers either side — a semantic fill would
@@ -355,6 +407,40 @@ export function TimerCard({
             {timer.running ? "Stop" : "Start"}
           </Button>
         </div>
+
+        {creatingTask && (
+          <div className="flex items-center gap-2">
+            <Input
+              autoFocus
+              aria-label="New task title"
+              placeholder={project ? `New task in ${project.name}` : "New task"}
+              value={newTaskTitle}
+              onValueChange={setNewTaskTitle}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitNewTask();
+                else if (e.key === "Escape") cancelNewTask();
+              }}
+              className="h-9 flex-1 border-transparent bg-white/15 px-3 text-[13px] text-feature-foreground ring-1 ring-inset ring-white/15 placeholder:text-feature-foreground/50 focus-visible:ring-2 focus-visible:ring-white/70"
+            />
+            <Button
+              size="sm"
+              onClick={() => void submitNewTask()}
+              disabled={creating || !newTaskTitle.trim()}
+              className="h-9 shrink-0 rounded-xl border-transparent bg-white/15 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25 disabled:opacity-60"
+            >
+              {creating ? "Adding…" : "Add"}
+            </Button>
+            <Button
+              size="sm"
+              onClick={cancelNewTask}
+              aria-label="Cancel new task"
+              title="Cancel"
+              className="size-9 shrink-0 rounded-xl border-transparent bg-white/10 p-0 text-feature-foreground ring-1 ring-inset ring-white/10 hover:bg-white/20"
+            >
+              <span aria-hidden>×</span>
+            </Button>
+          </div>
+        )}
 
         <p className="text-[11px] text-feature-foreground/70">
           {timer.running
