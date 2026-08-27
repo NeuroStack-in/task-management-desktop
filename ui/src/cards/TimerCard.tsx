@@ -140,13 +140,13 @@ export function TimerCard({
         key={t.id}
         onClick={() => chooseTask(t)}
         className={cn(
-          "items-start gap-2.5 rounded-lg px-1.5 py-1.5",
+          "items-center gap-2.5 rounded-lg px-1.5 py-1.5",
           (isActive || isSel) && "bg-accent/60",
         )}
       >
         <span
           className={cn(
-            "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md",
+            "flex size-7 shrink-0 items-center justify-center rounded-md",
             isActive
               ? "bg-success/15 text-success"
               : t.unassigned
@@ -185,11 +185,8 @@ export function TimerCard({
               </Badge>
             )}
           </span>
-          <span className="tabular block truncate text-[0.7rem] text-muted-foreground">
-            {t.id}
-          </span>
         </span>
-        {isSel && <Check className="mt-0.5 size-4 shrink-0 text-primary" />}
+        {isSel && <Check className="size-4 shrink-0 text-primary" />}
       </DropdownMenuItem>
     );
   };
