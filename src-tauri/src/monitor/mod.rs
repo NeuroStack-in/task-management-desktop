@@ -37,6 +37,22 @@ const IDLE_PROMPT_SECS: u64 = 300;
 const HEARTBEAT_IDLE_SECS: u64 = 60;
 /// Hard-stop the timer after this much continuous idle (no productive time is invented).
 const AUTO_STOP_SECS: u64 = 900;
+/// A tick gap beyond this means the process wasn't running — the machine slept, hibernated, or the
+/// lid shut. The loop ticks every 1 s, so this is generous enough that scheduler jitter, a busy
+/// machine, or a slow disk can never look like a suspend.
+const SUSPEND_GAP_MS: i64 = 90_000;
+/// How often the running session's liveness note is rewritten to disk. Bounds how much of a
+/// crashed session's time is unknowable: the record can be at most this stale.
+const ALIVE_HEARTBEAT_TICKS: u64 = 15;
+
+/// The last instant the agent can prove it was awake, given this tick's `now` and the gap that
+/// preceded it.
+///
+/// Trivial arithmetic, named because the subtraction is the entire point: get it backwards and the
+/// timer stops at the wake instead of the sleep, billing the night.
+fn last_wake_ms(now: i64, gap: i64) -> i64 {
+    now - gap
+}
 
 /// What the idle thresholds say to do this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +255,10 @@ fn run(app: AppHandle) {
     // two are different, and conflating them is what disabled the idle auto-stop for anyone who
     // hadn't consented. Named for what it actually gates: sealing the open minute bucket.
     let mut was_capturing = false;
+    // Wall-clock of the previous tick, for suspend detection. Seeded with now so the first pass
+    // after launch can't read as a 55-year gap.
+    let mut last_tick_ms = crate::clock::now_epoch_ms();
+    let mut alive_tick: u64 = 0;
     let mut idle_prompted = false;
     // identifier → last time it was warned/reported (the violation debounce).
     let mut last_violation: std::collections::HashMap<String, i64> =
@@ -272,6 +292,46 @@ fn run(app: AppHandle) {
 
         // Needed by the idle auto-stop below, which runs whether or not capture does.
         let now = clock::now_epoch_ms();
+
+        // ── Woke from suspend ───────────────────────────────────────────────────────────────
+        //
+        // This loop ticks once a second, so a gap materially larger than that means the process was
+        // not running: the machine slept, hibernated, or someone shut the lid. Windows announces
+        // some of those through `WM_POWERBROADCAST` and tao surfaces none of them, so the wall
+        // clock is the signal that actually works here — and it has the advantage of catching every
+        // variant at once, including a hard freeze that no power event would describe.
+        //
+        // **Backdated to the last tick, never to now.** Those hours were not worked. Stopping at
+        // `now` would bill the entire time the laptop spent shut, which is precisely the outcome
+        // this exists to prevent; `last_tick_ms` is the most recent instant the agent can prove it
+        // was awake.
+        //
+        // Idle detection cannot cover this on its own: `user-idle` reports seconds since the last
+        // input, and after a wake that number may be reset by the unlock keystroke — so a machine
+        // that slept for nine hours can come back looking freshly active.
+        let gap = now - last_tick_ms;
+        last_tick_ms = now;
+        if running && gap > SUSPEND_GAP_MS {
+            let ev = state
+                .timer
+                .lock()
+                .unwrap()
+                .stop(last_wake_ms(now, gap), StopReason::Idle);
+            if let Some(e) = ev {
+                state.pending_events.lock().unwrap().push(e);
+                state.flush.notify_one();
+            }
+            bucketer.seal();
+            was_capturing = false;
+            idle_prompted = false;
+            let _ = app.emit(events::TRACKING_CHANGED, ());
+            crate::session_state::update(|s| s.open = None);
+            tracing::info!(
+                gap_secs = gap / 1000,
+                "woke from suspend; stopped the timer at the last awake tick"
+            );
+            continue;
+        }
 
         if running && consented && !paused && activity_enabled {
             let (kb, mouse) = sampler.sample();
@@ -406,6 +466,27 @@ fn run(app: AppHandle) {
             }
         }
 
+        // ── The crash-recovery note ─────────────────────────────────────────────────────────
+        //
+        // Every ending the agent can *observe* closes the session itself. This covers the ones it
+        // cannot: a panic, Task Manager, a power cut. The running session is written to disk with
+        // the time it was last seen alive, and `lifecycle::recover_open_session` closes it at that
+        // instant on the next launch — so an unclean exit costs at most one heartbeat of accuracy
+        // instead of leaving the session open indefinitely.
+        alive_tick = alive_tick.wrapping_add(1);
+        if alive_tick.is_multiple_of(ALIVE_HEARTBEAT_TICKS) {
+            let open = state.timer.lock().unwrap().active_session(false).map(|a| {
+                crate::session_state::OpenSession {
+                    session_id: a.session_id,
+                    started_at: a.started_at,
+                    last_alive_ms: now,
+                }
+            });
+            // Written on both edges: a stopped timer must CLEAR the note, or a session that ended
+            // cleanly hours ago would be "recovered" and closed a second time after a later crash.
+            crate::session_state::update(|s| s.open = open);
+        }
+
         let sealed = bucketer.take_sealed();
         if !sealed.is_empty() {
             state.pending_activity.lock().unwrap().extend(sealed);
@@ -428,6 +509,37 @@ fn run(app: AppHandle) {
 #[cfg(test)]
 mod idle_action_tests {
     use super::*;
+
+    /// An eight-hour sleep must close the timer at the moment it went to sleep, not at the wake.
+    ///
+    /// The sign here is the whole feature. Backwards, and a laptop shut at 18:00 and opened at
+    /// 09:00 bills the entire night as worked time — silently, since every number involved is real.
+    #[test]
+    fn a_suspend_is_backdated_to_the_last_awake_tick() {
+        // Woke at t=8h having last ticked at t=0.
+        let eight_hours = 8 * 60 * 60 * 1000;
+        let now = 1_700_000_000_000 + eight_hours;
+        assert_eq!(last_wake_ms(now, eight_hours), 1_700_000_000_000);
+        // The stop instant must precede the wake, never follow it.
+        assert!(last_wake_ms(now, eight_hours) < now);
+    }
+
+    /// Normal ticks must never be mistaken for a suspend — a false positive stops a timer while
+    /// someone is working, which is worse than the bug it guards against.
+    #[test]
+    fn ordinary_jitter_is_not_a_suspend() {
+        // A 1 s loop under load: even a very late tick is nowhere near the threshold.
+        for gap_ms in [1_000, 2_000, 10_000, 60_000] {
+            assert!(
+                gap_ms < SUSPEND_GAP_MS,
+                "{gap_ms}ms must not read as a suspend"
+            );
+        }
+        // A real sleep is unmistakable.
+        for gap_ms in [5 * 60_000, 60 * 60_000, 8 * 60 * 60_000] {
+            assert!(gap_ms > SUSPEND_GAP_MS, "{gap_ms}ms must read as a suspend");
+        }
+    }
 
     /// The regression this function exists for.
     ///

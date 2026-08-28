@@ -30,6 +30,28 @@ pub struct ResumeTask {
     pub stopped_at_ms: i64,
 }
 
+/// A session that was running when this file was last written — the crash-recovery record.
+///
+/// The clean exits (tray Quit, Windows sign-out, auto-update) all close the session themselves.
+/// This exists for the endings where **no code of ours runs at all**: a panic, Task Manager, a
+/// power cut, a battery dying. Nothing can emit a `TimerStopped` at the moment of such an ending,
+/// so the agent instead leaves a note on disk while it runs and reads it back on the next launch.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenSession {
+    pub session_id: String,
+    /// Epoch ms the session began — the contract requires it on `TimerStopped` so a session
+    /// crossing midnight folds into one row rather than two orphaned halves.
+    pub started_at: i64,
+    /// Epoch ms of the last tick that saw this session alive.
+    ///
+    /// **This, not the recovery time, is what the session is closed at.** The moment of a crash is
+    /// unknowable; the last moment the agent was demonstrably running is not. Closing at "now"
+    /// would bill every hour the machine spent switched off, and closing at `started_at` would
+    /// discard work that really happened. Refreshed on a cadence, so the error is bounded by that
+    /// interval rather than by how long the machine stayed down.
+    pub last_alive_ms: i64,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionState {
     /// Whether the monitoring notice has been accepted.
@@ -40,6 +62,11 @@ pub struct SessionState {
     pub consent_policy_version: u64,
     #[serde(default)]
     pub resume: Option<ResumeTask>,
+    /// The session running as of the last heartbeat — see [`OpenSession`]. `None` whenever the
+    /// timer is stopped, and cleared by every clean exit, so a value here on startup means the
+    /// previous run ended without one.
+    #[serde(default)]
+    pub open: Option<OpenSession>,
 }
 
 impl SessionState {
@@ -125,6 +152,7 @@ mod tests {
                 description: "Writing the fold".into(),
                 stopped_at_ms,
             }),
+            open: None,
         }
     }
 

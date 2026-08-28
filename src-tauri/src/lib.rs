@@ -248,6 +248,12 @@ pub fn run() {
                 );
             }
 
+            // Close any session the previous run left open — a crash, a force-kill, a power cut.
+            // **Before the threads below and before the webview can start a timer**: recovery emits
+            // a `TimerStopped` for the OLD session, and a new one starting first would interleave
+            // two sessions in the outbox and leave the server to guess the order.
+            crate::lifecycle::recover_open_session(app.handle());
+
             tauri::async_runtime::spawn(async move {
                 let restored = handle.state::<AppState>().auth.restore().await;
                 tracing::info!("auth restore at startup: {restored}");
