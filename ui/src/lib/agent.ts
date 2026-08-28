@@ -176,12 +176,20 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
 
 // ── auth ─────────────────────────────────────────────────────────────────────
 
+/** The account's stored appearance (`GET /v1/me/appearance`). */
+export interface Appearance {
+  /** `"light"`, `"dark"`, or `"system"` — the last an explicit choice, not an absence. */
+  theme: string;
+  /** One of the web app's palette ids (`fireopal`, `meridian`, …). May be empty. */
+  palette: string;
+}
+
 /**
- * The theme stored on the account (`GET /v1/me/appearance`), or `null` when signed out or
- * unreachable — the panel then keeps what it is showing rather than flipping to a default.
+ * The appearance stored on the account, or `null` when signed out or unreachable — the panel then
+ * keeps what it is showing rather than flipping to a default.
  */
-export function getAppearance(): Promise<string | null> {
-  return invoke<string | null>("appearance");
+export function getAppearance(): Promise<Appearance | null> {
+  return invoke<Appearance | null>("appearance");
 }
 
 export function authStatus(): Promise<AuthStatus> {

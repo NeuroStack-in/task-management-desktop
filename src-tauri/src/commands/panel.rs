@@ -262,16 +262,18 @@ pub async fn list_projects(
 /// Deliberately not an error: a theme that failed to load is not worth an error state, and failing
 /// loudly here would put a red banner on a working agent.
 #[tauri::command]
-pub async fn appearance(state: State<'_, AppState>) -> Result<Option<String>, String> {
+pub async fn appearance(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::api::appearance::AppearanceDto>, String> {
     let Some(id_token) = state.auth.id_token().await else {
         return Ok(None);
     };
     let ingest_url = state.auth.config().ingest_url.clone();
     let client = crate::api::client::api_client();
     match crate::api::appearance::fetch_appearance(&client, &ingest_url, &id_token).await {
-        Ok(a) => Ok(Some(a.theme)),
+        Ok(a) => Ok(Some(a)),
         Err(e) => {
-            tracing::debug!("appearance unavailable ({e}); panel keeps its current theme");
+            tracing::debug!("appearance unavailable ({e}); panel keeps its current look");
             Ok(None)
         }
     }

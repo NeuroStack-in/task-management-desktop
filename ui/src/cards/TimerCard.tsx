@@ -135,17 +135,28 @@ export function TimerCard({
 
   const chooseTask = (t: Task) => {
     setTaskId(t.id);
-    // Autofill the label with the task's title — but only into an EMPTY field, never over what
-    // the person typed (the description is the timesheet row's label, so their words win).
-    if (!description.trim()) setDescription(t.title);
+    // The task's title is deliberately NOT copied into the description any more. It used to fill an
+    // empty field, which meant the commonest way to start a timer was to accept a label nobody
+    // wrote — and a timesheet full of task titles says what the work was filed under, not what was
+    // done. The field is required now, so it has to be answered rather than pre-answered.
     if (timer.running) onSwitch(selection({ taskId: t.id }));
   };
 
   const toggle = () => {
-    // Remember the description of every session actually started, so the field can suggest it
-    // next time (fold grain is (project, description) — retyping variants splits timesheet rows).
-    if (!timer.running) recordHistory(description);
+    if (!timer.running) {
+      // Remember the description of every session actually started, so the field can *suggest* it
+      // next time (fold grain is (project, description) — retyping variants splits timesheet rows).
+      // A suggestion still has to be clicked; it never fills the field on its own.
+      recordHistory(description);
+      onToggle(selection());
+      return;
+    }
     onToggle(selection());
+    // Stopping clears the label. The component's state outlives a session, so the field used to
+    // still hold the last session's text — and the next Start would silently reuse it, attributing
+    // new work to whatever was done before. Blank is the honest starting point.
+    setDescription("");
+    setTaskId(null);
   };
 
   const resetNewTask = () => {
@@ -178,9 +189,9 @@ export function TimerCard({
     if (!id) return; // failure already surfaced as the panel's action-error banner
     setCreatingTask(false);
     resetNewTask();
-    // Select the fresh task (and, if the label is empty, adopt its title); re-attribute live.
+    // Select the fresh task; re-attribute live. As in `chooseTask`, the title is not copied into
+    // the description — see the note there.
     setTaskId(id);
-    if (!description.trim()) setDescription(title);
     if (timer.running) onSwitch(selection({ taskId: id }));
   };
 
@@ -247,8 +258,19 @@ export function TimerCard({
     );
   };
 
-  const canStart = Boolean(projectId);
-  const status = timer.running ? "Recording" : canStart ? "Ready" : "Select a project";
+  // A description is **required**, not encouraged. It is the timesheet row's label, and a blank
+  // one produces a row nobody can account for later — which is exactly when it gets queried.
+  const described = description.trim().length > 0;
+  const canStart = Boolean(projectId) && described;
+  // Name the missing thing rather than a generic "can't start": the two are fixed in different
+  // controls, and "Ready" appearing only when both are done is what teaches the rule.
+  const status = timer.running
+    ? "Recording"
+    : !projectId
+      ? "Select a project"
+      : !described
+        ? "Describe your work"
+        : "Ready";
 
   return (
     <PanelCard
@@ -507,7 +529,7 @@ export function TimerCard({
             ? "Tracking — switching project or task re-attributes without stopping the clock."
             : projects.length === 0
               ? "No projects yet. Ask your admin to add you to one, then hit refresh."
-              : "Pick a project and describe what you're doing. A task is optional."}
+              : "Pick a project and describe what you're doing — both are required. A task is optional."}
         </p>
       </CardContent>
     </PanelCard>

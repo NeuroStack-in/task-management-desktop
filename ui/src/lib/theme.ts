@@ -17,6 +17,13 @@ export type Theme = "light" | "dark";
 export type ThemePref = Theme | "system";
 
 const STORAGE_KEY = "wp-tray-theme";
+const PALETTE_KEY = "wp-tray-palette";
+
+/**
+ * The palette the panel falls back to with nothing stored — Slate & Teal, the one it shipped with,
+ * declared unconditionally on `:root` in index.css.
+ */
+export const FALLBACK_PALETTE = "teal";
 
 /**
  * Resolve a stored preference to something paintable.
@@ -51,5 +58,36 @@ export function applyTheme(theme: Theme) {
     localStorage.setItem(STORAGE_KEY, theme);
   } catch {
     // Non-fatal: the theme still applies for this session.
+  }
+}
+
+/** The cached palette from the last run, for a correct first paint. */
+export function readPalette(): string {
+  try {
+    return localStorage.getItem(PALETTE_KEY) || FALLBACK_PALETTE;
+  } catch {
+    return FALLBACK_PALETTE;
+  }
+}
+
+/**
+ * Apply the account's palette by stamping `data-palette` on `<html>`, exactly as the web app does.
+ *
+ * The panel used to ship one palette while the web app shipped fourteen, so someone on Fire Opal
+ * had an orange web app and a teal panel and no way to reconcile them. index.css now carries all
+ * fourteen, scoped by this attribute.
+ *
+ * An unknown id is ignored rather than stamped: a palette the panel's CSS doesn't define would
+ * leave `:root` in force, which is the right outcome, but stamping it would still misreport what
+ * the panel is showing to anything that reads the attribute back.
+ */
+export function applyPalette(palette: string) {
+  const id = palette.trim().toLowerCase();
+  if (!id) return;
+  document.documentElement.setAttribute("data-palette", id);
+  try {
+    localStorage.setItem(PALETTE_KEY, id);
+  } catch {
+    // Non-fatal: the palette still applies for this session.
   }
 }
