@@ -437,30 +437,50 @@ mod idle_action_tests {
     #[test]
     fn a_running_timer_stops_after_the_hard_idle_limit() {
         assert_eq!(idle_action(true, AUTO_STOP_SECS, false), IdleAction::Stop);
-        assert_eq!(idle_action(true, AUTO_STOP_SECS + 3600, true), IdleAction::Stop);
+        assert_eq!(
+            idle_action(true, AUTO_STOP_SECS + 3600, true),
+            IdleAction::Stop
+        );
         // Stopping outranks prompting: past the limit there is nothing left to ask.
         assert_eq!(idle_action(true, AUTO_STOP_SECS, true), IdleAction::Stop);
     }
 
     #[test]
     fn the_prompt_fires_once_then_stays_quiet() {
-        assert_eq!(idle_action(true, IDLE_PROMPT_SECS, false), IdleAction::Prompt);
+        assert_eq!(
+            idle_action(true, IDLE_PROMPT_SECS, false),
+            IdleAction::Prompt
+        );
         // Already asked — don't nag every second for the next ten minutes.
-        assert_eq!(idle_action(true, IDLE_PROMPT_SECS + 60, true), IdleAction::None);
+        assert_eq!(
+            idle_action(true, IDLE_PROMPT_SECS + 60, true),
+            IdleAction::None
+        );
     }
 
     #[test]
     fn an_active_user_is_left_alone() {
         assert_eq!(idle_action(true, 0, false), IdleAction::None);
-        assert_eq!(idle_action(true, IDLE_PROMPT_SECS - 1, false), IdleAction::None);
+        assert_eq!(
+            idle_action(true, IDLE_PROMPT_SECS - 1, false),
+            IdleAction::None
+        );
     }
 
     /// No timer ⇒ nothing to stop and nothing to ask, however long the machine has been idle.
     #[test]
     fn a_stopped_timer_is_never_acted_on() {
         for idle in [0, IDLE_PROMPT_SECS, AUTO_STOP_SECS, AUTO_STOP_SECS * 10] {
-            assert_eq!(idle_action(false, idle, false), IdleAction::None, "idle={idle}");
-            assert_eq!(idle_action(false, idle, true), IdleAction::None, "idle={idle}");
+            assert_eq!(
+                idle_action(false, idle, false),
+                IdleAction::None,
+                "idle={idle}"
+            );
+            assert_eq!(
+                idle_action(false, idle, true),
+                IdleAction::None,
+                "idle={idle}"
+            );
         }
     }
 
@@ -469,7 +489,10 @@ mod idle_action_tests {
     fn the_prompt_comes_before_the_stop() {
         // Runtime bindings so the comparison isn't const-folded (`clippy::assertions_on_constants`).
         let (prompt, stop) = (IDLE_PROMPT_SECS, AUTO_STOP_SECS);
-        assert!(prompt < stop, "prompt {prompt}s must come before stop {stop}s");
+        assert!(
+            prompt < stop,
+            "prompt {prompt}s must come before stop {stop}s"
+        );
     }
 }
 
