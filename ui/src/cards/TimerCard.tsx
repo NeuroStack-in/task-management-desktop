@@ -16,6 +16,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { PanelCard } from "@/components/panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SubtaskStrip } from "./SubtaskStrip";
 import { CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
@@ -28,7 +29,7 @@ import {
 import { recordHistory, suggestHistory } from "@/lib/descriptionHistory";
 import { formatElapsed } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { Project, Task, TimerSelection, TimerState } from "@/lib/types";
+import type { Project, Subtask, Task, TimerSelection, TimerState } from "@/lib/types";
 
 /**
  * The timer hero, mirroring the web app's Time Tracking hero
@@ -51,6 +52,8 @@ export function TimerCard({
   onToggle,
   onSwitch,
   onCreateTask,
+  onCreateSubtask,
+  onSetSubtaskDone,
   onRefresh,
 }: {
   timer: TimerState;
@@ -58,6 +61,13 @@ export function TimerCard({
   tasks: Task[];
   onToggle: (sel: TimerSelection) => void;
   onSwitch: (sel: TimerSelection) => void;
+  onCreateSubtask: (projectId: string, taskId: string, title: string) => Promise<Subtask | null>;
+  onSetSubtaskDone: (
+    projectId: string,
+    taskId: string,
+    subtaskId: string,
+    done: boolean,
+  ) => Promise<boolean>;
   /** Create a task in a project; resolves to its id (to select) or null on failure. */
   onCreateTask: (
     projectId: string,
@@ -84,6 +94,9 @@ export function TimerCard({
   // timesheet row the moment someone hits Start without looking. Empty until chosen.
   const [projectId, setProjectId] = useState<string>(() => timer.project_id ?? "");
   const [taskId, setTaskId] = useState<string | null>(() => timer.task_id);
+  // The subtask the timer will target. Null = the task itself, which is every task with no
+  // breakdown and the default for one that has.
+  const [subtaskId, setSubtaskId] = useState<string | null>(() => timer.subtask_id);
   const [description, setDescription] = useState(timer.description);
   // Recent-description suggestions render only while the field is focused; selection happens on
   // `onMouseDown` so it wins the race against the input's blur closing the list.
@@ -108,8 +121,15 @@ export function TimerCard({
     if (!timer.running) return;
     setProjectId(timer.project_id ?? "");
     setTaskId(timer.task_id);
+    setSubtaskId(timer.subtask_id);
     setDescription(timer.description);
-  }, [timer.running, timer.project_id, timer.task_id, timer.description]);
+  }, [
+    timer.running,
+    timer.project_id,
+    timer.task_id,
+    timer.subtask_id,
+    timer.description,
+  ]);
 
   const project = projects.find((p) => p.id === projectId) ?? null;
   const inProject = tasks.filter((t) => t.project_id === projectId);
@@ -121,6 +141,7 @@ export function TimerCard({
 
   const selection = (over: Partial<TimerSelection> = {}): TimerSelection => ({
     taskId,
+    subtaskId,
     projectId: projectId || null,
     description: description.trim(),
     ...over,
@@ -130,16 +151,22 @@ export function TimerCard({
     setProjectId(p.id);
     // The old task belongs to the old project; keeping it would misattribute the session.
     setTaskId(null);
-    if (timer.running) onSwitch(selection({ projectId: p.id, taskId: null }));
+    setSubtaskId(null);
+    if (timer.running) {
+      onSwitch(selection({ projectId: p.id, taskId: null, subtaskId: null }));
+    }
   };
 
   const chooseTask = (t: Task) => {
     setTaskId(t.id);
+    // A subtask belongs to the task it was broken out of; carrying it across would file the time
+    // under a breakdown of something else entirely.
+    setSubtaskId(null);
     // The task's title is deliberately NOT copied into the description any more. It used to fill an
     // empty field, which meant the commonest way to start a timer was to accept a label nobody
     // wrote — and a timesheet full of task titles says what the work was filed under, not what was
     // done. The field is required now, so it has to be answered rather than pre-answered.
-    if (timer.running) onSwitch(selection({ taskId: t.id }));
+    if (timer.running) onSwitch(selection({ taskId: t.id, subtaskId: null }));
   };
 
   const toggle = () => {
@@ -157,6 +184,7 @@ export function TimerCard({
     // new work to whatever was done before. Blank is the honest starting point.
     setDescription("");
     setTaskId(null);
+    setSubtaskId(null);
   };
 
   const resetNewTask = () => {
@@ -192,7 +220,8 @@ export function TimerCard({
     // Select the fresh task; re-attribute live. As in `chooseTask`, the title is not copied into
     // the description — see the note there.
     setTaskId(id);
-    if (timer.running) onSwitch(selection({ taskId: id }));
+    setSubtaskId(null);
+    if (timer.running) onSwitch(selection({ taskId: id, subtaskId: null }));
   };
 
   /**
@@ -449,6 +478,26 @@ export function TimerCard({
             {timer.running ? "Stop" : "Start"}
           </Button>
         </div>
+
+        {/* The breakdown under the chosen task. Renders only once a task is picked — before that
+            there is nothing to break down, and an empty strip under an empty picker would read as
+            a second prompt for one decision. */}
+        <SubtaskStrip
+          task={task}
+          selectedId={subtaskId}
+          activeId={timer.subtask_id}
+          running={timer.running}
+          onPick={(id) => {
+            setSubtaskId(id);
+            // Retarget a live session immediately, the same rule the task picker follows — the
+            // clock keeps running and the time from here on files against the new target.
+            if (timer.running) onSwitch(selection({ subtaskId: id }));
+          }}
+          onAdd={(title) => onCreateSubtask(projectId, task?.id ?? "", title)}
+          onSetDone={(sub, done) =>
+            onSetSubtaskDone(projectId, sub.task_id || (task?.id ?? ""), sub.id, done)
+          }
+        />
 
         {creatingTask && (
           <div className="flex flex-col gap-1.5">

@@ -41,6 +41,8 @@ function Panel() {
     toggleTimer,
     switchTo,
     createTask,
+    createSubtask,
+    setSubtaskDone,
     requestPause,
     signOut,
     dismissIdle,
@@ -115,7 +117,14 @@ function Panel() {
   // grain the server folds on, so the time lands in the same timesheet row. While a timer runs,
   // resuming another row re-attributes to it (same semantics as the hero's pickers).
   const resumeSession = (sel: ResumeSelection) => {
-    const full = { taskId: null, projectId: sel.projectId, description: sel.description };
+    // Resuming a past row re-attributes to its project only — the subtask that produced it is not
+    // carried, because the row is a (project, description) aggregate and no longer names one.
+    const full = {
+      taskId: null,
+      subtaskId: null,
+      projectId: sel.projectId,
+      description: sel.description,
+    };
     recordHistory(sel.description);
     if (timer.running) switchTo(full);
     else toggleTimer(full);
@@ -223,7 +232,14 @@ function Panel() {
               size="sm"
               variant="outline"
               className="h-6 px-2 text-[11px]"
-              onClick={() => toggleTimer({ taskId: null, projectId: null, description: "" })}
+              onClick={() =>
+                toggleTimer({
+                  taskId: null,
+                  subtaskId: null,
+                  projectId: null,
+                  description: "",
+                })
+              }
             >
               Stop
             </Button>
@@ -296,6 +312,8 @@ function Panel() {
           onToggle={toggleTimer}
           onSwitch={switchTo}
           onCreateTask={createTask}
+          onCreateSubtask={createSubtask}
+          onSetSubtaskDone={setSubtaskDone}
           onRefresh={refresh}
         />
 
@@ -454,6 +472,9 @@ function useResumeLastTask(signedIn: boolean, running: boolean, refresh: () => v
         if (!pending || !sameLocalDay(pending.stoppedAtMs, Date.now())) return;
         await startTimer({
           taskId: pending.taskId || null,
+          // Resume onto the same subtask, not just the parent — otherwise a restart silently moves
+          // the session up a level and the breakdown loses the time.
+          subtaskId: pending.subtaskId || null,
           projectId: pending.projectId || null,
           description: pending.description,
         });

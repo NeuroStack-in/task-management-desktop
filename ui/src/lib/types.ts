@@ -67,6 +67,8 @@ export interface PauseState {
 export interface TimerState {
   running: boolean;
   task_id: string | null;
+  /** The subtask being worked on, when one was picked. `task_id` stays the parent task. */
+  subtask_id: string | null;
   project_id: string | null;
   description: string;
   elapsed_secs: number;
@@ -87,12 +89,30 @@ export interface Project {
  * by `agent.ts` from the projects list; a task whose project isn't in that list falls back to
  * "Unassigned" rather than rendering a raw id.
  */
+/**
+ * One subtask — a single level of breakdown under a task.
+ *
+ * Real work, not a checklist tick: the timer runs against it, and this app is the only place they
+ * are created or ticked off (the web shows them read-only).
+ */
+export interface Subtask {
+  id: string;
+  task_id: string;
+  title: string;
+  /** `todo` | `in_progress` | `in_review` | `done` | `blocked`. */
+  status: string;
+  /** Both terminal states count — a subtask signed off elsewhere is finished, not outstanding. */
+  done: boolean;
+}
+
 export interface Task {
   id: string;
   title: string;
   project_id: string;
   project_name: string;
   billable: boolean;
+  /** This task's breakdown. Empty is the normal case and means the timer targets the task itself. */
+  subtasks: Subtask[];
   /**
    * Nobody has taken this task — it is offered to every member of its project.
    *
@@ -166,6 +186,14 @@ export interface AuthStatus {
 /** What `start_timer` needs. `task_id` is optional core-side — a project alone is a valid session. */
 export interface TimerSelection {
   taskId: string | null;
+  /**
+   * The subtask to run against, or null for the task itself.
+   *
+   * `taskId` above is **always the parent task**, even when this is set — that is the server
+   * contract, and it is what keeps project hours, timesheets and the project KPI attributing this
+   * session correctly.
+   */
+  subtaskId: string | null;
   projectId: string | null;
   description: string;
 }

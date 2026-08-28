@@ -110,6 +110,8 @@ pub fn effective_config(state: State<'_, AppState>) -> TrackingConfig {
 pub struct TimerStateDto {
     pub running: bool,
     pub task_id: Option<String>,
+    /// The subtask being worked on, when one was picked. The panel shows it beneath the task.
+    pub subtask_id: Option<String>,
     pub project_id: Option<String>,
     pub description: String,
     pub elapsed_secs: u64,
@@ -120,6 +122,7 @@ fn read_timer(state: &AppState) -> TimerStateDto {
     TimerStateDto {
         running: s.running,
         task_id: s.task_id,
+        subtask_id: s.subtask_id,
         project_id: s.project_id,
         description: s.description,
         elapsed_secs: s.elapsed_secs,
@@ -140,6 +143,9 @@ pub fn start_timer(
     project_id: Option<String>,
     description: Option<String>,
     task_id: Option<String>,
+    // The subtask the user picked, when the task has a breakdown. `task_id` above remains the
+    // PARENT — see `TimerEngine::start`.
+    subtask_id: Option<String>,
 ) -> Result<TimerStateDto, String> {
     let ts = now_ms();
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -150,6 +156,7 @@ pub fn start_timer(
         t.start(
             session_id,
             task_id.unwrap_or_default(),
+            subtask_id.unwrap_or_default(),
             project_id.unwrap_or_default(),
             description.unwrap_or_default(),
             ts,
@@ -337,6 +344,63 @@ pub async fn create_task(
     .await
 }
 
+/// Add a subtask under `task_id` and return it, so the picker can show it (and select it) without
+/// waiting for the next poll.
+///
+/// Only the title is asked for: the server defaults the status to `todo` and the assignee to the
+/// caller, which is exactly what an employee breaking down their own work wants.
+#[tauri::command]
+pub async fn create_subtask(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+    title: String,
+) -> Result<crate::api::tasks::SubtaskDto, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Err("auth:expired".into());
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    crate::api::tasks::create_subtask(
+        &client,
+        &ingest_url,
+        &id_token,
+        &project_id,
+        &task_id,
+        title.trim(),
+    )
+    .await
+}
+
+/// Tick a subtask off, or move it back.
+///
+/// Fails with `subtask:not-yours` when the caller is a project Member and the subtask is somebody
+/// else's — a rule the person can act on, rather than a raw 403 the panel would have to translate.
+#[tauri::command]
+pub async fn set_subtask_status(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+    subtask_id: String,
+    status: String,
+) -> Result<crate::api::tasks::SubtaskDto, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Err("auth:expired".into());
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    crate::api::tasks::set_subtask_status(
+        &client,
+        &ingest_url,
+        &id_token,
+        &project_id,
+        &task_id,
+        &subtask_id,
+        &status,
+    )
+    .await
+}
+
 // ── today's sessions (backend-fed) ───────────────────────────────────────────
 
 /// The signed-in user's folded time entries for `date` (the client's local `YYYY-MM-DD`), aggregated
@@ -361,6 +425,9 @@ pub async fn list_sessions(
 #[serde(rename_all = "camelCase")]
 pub struct PendingResumeDto {
     pub task_id: String,
+    /// The subtask that was running, so a resume picks up exactly where it left off rather than
+    /// silently reattaching to the parent task. Empty when the session targeted the task itself.
+    pub subtask_id: String,
     pub project_id: String,
     pub description: String,
     /// Epoch ms the agent closed on this task. The panel compares it against its own local calendar
@@ -387,6 +454,7 @@ pub fn take_pending_resume(state: State<'_, AppState>) -> Option<PendingResumeDt
     crate::session_state::update(|s| {
         out = s.resume.take().map(|r| PendingResumeDto {
             task_id: r.task_id,
+            subtask_id: r.subtask_id,
             project_id: r.project_id,
             description: r.description,
             stopped_at_ms: r.stopped_at_ms,
