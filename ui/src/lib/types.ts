@@ -111,6 +111,8 @@ export interface Task {
   project_id: string;
   project_name: string;
   billable: boolean;
+  /** `todo` | `in_progress` | `in_review` | `done` | `closed` | `blocked`. */
+  status: string;
   /** This task's breakdown. Empty is the normal case and means the timer targets the task itself. */
   subtasks: Subtask[];
   /**
@@ -141,6 +143,10 @@ export type ActivitySeries = number[];
  */
 export interface Session {
   project_id: string;
+  /** The parent task this time was filed against. Empty for pre-subtask entries. */
+  task_id: string;
+  /** The subtask, when one was being timed. Empty means the task itself. */
+  subtask_id: string;
   description: string;
   secs: number;
 }

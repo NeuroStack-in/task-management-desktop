@@ -56,12 +56,6 @@ export interface Agent {
   toggleTimer: (sel: TimerSelection) => void;
   /** Re-attribute a running timer without stopping the clock. */
   switchTo: (sel: TimerSelection) => void;
-  /** Create a task in a project; resolves to its id (so the picker can select it) or null on failure. */
-  createTask: (
-    projectId: string,
-    title: string,
-    opts?: agent.NewTaskOptions,
-  ) => Promise<string | null>;
   /** Add a subtask under a task; resolves to it (so the strip can target it) or null on failure. */
   createSubtask: (projectId: string, taskId: string, title: string) => Promise<Subtask | null>;
   /** Tick a subtask off or reopen it; resolves true when the write landed. */
@@ -232,30 +226,8 @@ export function useAgent(): Agent {
     [snapshot, run],
   );
 
-  // Not routed through `run` (fire-and-forget): the caller awaits the new task's id to select it.
-  const createTask = useCallback(
-    async (
-      projectId: string,
-      title: string,
-      opts?: agent.NewTaskOptions,
-    ): Promise<string | null> => {
-      const t = title.trim();
-      if (!projectId || !t) return null;
-      setActionError(null);
-      try {
-        const id = await agent.createTask(projectId, t, opts);
-        await refresh(); // the new task joins the picker on the next read
-        return id;
-      } catch (e) {
-        reportAction(e);
-        return null;
-      }
-    },
-    [refresh, reportAction],
-  );
-
-  // Both subtask writes bypass `run` for the same reason `createTask` does: the caller awaits the
-  // result to retarget the timer, and a fire-and-forget would leave the strip a poll behind.
+  // Both subtask writes bypass `run` deliberately: the caller awaits the result to retarget the
+  // timer, and a fire-and-forget would leave the strip a poll behind.
   const createSubtask = useCallback(
     async (projectId: string, taskId: string, title: string): Promise<Subtask | null> => {
       const t = title.trim();
@@ -347,7 +319,6 @@ export function useAgent(): Agent {
     grantConsent,
     toggleTimer,
     switchTo,
-    createTask,
     createSubtask,
     setSubtaskDone,
     requestPause,

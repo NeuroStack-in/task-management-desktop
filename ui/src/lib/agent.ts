@@ -83,6 +83,7 @@ interface TaskRow {
   title: string;
   project_id: string;
   unassigned?: boolean;
+  status?: string;
   subtasks?: SubtaskRow[];
 }
 
@@ -139,6 +140,9 @@ function joinTasks(rows: TaskRow[], projects: Project[]): Task[] {
       // Absent means the backend predates the flag; read that as "assigned" so an old core doesn't
       // make the whole picker look like a free-for-all.
       unassigned: t.unassigned ?? false,
+      // Absent reads as open. A task shown as finished when the server never said so would invite
+      // someone to "reopen" work that was never closed.
+      status: t.status || "todo",
       // Absent means no breakdown, which is every task today — the picker then offers the task.
       subtasks: (t.subtasks ?? []).map((s) => ({
         id: s.id,
@@ -273,38 +277,6 @@ export async function startTimer(sel: TimerSelection): Promise<void> {
 
 export async function stopTimer(): Promise<void> {
   await invoke<TimerState>("stop_timer");
-}
-
-/** Optional fields when creating a task; omitted ones take the server default. */
-export interface NewTaskOptions {
-  description?: string;
-  /** Assign the task to the signed-in user (vs. leaving it unassigned). */
-  assignSelf?: boolean;
-  /** Due date, `YYYY-MM-DD`. */
-  due?: string;
-  /** `low` | `medium` | `high`. */
-  priority?: string;
-}
-
-/**
- * Create a task in a project and return its id. Unassigned by default (offered to everyone on the
- * project) unless `assignSelf`. The caller (useAgent) refreshes the lists after, so the new row
- * arrives fully joined on the next read; the id lets the picker select it immediately.
- */
-export async function createTask(
-  projectId: string,
-  title: string,
-  opts: NewTaskOptions = {},
-): Promise<string> {
-  const row = await invoke<TaskRow>("create_task", {
-    projectId,
-    title,
-    description: opts.description,
-    assignSelf: opts.assignSelf,
-    due: opts.due,
-    priority: opts.priority,
-  });
-  return row.id;
 }
 
 /**

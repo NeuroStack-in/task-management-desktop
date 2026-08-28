@@ -3,7 +3,7 @@ import { ListChecks, Play } from "lucide-react";
 import { CardTitleRow, PanelCard } from "@/components/panel";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { formatElapsed } from "@/lib/format";
-import type { Project, Session, TimerState } from "@/lib/types";
+import type { Project, Session, Task, TimerState } from "@/lib/types";
 
 /** What a row hands back to resume: the fold grain, (project, description). No task id exists here. */
 export interface ResumeSelection {
@@ -28,12 +28,21 @@ export interface ResumeSelection {
 export function SessionsCard({
   sessions,
   projects,
+  tasks,
   timer,
   onResume,
   capped = true,
 }: {
   sessions: Session[];
   projects: Project[];
+  /**
+   * The picker's task list, used only to turn the ids on a session into names.
+   *
+   * Resolved here rather than server-side: the panel already holds this list, so naming a row costs
+   * nothing, and a task that has since been deleted or reassigned simply falls back to its
+   * description instead of making the row fail to load.
+   */
+  tasks: Task[];
   timer: TimerState;
   onResume: (sel: ResumeSelection) => void;
   /**
@@ -50,6 +59,22 @@ export function SessionsCard({
   const rows = foldLiveSegment(sessions, timer);
   const total = rows.reduce((s, x) => s + x.secs, 0);
   const projectName = new Map(projects.map((p) => [p.id, p.name]));
+  const byTaskId = new Map(tasks.map((t) => [t.id, t]));
+
+  /**
+   * What to call a session row: `Task · Subtask`, or the task alone, or — when the ids resolve to
+   * nothing we can name — the description that was always there.
+   *
+   * The fallback is not a formality. Sessions predating subtasks carry no ids at all, and a task
+   * that has since been finished and filtered out of the picker is no longer in `tasks`; in both
+   * cases the description is the only honest label left, and it beats an id or a blank line.
+   */
+  const titleOf = (s: Session): string => {
+    const task = s.task_id ? byTaskId.get(s.task_id) : undefined;
+    if (!task) return s.description || "No description";
+    const sub = s.subtask_id ? task.subtasks.find((x) => x.id === s.subtask_id) : undefined;
+    return sub ? `${task.title} · ${sub.title}` : task.title;
+  };
 
   return (
     // No `flex-1`. This card sits inside the panel's single `overflow-y-auto` column (App.tsx), and
@@ -137,13 +162,25 @@ export function SessionsCard({
                           <Play className="size-3 fill-current" />
                         )}
                       </span>
+                      {/* **The bold line is the work, not the note about it.**
+                          It used to be `description` — the sentence someone typed into "what are
+                          you working on?" — so a day read as four rows of free text with the actual
+                          task nowhere on screen. The task (and the subtask, when one was being
+                          timed) is what identifies the work; the description is the detail, and it
+                          moves to the third line where it can be read after the name. */}
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[13.5px] font-medium leading-5">
-                          {s.description || "No description"}
+                          {titleOf(s)}
                         </span>
                         <span className="block truncate text-[11.5px] text-muted-foreground">
                           {projectName.get(s.project_id) ?? s.project_id ?? "No project"}
                         </span>
+                        {/* Only when it says something the name above does not. */}
+                        {s.description && s.description !== titleOf(s) ? (
+                          <span className="block truncate text-[11px] text-muted-foreground/70">
+                            {s.description}
+                          </span>
+                        ) : null}
                       </span>
                       <span
                         className={
@@ -206,6 +243,8 @@ function isCurrent(s: Session, timer: TimerState): boolean {
   return (
     timer.running &&
     s.project_id === (timer.project_id ?? "") &&
+    s.task_id === (timer.task_id ?? "") &&
+    s.subtask_id === (timer.subtask_id ?? "") &&
     s.description === timer.description
   );
 }
@@ -220,6 +259,8 @@ function foldLiveSegment(sessions: Session[], timer: TimerState): Session[] {
   if (timer.running) {
     const live: Session = {
       project_id: timer.project_id ?? "",
+      task_id: timer.task_id ?? "",
+      subtask_id: timer.subtask_id ?? "",
       description: timer.description,
       secs: timer.elapsed_secs,
     };

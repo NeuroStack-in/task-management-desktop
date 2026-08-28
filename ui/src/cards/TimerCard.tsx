@@ -5,10 +5,8 @@ import {
   Hand,
   ListChecks,
   Play,
-  Plus,
   RefreshCw,
   Square,
-  UserCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -51,7 +49,6 @@ export function TimerCard({
   tasks,
   onToggle,
   onSwitch,
-  onCreateTask,
   onCreateSubtask,
   onSetSubtaskDone,
   onRefresh,
@@ -69,11 +66,6 @@ export function TimerCard({
     done: boolean,
   ) => Promise<boolean>;
   /** Create a task in a project; resolves to its id (to select) or null on failure. */
-  onCreateTask: (
-    projectId: string,
-    title: string,
-    opts?: { assignSelf?: boolean; due?: string; priority?: string },
-  ) => Promise<string | null>;
   onRefresh: () => Promise<void>;
 }) {
   // The poll already re-reads every second; this is for when the lists are visibly stale
@@ -102,17 +94,6 @@ export function TimerCard({
   // `onMouseDown` so it wins the race against the input's blur closing the list.
   const [descFocused, setDescFocused] = useState(false);
   const suggestions = descFocused && !timer.running ? suggestHistory(description) : [];
-
-  // Inline "New task" composer — a task can be created in the selected project without leaving the
-  // panel (the whole point of "task creation inside the application"). It lands unassigned, then is
-  // selected here so the user can start timing it straight away.
-  const [creatingTask, setCreatingTask] = useState(false);
-  const [newTaskTitle, setNewTaskTitle] = useState("");
-  const [creating, setCreating] = useState(false);
-  // Defaults: a task you make in your own agent is usually yours, at the server's default priority.
-  const [assignSelf, setAssignSelf] = useState(true);
-  const [due, setDue] = useState("");
-  const [priority, setPriority] = useState("medium");
 
   // Keep the controls pointed at whatever the core is actually timing — after a switch, or on a
   // remount while a session is live. Only while running: outside that, these are the user's
@@ -187,43 +168,6 @@ export function TimerCard({
     setSubtaskId(null);
   };
 
-  const resetNewTask = () => {
-    setNewTaskTitle("");
-    setAssignSelf(true);
-    setDue("");
-    setPriority("medium");
-  };
-
-  const openNewTask = () => {
-    resetNewTask();
-    setCreatingTask(true);
-  };
-
-  const cancelNewTask = () => {
-    setCreatingTask(false);
-    resetNewTask();
-  };
-
-  const submitNewTask = async () => {
-    const title = newTaskTitle.trim();
-    if (!projectId || !title || creating) return;
-    setCreating(true);
-    const id = await onCreateTask(projectId, title, {
-      assignSelf,
-      due: due || undefined,
-      priority: priority || undefined,
-    });
-    setCreating(false);
-    if (!id) return; // failure already surfaced as the panel's action-error banner
-    setCreatingTask(false);
-    resetNewTask();
-    // Select the fresh task; re-attribute live. As in `chooseTask`, the title is not copied into
-    // the description — see the note there.
-    setTaskId(id);
-    setSubtaskId(null);
-    if (timer.running) onSwitch(selection({ taskId: id, subtaskId: null }));
-  };
-
   /**
    * One row of the task menu. Lifted out of the map so the assigned and unclaimed groups render
    * identically — a difference between the two would read as a difference in the task.
@@ -236,13 +180,13 @@ export function TimerCard({
         key={t.id}
         onClick={() => chooseTask(t)}
         className={cn(
-          "items-center gap-2.5 rounded-lg px-1.5 py-1.5",
+          "items-center gap-2 rounded-lg px-1.5 py-1",
           (isActive || isSel) && "bg-accent/60",
         )}
       >
         <span
           className={cn(
-            "flex size-7 shrink-0 items-center justify-center rounded-md",
+            "flex size-6 shrink-0 items-center justify-center rounded-md",
             isActive
               ? "bg-success/15 text-success"
               : t.unassigned
@@ -251,20 +195,23 @@ export function TimerCard({
           )}
         >
           {isActive ? (
-            <span className="size-2 animate-pulse rounded-full bg-success" />
+            <span className="size-1.5 animate-pulse rounded-full bg-success" />
           ) : t.unassigned ? (
-            <Hand className="size-4" />
+            <Hand className="size-3.5" />
           ) : (
-            <ListChecks className="size-4" />
+            <ListChecks className="size-3.5" />
           )}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
+          {/* The title is the thing being chosen; the badges qualify it. They were set at the same
+              visual weight and ate the width the title needed, so a menu of "Workpulse…" /
+              "Testflow Monit…" named nothing. Smaller box, smaller type, tighter gap. */}
+          <span className="flex items-center gap-1">
             <span className="truncate font-medium">{t.title}</span>
             {t.unassigned && (
               <Badge
                 variant="secondary"
-                className="shrink-0 px-1.5 py-0 text-[0.65rem] font-normal"
+                className="shrink-0 px-1 py-0 text-[0.6rem] font-normal leading-[1.35]"
                 // Stated rather than implied by the grouping alone: tracking time against an
                 // unclaimed task does not claim it, so a colleague may be on it too.
                 title="Nobody is assigned — tracking time won't claim it"
@@ -275,14 +222,14 @@ export function TimerCard({
             {t.billable && (
               <Badge
                 variant="secondary"
-                className="shrink-0 px-1.5 py-0 text-[0.65rem] font-normal"
+                className="shrink-0 px-1 py-0 text-[0.6rem] font-normal leading-[1.35]"
               >
                 Billable
               </Badge>
             )}
           </span>
         </span>
-        {isSel && <Check className="size-4 shrink-0 text-primary" />}
+        {isSel && <Check className="size-3.5 shrink-0 text-primary" />}
       </DropdownMenuItem>
     );
   };
@@ -385,7 +332,7 @@ export function TimerCard({
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <HeroPicker
             icon={FolderKanban}
             label={project?.name ?? "Select project"}
@@ -445,14 +392,6 @@ export function TimerCard({
                 No tasks in this project yet.
               </p>
             )}
-            {/* Create a task without leaving the panel — it lands unassigned and is selected below. */}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={openNewTask} className="gap-2.5 rounded-lg px-1.5 py-1.5">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                <Plus className="size-4" />
-              </span>
-              <span className="flex-1 font-medium">New task…</span>
-            </DropdownMenuItem>
           </HeroPicker>
 
           {/* Same translucent treatment as the pickers either side — a semantic fill would
@@ -463,18 +402,22 @@ export function TimerCard({
             disabled={refreshing}
             aria-label="Refresh projects and tasks"
             title="Refresh projects and tasks"
-            className="size-9 shrink-0 rounded-xl border-transparent bg-white/15 p-0 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25 disabled:opacity-100"
+            className="size-8 shrink-0 rounded-xl border-transparent bg-white/15 p-0 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25 disabled:opacity-100"
           >
-            <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
+            <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} />
           </Button>
 
           <Button
             size="sm"
             onClick={toggle}
             disabled={!timer.running && !canStart}
-            className="h-9 shrink-0 gap-1.5 rounded-xl border-transparent bg-white/15 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25"
+            className="h-8 shrink-0 gap-1 rounded-xl border-transparent bg-white/15 px-2.5 text-xs text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25"
           >
-            {timer.running ? <Square className="fill-current" /> : <Play className="fill-current" />}
+            {timer.running ? (
+              <Square className="size-3 fill-current" />
+            ) : (
+              <Play className="size-3 fill-current" />
+            )}
             {timer.running ? "Stop" : "Start"}
           </Button>
         </div>
@@ -484,6 +427,7 @@ export function TimerCard({
             a second prompt for one decision. */}
         <SubtaskStrip
           task={task}
+          projectName={project?.name ?? ""}
           selectedId={subtaskId}
           activeId={timer.subtask_id}
           running={timer.running}
@@ -494,84 +438,11 @@ export function TimerCard({
             if (timer.running) onSwitch(selection({ subtaskId: id }));
           }}
           onAdd={(title) => onCreateSubtask(projectId, task?.id ?? "", title)}
-          onSetDone={(sub, done) =>
+          onSetSubtaskDone={(sub, done) =>
             onSetSubtaskDone(projectId, sub.task_id || (task?.id ?? ""), sub.id, done)
           }
         />
 
-        {creatingTask && (
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center gap-2">
-              <Input
-                autoFocus
-                aria-label="New task title"
-                placeholder={project ? `New task in ${project.name}` : "New task"}
-                value={newTaskTitle}
-                onValueChange={setNewTaskTitle}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void submitNewTask();
-                  else if (e.key === "Escape") cancelNewTask();
-                }}
-                className="h-9 flex-1 border-transparent bg-white/15 px-3 text-[13px] text-feature-foreground ring-1 ring-inset ring-white/15 placeholder:text-feature-foreground/50 focus-visible:ring-2 focus-visible:ring-white/70"
-              />
-              <Button
-                size="sm"
-                onClick={() => void submitNewTask()}
-                disabled={creating || !newTaskTitle.trim()}
-                className="h-9 shrink-0 rounded-xl border-transparent bg-white/15 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25 disabled:opacity-60"
-              >
-                {creating ? "Adding…" : "Add"}
-              </Button>
-              <Button
-                size="sm"
-                onClick={cancelNewTask}
-                aria-label="Cancel new task"
-                title="Cancel"
-                className="size-9 shrink-0 rounded-xl border-transparent bg-white/10 p-0 text-feature-foreground ring-1 ring-inset ring-white/10 hover:bg-white/20"
-              >
-                <span aria-hidden>×</span>
-              </Button>
-            </div>
-
-            {/* Assignee · due · priority — all optional; native controls, dark-schemed for the teal. */}
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setAssignSelf((v) => !v)}
-                aria-pressed={assignSelf}
-                title={assignSelf ? "Assigned to you — click to leave unassigned" : "Unassigned — click to assign to you"}
-                className={cn(
-                  "flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-[12px] font-medium ring-1 ring-inset transition-colors",
-                  assignSelf
-                    ? "bg-white/25 text-feature-foreground ring-white/30"
-                    : "bg-white/10 text-feature-foreground/70 ring-white/10",
-                )}
-              >
-                <UserCheck className="size-3.5" />
-                {assignSelf ? "Me" : "Unassigned"}
-              </button>
-              <input
-                type="date"
-                aria-label="Due date"
-                title="Due date (optional)"
-                value={due}
-                onChange={(e) => setDue((e.target as HTMLInputElement).value)}
-                className="h-8 min-w-0 flex-1 rounded-lg border-transparent bg-white/15 px-2 text-[12px] text-feature-foreground ring-1 ring-inset ring-white/15 [color-scheme:dark] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
-              />
-              <select
-                aria-label="Priority"
-                title="Priority"
-                value={priority}
-                onChange={(e) => setPriority((e.target as HTMLSelectElement).value)}
-                className="h-8 shrink-0 rounded-lg border-transparent bg-white/15 px-2 text-[12px] text-feature-foreground ring-1 ring-inset ring-white/15 [color-scheme:dark] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
-              >
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-              </select>
-            </div>
-          </div>
-        )}
 
         <p className="text-[11px] text-feature-foreground/70">
           {timer.running
@@ -638,14 +509,19 @@ function HeroPicker({
             type="button"
             // Focus ring is white, not the themed --ring: on the filled teal surface the
             // UA default (black) and a teal ring are both illegible.
-            className="group inline-flex min-w-0 flex-1 items-center gap-2 rounded-xl bg-white/15 px-3 py-2 text-sm font-medium text-white shadow-sm ring-1 ring-inset ring-white/15 transition-colors hover:bg-white/25 hover:ring-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:opacity-70 disabled:hover:bg-white/15"
+            // Tight on purpose. The panel is ~390px wide and this row holds two pickers plus two
+            // buttons; at `text-sm px-3 gap-2` the label had ~30px and showed "SDE…"/"Wo…", which
+            // names nothing. Smaller type, tighter padding and a narrower gap buy roughly a word.
+            className="group inline-flex min-w-0 flex-1 items-center gap-1.5 rounded-xl bg-white/15 px-2 py-1.5 text-xs font-medium text-white shadow-sm ring-1 ring-inset ring-white/15 transition-colors hover:bg-white/25 hover:ring-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:opacity-70 disabled:hover:bg-white/15"
           />
         }
       >
-        <Icon className="size-4 shrink-0 text-white/80" />
-        <span className="truncate">{label}</span>
+        <Icon className="size-3.5 shrink-0 text-white/80" />
+        <span className="min-w-0 flex-1 truncate text-left" title={label}>
+          {label}
+        </span>
         {!disabled && (
-          <ChevronDown className="ml-auto size-4 shrink-0 text-white/70 transition-transform duration-fast ease-standard group-data-[popup-open]:rotate-180" />
+          <ChevronDown className="size-3.5 shrink-0 text-white/70 transition-transform duration-fast ease-standard group-data-[popup-open]:rotate-180" />
         )}
       </DropdownMenuTrigger>
       {/* `max-w` is a floor under every caller: the panel is a fixed 420px, so a popup wider than

@@ -40,7 +40,6 @@ function Panel() {
     grantConsent,
     toggleTimer,
     switchTo,
-    createTask,
     createSubtask,
     setSubtaskDone,
     requestPause,
@@ -311,7 +310,6 @@ function Panel() {
           tasks={tasks}
           onToggle={toggleTimer}
           onSwitch={switchTo}
-          onCreateTask={createTask}
           onCreateSubtask={createSubtask}
           onSetSubtaskDone={setSubtaskDone}
           onRefresh={refresh}
@@ -323,6 +321,7 @@ function Panel() {
         <SessionsCard
           sessions={sessions}
           projects={projects}
+          tasks={tasks}
           timer={timer}
           onResume={resumeSession}
           capped={!hasBanner}
