@@ -259,6 +259,9 @@ fn run(app: AppHandle) {
     // after launch can't read as a 55-year gap.
     let mut last_tick_ms = crate::clock::now_epoch_ms();
     let mut alive_tick: u64 = 0;
+    // The session id last written to the crash-recovery note, so a start or stop is persisted on the
+    // very next tick instead of waiting for the periodic refresh.
+    let mut noted_session: Option<String> = None;
     let mut idle_prompted = false;
     // identifier → last time it was warned/reported (the violation debounce).
     let mut last_violation: std::collections::HashMap<String, i64> =
@@ -326,6 +329,7 @@ fn run(app: AppHandle) {
             idle_prompted = false;
             let _ = app.emit(events::TRACKING_CHANGED, ());
             crate::session_state::update(|s| s.open = None);
+            noted_session = None;
             tracing::info!(
                 gap_secs = gap / 1000,
                 "woke from suspend; stopped the timer at the last awake tick"
@@ -474,16 +478,19 @@ fn run(app: AppHandle) {
         // instant on the next launch — so an unclean exit costs at most one heartbeat of accuracy
         // instead of leaving the session open indefinitely.
         alive_tick = alive_tick.wrapping_add(1);
-        if alive_tick.is_multiple_of(ALIVE_HEARTBEAT_TICKS) {
-            let open = state.timer.lock().unwrap().active_session(false).map(|a| {
-                crate::session_state::OpenSession {
-                    session_id: a.session_id,
-                    started_at: a.started_at,
-                    last_alive_ms: now,
-                }
+        let active = state.timer.lock().unwrap().active_session(false);
+        // Written on both edges, and immediately on a CHANGE rather than only on the periodic
+        // refresh: a stopped timer must CLEAR the note, or a session that ended cleanly would be
+        // "recovered" and closed a second time after a later crash. Waiting up to
+        // ALIVE_HEARTBEAT_TICKS to clear it left exactly that window open.
+        let changed = active.as_ref().map(|a| &a.session_id) != noted_session.as_ref();
+        if changed || alive_tick.is_multiple_of(ALIVE_HEARTBEAT_TICKS) {
+            noted_session = active.as_ref().map(|a| a.session_id.clone());
+            let open = active.map(|a| crate::session_state::OpenSession {
+                session_id: a.session_id,
+                started_at: a.started_at,
+                last_alive_ms: now,
             });
-            // Written on both edges: a stopped timer must CLEAR the note, or a session that ended
-            // cleanly hours ago would be "recovered" and closed a second time after a later crash.
             crate::session_state::update(|s| s.open = open);
         }
 
