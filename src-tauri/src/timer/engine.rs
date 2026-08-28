@@ -17,6 +17,11 @@ pub struct TimerEngine {
 struct Running {
     session_id: String,
     task_id: String,
+    /// The subtask the timer is running against, or empty when it targets the task itself.
+    ///
+    /// Held here, not derived at stop time, for the same reason `started_at` is: the panel may have
+    /// moved on to another task by then, and the session must report what it actually ran against.
+    subtask_id: String,
     project_id: String,
     started_at: i64,
     description: String,
@@ -25,10 +30,17 @@ struct Running {
 impl TimerEngine {
     /// Start a session. Returns the event to enqueue, or `Err` if one is already running.
     #[allow(clippy::too_many_arguments)]
+    /// `task_id` is **always the parent task**, even when `subtask_id` is set.
+    ///
+    /// That is the contract, and it is what keeps every server-side hours rollup — project totals,
+    /// the timesheet, `time.logged_for_project`, the KPI velocity bucket — working unchanged: they
+    /// all key off `task_id`. Putting the subtask id there instead would file the time against
+    /// something none of them know about, and the hours would vanish from the project.
     pub fn start(
         &mut self,
         session_id: String,
         task_id: String,
+        subtask_id: String,
         project_id: String,
         description: String,
         ts: i64,
@@ -39,6 +51,7 @@ impl TimerEngine {
         self.running = Some(Running {
             session_id: session_id.clone(),
             task_id: task_id.clone(),
+            subtask_id: subtask_id.clone(),
             project_id: project_id.clone(),
             started_at: ts,
             description: description.clone(),
@@ -49,6 +62,9 @@ impl TimerEngine {
             project_id,
             ts,
             description,
+            // Absent, not empty: the server distinguishes "targeted the task" from "targeted a
+            // subtask we failed to record", and an empty string would collapse the two.
+            subtask_id: none_if_empty(&subtask_id),
         })
     }
 
@@ -90,6 +106,7 @@ impl TimerEngine {
             Some(r) => TimerSnapshot {
                 running: true,
                 task_id: none_if_empty(&r.task_id),
+                subtask_id: none_if_empty(&r.subtask_id),
                 project_id: none_if_empty(&r.project_id),
                 description: r.description.clone(),
                 elapsed_secs: ((now_ms - r.started_at).max(0) / 1000) as u64,
@@ -103,6 +120,8 @@ impl TimerEngine {
 pub struct TimerSnapshot {
     pub running: bool,
     pub task_id: Option<String>,
+    /// The subtask being worked on, when the user picked one. The panel shows it under the task.
+    pub subtask_id: Option<String>,
     pub project_id: Option<String>,
     pub description: String,
     pub elapsed_secs: u64,
@@ -124,15 +143,36 @@ mod tests {
     fn only_one_session_at_a_time() {
         let mut t = TimerEngine::default();
         assert!(t
-            .start("s1".into(), "k1".into(), "p1".into(), "d1".into(), 0)
+            .start(
+                "s1".into(),
+                "k1".into(),
+                String::new(),
+                "p1".into(),
+                "d1".into(),
+                0
+            )
             .is_ok());
         assert!(t
-            .start("s2".into(), "k2".into(), "p1".into(), "d2".into(), 1)
+            .start(
+                "s2".into(),
+                "k2".into(),
+                String::new(),
+                "p1".into(),
+                "d2".into(),
+                1
+            )
             .is_err());
         assert!(t.stop(2, StopReason::User).is_some());
         assert!(!t.is_running());
         assert!(t
-            .start("s3".into(), "k3".into(), "p1".into(), "d3".into(), 3)
+            .start(
+                "s3".into(),
+                "k3".into(),
+                String::new(),
+                "p1".into(),
+                "d3".into(),
+                3
+            )
             .is_ok());
     }
 }

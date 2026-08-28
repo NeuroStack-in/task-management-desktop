@@ -209,12 +209,22 @@ pub fn timer_start(
     task_id: String,
     project_id: String,
     description: String,
+    // The subtask being worked on. Optional — a task with no breakdown, or a user who picked the
+    // task itself, sends nothing. `task_id` stays the parent either way.
+    subtask_id: Option<String>,
 ) -> Result<(), String> {
     let ts = now_epoch_ms();
     let event = {
         let mut timer = state.timer.lock().unwrap();
         timer
-            .start(session_id, task_id, project_id, description, ts)
+            .start(
+                session_id,
+                task_id,
+                subtask_id.unwrap_or_default(),
+                project_id,
+                description,
+                ts,
+            )
             .map_err(|e| format!("timer:{e}"))?
     };
     // Buffered for the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4), and flushed now.

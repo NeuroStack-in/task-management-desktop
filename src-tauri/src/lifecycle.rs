@@ -46,6 +46,7 @@ pub fn close_session_for_exit(app: &AppHandle, reason: &'static str) {
         let snap = t.snapshot(ts);
         let resume = snap.running.then(|| crate::session_state::ResumeTask {
             task_id: snap.task_id.clone().unwrap_or_default(),
+            subtask_id: snap.subtask_id.clone().unwrap_or_default(),
             project_id: snap.project_id.clone().unwrap_or_default(),
             description: snap.description.clone(),
             stopped_at_ms: ts,

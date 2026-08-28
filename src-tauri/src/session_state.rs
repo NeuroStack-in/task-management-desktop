@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResumeTask {
     pub task_id: String,
+    /// The subtask that was running. `#[serde(default)]` so a state file written before subtasks
+    /// existed still loads — a missing field there must degrade to "the task itself", not refuse to
+    /// parse and lose the resume entirely.
+    #[serde(default)]
+    pub subtask_id: String,
     pub project_id: String,
     pub description: String,
     /// Epoch ms when the agent closed on this task.
@@ -148,6 +153,7 @@ mod tests {
             consent_policy_version: 3,
             resume: Some(ResumeTask {
                 task_id: "t1".into(),
+                subtask_id: String::new(),
                 project_id: "p1".into(),
                 description: "Writing the fold".into(),
                 stopped_at_ms,

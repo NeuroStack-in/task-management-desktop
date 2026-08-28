@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as agent from "@/lib/agent";
 import { EVENTS } from "@/lib/agent";
 import { clearHistory } from "@/lib/descriptionHistory";
-import type { AgentSnapshot, TimerSelection } from "@/lib/types";
+import type { AgentSnapshot, Subtask, TimerSelection } from "@/lib/types";
 
 const POLL_MS = 1000;
 
@@ -62,6 +62,15 @@ export interface Agent {
     title: string,
     opts?: agent.NewTaskOptions,
   ) => Promise<string | null>;
+  /** Add a subtask under a task; resolves to it (so the strip can target it) or null on failure. */
+  createSubtask: (projectId: string, taskId: string, title: string) => Promise<Subtask | null>;
+  /** Tick a subtask off or reopen it; resolves true when the write landed. */
+  setSubtaskDone: (
+    projectId: string,
+    taskId: string,
+    subtaskId: string,
+    done: boolean,
+  ) => Promise<boolean>;
   requestPause: (secs: number) => void;
   signOut: () => void;
   /** Dismiss the idle prompt, keeping the timer running. */
@@ -245,6 +254,48 @@ export function useAgent(): Agent {
     [refresh, reportAction],
   );
 
+  // Both subtask writes bypass `run` for the same reason `createTask` does: the caller awaits the
+  // result to retarget the timer, and a fire-and-forget would leave the strip a poll behind.
+  const createSubtask = useCallback(
+    async (projectId: string, taskId: string, title: string): Promise<Subtask | null> => {
+      const t = title.trim();
+      if (!projectId || !taskId || !t) return null;
+      setActionError(null);
+      try {
+        const created = await agent.createSubtask(projectId, taskId, t);
+        await refresh(); // the new row joins the picker on the next read
+        return created;
+      } catch (e) {
+        reportAction(e);
+        return null;
+      }
+    },
+    [refresh, reportAction],
+  );
+
+  const setSubtaskDone = useCallback(
+    async (
+      projectId: string,
+      taskId: string,
+      subtaskId: string,
+      done: boolean,
+    ): Promise<boolean> => {
+      setActionError(null);
+      try {
+        // Reopening returns to `todo`, not `in_progress`: the agent cannot know whether the person
+        // is picking the work back up or simply undoing a mis-click, and `todo` is the claim that
+        // assumes less.
+        await agent.setSubtaskStatus(projectId, taskId, subtaskId, done ? "done" : "todo");
+        await refresh();
+        return true;
+      } catch (e) {
+        reportAction(e);
+        return false;
+      }
+    },
+    [refresh, reportAction],
+  );
+
   const requestPause = useCallback(
     (secs: number) => {
       if (busyRef.current) return;
@@ -297,6 +348,8 @@ export function useAgent(): Agent {
     toggleTimer,
     switchTo,
     createTask,
+    createSubtask,
+    setSubtaskDone,
     requestPause,
     signOut,
     dismissIdle,

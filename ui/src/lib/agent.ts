@@ -21,6 +21,7 @@ import type {
   PauseState,
   Project,
   Session,
+  Subtask,
   Task,
   TimerSelection,
   TimerState,
@@ -82,6 +83,15 @@ interface TaskRow {
   title: string;
   project_id: string;
   unassigned?: boolean;
+  subtasks?: SubtaskRow[];
+}
+
+/** api/tasks.rs `SubtaskDto`. */
+interface SubtaskRow {
+  id: string;
+  task_id: string;
+  title: string;
+  status: string;
 }
 
 /**
@@ -129,6 +139,16 @@ function joinTasks(rows: TaskRow[], projects: Project[]): Task[] {
       // Absent means the backend predates the flag; read that as "assigned" so an old core doesn't
       // make the whole picker look like a free-for-all.
       unassigned: t.unassigned ?? false,
+      // Absent means no breakdown, which is every task today — the picker then offers the task.
+      subtasks: (t.subtasks ?? []).map((s) => ({
+        id: s.id,
+        task_id: s.task_id,
+        title: s.title,
+        status: s.status,
+        // `closed` cannot be set from here but can arrive on a row; counting only `done` would
+        // show signed-off work as still outstanding.
+        done: s.status === "done" || s.status === "closed",
+      })),
     };
   });
 }
@@ -245,6 +265,7 @@ export async function grantConsent(policyVersion: number): Promise<void> {
 export async function startTimer(sel: TimerSelection): Promise<void> {
   await invoke<TimerState>("start_timer", {
     taskId: sel.taskId,
+    subtaskId: sel.subtaskId,
     projectId: sel.projectId,
     description: sel.description,
   });
@@ -286,9 +307,47 @@ export async function createTask(
   return row.id;
 }
 
+/**
+ * Add a subtask under a task and return it.
+ *
+ * Only the title is sent: the core's server defaults the status to `todo` and the assignee to the
+ * signed-in user, which is what breaking down your own work means.
+ */
+export async function createSubtask(
+  projectId: string,
+  taskId: string,
+  title: string,
+): Promise<Subtask> {
+  const row = await invoke<SubtaskRow>("create_subtask", { projectId, taskId, title });
+  return {
+    id: row.id,
+    task_id: row.task_id,
+    title: row.title,
+    status: row.status,
+    done: row.status === "done" || row.status === "closed",
+  };
+}
+
+/**
+ * Tick a subtask off, or move it back to `todo`.
+ *
+ * Rejects with `subtask:not-yours` when it belongs to someone else and the caller is only a project
+ * Member — a rule the person can act on, which the panel shows as-is.
+ */
+export async function setSubtaskStatus(
+  projectId: string,
+  taskId: string,
+  subtaskId: string,
+  status: string,
+): Promise<void> {
+  await invoke<SubtaskRow>("set_subtask_status", { projectId, taskId, subtaskId, status });
+}
+
 /** The task the agent was running when it last closed. See {@link takePendingResume}. */
 export interface PendingResume {
   taskId: string;
+  /** The subtask that was running, so a resume picks up exactly where it left off. */
+  subtaskId: string;
   projectId: string;
   description: string;
   /** Epoch ms the agent closed on this task. */
