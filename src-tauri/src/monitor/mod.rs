@@ -13,6 +13,11 @@ pub mod active_window;
 pub mod bucket;
 pub mod idle;
 pub mod input;
+/// Windows power/session notifications — a suspend, a closed lid, a display off, a session lock.
+/// Windows-only because they are Win32 messages; every other platform relies on the wake-side gap
+/// detector in `run()`.
+#[cfg(windows)]
+pub mod power;
 pub mod screenshot;
 pub mod session;
 
