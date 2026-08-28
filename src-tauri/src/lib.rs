@@ -40,7 +40,6 @@ use tauri::{
     tray::TrayIconBuilder,
     Manager, RunEvent, WindowEvent,
 };
-use wp_agent_contract::StopReason;
 
 fn focus_panel<M: Manager<tauri::Wry>>(app: &M) {
     if let Some(w) = app.get_webview_window("panel") {
@@ -391,52 +390,10 @@ pub fn run() {
         // "monitoring resumes" and "monitoring silently doesn't". Sign-out is a user action
         // (`auth_logout`), not a side effect of closing the window.
         if let RunEvent::ExitRequested { .. } = event {
-            let state = app_handle.state::<AppState>();
-            // Best-effort clean MQTT presence: queue `{"online":false}` + DISCONNECT so the fleet
-            // flips offline immediately; if the process dies first, the broker's Last Will delivers
-            // the same payload after the keepalive window.
-            mqtt::shutdown(&state);
-            let ts = clock::now_epoch_ms();
-            // Bound separately so the timer's MutexGuard is dropped before `state` goes out of
-            // scope at the end of the block — an inline `if let` keeps the temporary alive too long.
-            // Remember what was running *before* stopping it, so reopening can pick the same task
-            // back up. Read under the same lock scope as the stop so the two cannot disagree.
-            let resume = {
-                let mut t = state.timer.lock().unwrap();
-                let snap = t.snapshot(ts);
-                let resume = snap.running.then(|| crate::session_state::ResumeTask {
-                    task_id: snap.task_id.clone().unwrap_or_default(),
-                    project_id: snap.project_id.clone().unwrap_or_default(),
-                    description: snap.description.clone(),
-                    stopped_at_ms: ts,
-                });
-                let stopped = t.stop(ts, StopReason::Shutdown);
-                if let Some(ev) = stopped {
-                    state.pending_events.lock().unwrap().push(ev);
-                }
-                resume
-            };
-            // Persist that `TimerStopped` before the process dies. `pending_events` is an in-memory
-            // Vec that only reaches the durable outbox via `assemble_and_enqueue`, which the sender
-            // normally drives on its cycle — but nothing here waits for the sender, and the runtime
-            // is about to go away. Without this the stop event was simply lost, so the server never
-            // learned the session ended and the web UI showed "Recording" indefinitely.
-            //
-            // Enqueue is synchronous and writes to `queue/batches.jsonl`, so the stop survives the
-            // exit and ships on the next launch even when quitting offline. (Sending it *now* isn't
-            // possible: the async sender can't be awaited from this handler.) The server-side
-            // stale-session reaper is what covers the harder cases — a crash or power loss, where
-            // this handler never runs at all.
-            let seq = crate::cycle::assemble_and_enqueue(&state);
-            tracing::info!(
-                batch_seq = seq,
-                "shutdown: queued the final batch (timer stop)"
-            );
-
-            // The session is still *closed* on the server (the TimerStopped event above): the offline
-            // period must not be billed, since nothing was captured during it. Reopening starts a
-            // fresh session on the same task, and today's total comes from the folded entries.
-            crate::session_state::update(|s| s.resume = resume);
+            // The same close the updater's `on_before_exit` runs — see `lifecycle`. Sharing one
+            // function is the point: an auto-update exits via `std::process::exit(0)` and never
+            // reaches this arm, so a second copy here would silently stop covering that path.
+            crate::lifecycle::close_session_for_exit(app_handle, "quit");
         }
     });
 }

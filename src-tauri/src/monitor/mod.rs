@@ -37,6 +37,41 @@ const IDLE_PROMPT_SECS: u64 = 300;
 const HEARTBEAT_IDLE_SECS: u64 = 60;
 /// Hard-stop the timer after this much continuous idle (no productive time is invented).
 const AUTO_STOP_SECS: u64 = 900;
+
+/// What the idle thresholds say to do this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleAction {
+    /// Nothing to do.
+    None,
+    /// Cross the prompt threshold — ask whether they are still there.
+    Prompt,
+    /// Past the hard limit — stop the timer.
+    Stop,
+}
+
+/// Decide the idle action from the timer state alone.
+///
+/// **The parameter list is the point.** This deliberately cannot see monitoring consent, the
+/// capture pause, or the org's activity entitlement, because for a long time the code that did this
+/// job sat *inside* a branch gated on all three — so a user who declined consent, or an org on a
+/// plan without `monitoring.activity`, got no idle prompt and no auto-stop at all. Their timers ran
+/// unbounded. One real org spent a day like that and recorded 3h41m of tracked time for someone
+/// with three seconds of input.
+///
+/// Capture is about what we may observe. This is about what we may bill. Keep them apart: if a
+/// future edit needs a capture flag in here, the answer is that it doesn't.
+fn idle_action(running: bool, idle_secs: u64, already_prompted: bool) -> IdleAction {
+    if !running {
+        return IdleAction::None;
+    }
+    if idle_secs >= AUTO_STOP_SECS {
+        IdleAction::Stop
+    } else if idle_secs >= IDLE_PROMPT_SECS && !already_prompted {
+        IdleAction::Prompt
+    } else {
+        IdleAction::None
+    }
+}
 /// Re-warn (and re-report) the same restricted identifier at most once per this window. One
 /// YouTube session is one violation with one warning — not sixty per minute; a *different*
 /// restricted site during the cooldown still fires immediately (the map is per-identifier).
@@ -200,7 +235,10 @@ fn run(app: AppHandle) {
     let mut bucketer = Bucketer::new();
     let mut sampler = InputSampler::new();
     let mut tick: u64 = 0;
-    let mut was_running = false;
+    // Was CAPTURE active last tick (all four gate conditions), not "was the timer running" — the
+    // two are different, and conflating them is what disabled the idle auto-stop for anyone who
+    // hadn't consented. Named for what it actually gates: sealing the open minute bucket.
+    let mut was_capturing = false;
     let mut idle_prompted = false;
     // identifier → last time it was warned/reported (the violation debounce).
     let mut last_violation: std::collections::HashMap<String, i64> =
@@ -232,8 +270,10 @@ fn run(app: AppHandle) {
         // so disabling activity still reports the device without app/input rollups.
         let activity_enabled = state.config.lock().unwrap().get().tracking.activity_enabled;
 
+        // Needed by the idle auto-stop below, which runs whether or not capture does.
+        let now = clock::now_epoch_ms();
+
         if running && consented && !paused && activity_enabled {
-            let now = clock::now_epoch_ms();
             let (kb, mouse) = sampler.sample();
             bucketer.tick(now, idle, kb, mouse);
 
@@ -317,33 +357,53 @@ fn run(app: AppHandle) {
                 }
             }
 
-            if idle >= AUTO_STOP_SECS {
-                // Hard stop: seal the open bucket and end the session with `Idle`. The timer is now
-                // off, so `was_running` clears — no redundant seal next tick.
+            tick = tick.wrapping_add(1);
+            was_capturing = true;
+        } else if was_capturing {
+            // Capture just stopped: seal the open minute so its partial rollup isn't lost.
+            bucketer.seal();
+            was_capturing = false;
+        }
+
+        // ── Idle protection — a property of the TIMER, not of capture ────────────────────────
+        //
+        // This block used to live inside the capture gate above, so the 5-minute prompt and the
+        // 15-minute hard stop only ran for a user who had granted monitoring consent, had capture
+        // un-paused, AND whose org had the activity entitlement on. For everyone else the timer ran
+        // unbounded: no prompt, no auto-stop, hours accruing with nothing watching them.
+        //
+        // That is exactly backwards. The auto-stop exists so a timer left running overnight doesn't
+        // bill a day nobody worked — a guarantee about *time*, which every timer needs and which
+        // matters MOST for the people capture isn't watching. A real org showed 3h41m of tracked
+        // time against 3 seconds of input for one person, and five people with timer sessions and
+        // no activity rows at all: unmonitored timers that should have stopped after 15 minutes.
+        //
+        // `idle` is read every tick above, outside the gate, so this needs nothing capture provides.
+        match idle_action(running, idle, idle_prompted) {
+            IdleAction::Stop => {
                 let ev = state.timer.lock().unwrap().stop(now, StopReason::Idle);
                 if let Some(e) = ev {
                     state.pending_events.lock().unwrap().push(e);
                     state.flush.notify_one(); // an idle auto-stop should reflect as fast as a manual one
                 }
+                // Seal whatever capture had open. A no-op when the gate was shut — there is no
+                // bucket — which is why this is safe to call on a path capture never reached.
                 bucketer.seal();
+                was_capturing = false;
                 let _ = app.emit(events::TRACKING_CHANGED, ());
                 idle_prompted = false;
-                was_running = false;
-            } else {
-                if idle >= IDLE_PROMPT_SECS && !idle_prompted {
-                    let _ = app.emit(events::IDLE_PROMPT, idle);
-                    idle_prompted = true;
-                } else if idle < IDLE_PROMPT_SECS {
+            }
+            IdleAction::Prompt => {
+                let _ = app.emit(events::IDLE_PROMPT, idle);
+                idle_prompted = true;
+            }
+            // Below the prompt threshold (or no timer) ⇒ re-arm, so the next idle stretch in the
+            // same session prompts again rather than being swallowed by the first one's flag.
+            IdleAction::None => {
+                if !running || idle < IDLE_PROMPT_SECS {
                     idle_prompted = false;
                 }
-                was_running = true;
             }
-            tick = tick.wrapping_add(1);
-        } else if was_running {
-            // Timer just stopped: seal the open minute so its partial rollup isn't lost.
-            bucketer.seal();
-            was_running = false;
-            idle_prompted = false;
         }
 
         let sealed = bucketer.take_sealed();
@@ -362,6 +422,54 @@ fn run(app: AppHandle) {
             };
             let _ = tray.set_tooltip(Some(tip));
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_action_tests {
+    use super::*;
+
+    /// The regression this function exists for.
+    ///
+    /// There is no capture flag in the signature, so the old failure — auto-stop unreachable for an
+    /// unconsented user or a plan without `monitoring.activity` — cannot be expressed here at all.
+    /// That is the guarantee; these cases just pin the thresholds.
+    #[test]
+    fn a_running_timer_stops_after_the_hard_idle_limit() {
+        assert_eq!(idle_action(true, AUTO_STOP_SECS, false), IdleAction::Stop);
+        assert_eq!(idle_action(true, AUTO_STOP_SECS + 3600, true), IdleAction::Stop);
+        // Stopping outranks prompting: past the limit there is nothing left to ask.
+        assert_eq!(idle_action(true, AUTO_STOP_SECS, true), IdleAction::Stop);
+    }
+
+    #[test]
+    fn the_prompt_fires_once_then_stays_quiet() {
+        assert_eq!(idle_action(true, IDLE_PROMPT_SECS, false), IdleAction::Prompt);
+        // Already asked — don't nag every second for the next ten minutes.
+        assert_eq!(idle_action(true, IDLE_PROMPT_SECS + 60, true), IdleAction::None);
+    }
+
+    #[test]
+    fn an_active_user_is_left_alone() {
+        assert_eq!(idle_action(true, 0, false), IdleAction::None);
+        assert_eq!(idle_action(true, IDLE_PROMPT_SECS - 1, false), IdleAction::None);
+    }
+
+    /// No timer ⇒ nothing to stop and nothing to ask, however long the machine has been idle.
+    #[test]
+    fn a_stopped_timer_is_never_acted_on() {
+        for idle in [0, IDLE_PROMPT_SECS, AUTO_STOP_SECS, AUTO_STOP_SECS * 10] {
+            assert_eq!(idle_action(false, idle, false), IdleAction::None, "idle={idle}");
+            assert_eq!(idle_action(false, idle, true), IdleAction::None, "idle={idle}");
+        }
+    }
+
+    /// The thresholds must stay ordered, or the prompt becomes unreachable.
+    #[test]
+    fn the_prompt_comes_before_the_stop() {
+        // Runtime bindings so the comparison isn't const-folded (`clippy::assertions_on_constants`).
+        let (prompt, stop) = (IDLE_PROMPT_SECS, AUTO_STOP_SECS);
+        assert!(prompt < stop, "prompt {prompt}s must come before stop {stop}s");
     }
 }
 

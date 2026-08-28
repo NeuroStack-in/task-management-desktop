@@ -91,8 +91,17 @@ pub async fn install_now(app: &AppHandle) -> Result<String, String> {
         .map_err(|e| format!("updater:check:{e}"))?
         .ok_or("updater:none_available")?;
     let version = update.version.clone();
+    let handle = app.clone();
     update
-        .download_and_install(|_downloaded, _total| {}, || {})
+        // The second closure is `on_before_exit`, and it used to be `|| {}`. On Windows the plugin
+        // runs the installer and then calls `std::process::exit(0)`, so `RunEvent::ExitRequested`
+        // never fires — this hook is the ONLY chance to close the session. Without it an agent that
+        // updated mid-timer left the session open on the server: "Recording" forever in the web UI,
+        // and the employee's task forgotten rather than offered back on relaunch.
+        .download_and_install(
+            |_downloaded, _total| {},
+            move || crate::lifecycle::close_session_for_exit(&handle, "update"),
+        )
         .await
         .map_err(|e| format!("updater:install:{e}"))?;
     Ok(version)
@@ -130,8 +139,14 @@ pub async fn check_and_maybe_install(app: &AppHandle, auto_update: bool) -> Resu
         );
         return Ok(true);
     }
+    let handle = app.clone();
     update
-        .download_and_install(|_downloaded, _total| {}, || {})
+        // See `install_now` — the auto-update path needs the same close, and needs it more: this
+        // one fires on a 6-hour timer with nobody watching, in the middle of someone's workday.
+        .download_and_install(
+            |_downloaded, _total| {},
+            move || crate::lifecycle::close_session_for_exit(&handle, "auto-update"),
+        )
         .await
         .map_err(|e| format!("updater:install:{e}"))?;
     Ok(true)
