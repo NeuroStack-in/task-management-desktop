@@ -19,10 +19,19 @@
 //! |---|---|---|
 //! | `PBT_APMSUSPEND` | classic S3 sleep / hibernate | "Sleep" on older machines |
 //! | `GUID_LIDSWITCH_STATE_CHANGE` → closed | lid | closing the laptop |
-//! | `GUID_CONSOLE_DISPLAY_STATE` → off | display off | Modern Standby, screen timeout |
 //! | `WTS_SESSION_LOCK` | Win+L, switch user | walking away locked |
 //!
 //! Each means the same thing for time tracking: nobody is working. The timer stops.
+//!
+//! **The display state is deliberately not one of them.** `GUID_CONSOLE_DISPLAY_STATE` was listed
+//! here and removed: it is the broadest signal available and it fires on an ordinary screen
+//! timeout, which would stop the clock on someone reading, on a call, or watching a demo. Being
+//! wrongly stopped is worse than being stopped late — the person has to notice and restart, and
+//! the minutes in between are simply gone.
+//!
+//! What that costs: a **desktop** on Modern Standby, slept from the Start menu, with
+//! sign-in-on-wake off — no lid, no S3 suspend, no lock — falls back to the 15-minute idle stop.
+//! Laptops are covered by the lid, and Windows locks the session on sleep by default.
 //!
 //! **Stopping at `now` is right here**, unlike the wake-side detector which must backdate. These
 //! arrive *before* the machine goes down, so `now` is the last moment of work — there is no gap to
@@ -64,10 +73,6 @@ const WTS_SESSION_LOCK: usize = 0x7;
 
 /// The lid opened or closed. `Data[0]`: 0 = closed, 1 = open.
 const GUID_LIDSWITCH_STATE_CHANGE: GUID = GUID::from_u128(0xBA3E0F4D_B817_4094_A2D1_D56379E6A0F3);
-/// The display turned on or off. `Data[0]`: 0 = off, 1 = on, 2 = dimmed.
-///
-/// This is the one that catches Modern Standby, where nothing else fires.
-const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID::from_u128(0x6FE69556_704A_47A0_8F24_C28D936FDA47);
 
 /// The handle the window procedure reaches the app through.
 ///
@@ -121,10 +126,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     let value = s.Data[0];
                     if s.PowerSetting == GUID_LIDSWITCH_STATE_CHANGE && value == 0 {
                         stop_for("lid-closed");
-                    } else if s.PowerSetting == GUID_CONSOLE_DISPLAY_STATE && value == 0 {
-                        // Display off. On Modern Standby this is the only signal that arrives, and
-                        // it is also a screen timeout — both mean nobody is at the machine.
-                        stop_for("display-off");
                     }
                 }
                 _ => {}
@@ -179,23 +180,22 @@ unsafe fn run() {
         return;
     }
 
-    // Each registration is independently useful, so a failure warns and continues rather than
-    // abandoning the others — a machine with no lid still wants the display and suspend signals.
-    for (guid, what) in [
-        (GUID_LIDSWITCH_STATE_CHANGE, "lid"),
-        (GUID_CONSOLE_DISPLAY_STATE, "display"),
-    ] {
-        if RegisterPowerSettingNotification(HANDLE(hwnd.0), &guid, DEVICE_NOTIFY_WINDOW_HANDLE)
-            .is_err()
-        {
-            tracing::warn!("power: could not subscribe to {what} notifications");
-        }
+    // A failure warns and continues rather than abandoning the rest: a desktop with no lid switch
+    // still wants suspend and lock, neither of which needs registering.
+    if RegisterPowerSettingNotification(
+        HANDLE(hwnd.0),
+        &GUID_LIDSWITCH_STATE_CHANGE,
+        DEVICE_NOTIFY_WINDOW_HANDLE,
+    )
+    .is_err()
+    {
+        tracing::warn!("power: could not subscribe to lid notifications");
     }
     if WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION).is_err() {
         tracing::warn!("power: could not subscribe to session lock notifications");
     }
 
-    tracing::info!("power: listening for suspend / lid / display / lock");
+    tracing::info!("power: listening for suspend / lid / lock");
 
     // A message loop this thread owns. `GetMessageW` blocks, so it costs nothing while idle.
     let mut msg = MSG::default();
