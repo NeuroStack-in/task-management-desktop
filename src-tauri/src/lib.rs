@@ -275,6 +275,12 @@ pub fn run() {
             // backstop whenever this connection is down.
             mqtt::spawn(app.handle().clone());
             monitor::spawn(app.handle().clone());
+            // Windows tells us the machine is going away — suspend, lid, display off, session lock
+            // — and tao forwards none of it. Without this the timer only stops on WAKE (and, under
+            // Modern Standby, not even then, since the process keeps ticking and no clock gap
+            // appears): the hours stayed honest but the session showed as open all night.
+            #[cfg(windows)]
+            monitor::power::spawn(app.handle().clone());
             monitor::spawn_screenshots(app.handle().clone());
 
             // Autostart policy (was: unconditional `enable()` every launch, which silently forced
