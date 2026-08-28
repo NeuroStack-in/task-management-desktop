@@ -379,21 +379,48 @@ pub fn run() {
         .expect("error while building the WorkPulse agent");
 
     app.run(|app_handle, event| {
-        // Close the running session on quit (tray Quit / Ctrl-C / SIGTERM all funnel to
-        // ExitRequested), stopping the timer with `Shutdown` so the day isn't left open
-        // (BUILD-PLAN.md:97). Idempotent.
+        // Close the running session however this process is ending, stopping the timer with
+        // `Shutdown` so the day isn't left open (BUILD-PLAN.md:97).
         //
-        // The session is deliberately **not** cleared here. Tokens live in the OS keyring and refresh
-        // is automatic (ENROLLMENT.md:11); `setup()` calls `auth.restore()` at startup for exactly
-        // this reason. Signing out on every quit made that restore dead code and forced a fresh login
-        // on each launch — for an agent that autostarts at login, that is the difference between
+        // **Both variants, deliberately.** They are different endings, and only one of them is a
+        // quit:
+        //
+        // - `ExitRequested` — tray Quit, Ctrl-C, SIGTERM. The orderly path.
+        // - `Exit` — among other things, **signing out of Windows**. A logoff sends
+        //   `WM_ENDSESSION`, tao answers it with `loop_destroyed()` (it deliberately does not
+        //   implement `WM_QUERYENDSESSION`), and that surfaces as `Event::LoopDestroyed` →
+        //   `RunEvent::Exit`. It never passes through `ExitRequested`.
+        //
+        // Matching only `ExitRequested` therefore missed the most routine ending there is: an
+        // employee finishing their shift by signing out of Windows rather than quitting from the
+        // tray. Their timer was never stopped, no `TimerStopped` reached the server, and the
+        // session stayed open until the server-side stale-session reaper closed it — so the web UI
+        // read "Recording" all evening.
+        //
+        // `close_session_for_exit` is idempotent (`Timer::stop` returns `None` when nothing is
+        // running), so a normal quit firing both events does the work once and no-ops the second.
+        //
+        // Windows kills the process shortly after `WM_ENDSESSION`, which is why that function is
+        // synchronous: `assemble_and_enqueue` writes `queue/batches.jsonl` on this thread and is
+        // done in milliseconds. Nothing here may await.
+        //
+        // The session is deliberately **not** cleared. Tokens live in the OS keyring and refresh is
+        // automatic (ENROLLMENT.md:11); `setup()` calls `auth.restore()` at startup for exactly this
+        // reason. Signing out on every quit made that restore dead code and forced a fresh login on
+        // each launch — for an agent that autostarts at login, that is the difference between
         // "monitoring resumes" and "monitoring silently doesn't". Sign-out is a user action
-        // (`auth_logout`), not a side effect of closing the window.
-        if let RunEvent::ExitRequested { .. } = event {
-            // The same close the updater's `on_before_exit` runs — see `lifecycle`. Sharing one
-            // function is the point: an auto-update exits via `std::process::exit(0)` and never
-            // reaches this arm, so a second copy here would silently stop covering that path.
-            crate::lifecycle::close_session_for_exit(app_handle, "quit");
+        // (`auth_logout`), not a side effect of the window closing.
+        match event {
+            RunEvent::ExitRequested { .. } => {
+                // The same close the updater's `on_before_exit` runs — see `lifecycle`. Sharing one
+                // function is the point: an auto-update exits via `std::process::exit(0)` and never
+                // reaches this arm, so a second copy here would silently stop covering that path.
+                crate::lifecycle::close_session_for_exit(app_handle, "quit");
+            }
+            RunEvent::Exit => {
+                crate::lifecycle::close_session_for_exit(app_handle, "session-end");
+            }
+            _ => {}
         }
     });
 }
