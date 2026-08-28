@@ -176,6 +176,14 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
 
 // ── auth ─────────────────────────────────────────────────────────────────────
 
+/**
+ * The theme stored on the account (`GET /v1/me/appearance`), or `null` when signed out or
+ * unreachable — the panel then keeps what it is showing rather than flipping to a default.
+ */
+export function getAppearance(): Promise<string | null> {
+  return invoke<string | null>("appearance");
+}
+
 export function authStatus(): Promise<AuthStatus> {
   return invoke<AuthStatus>("auth_status");
 }

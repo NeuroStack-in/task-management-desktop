@@ -9,6 +9,7 @@
 //!
 //! Not live-verified — needs a signed-in session against the live pool.
 
+pub mod appearance;
 pub mod batch;
 pub mod client;
 pub mod config;

@@ -215,6 +215,7 @@ pub fn run() {
             commands::panel::request_pause,
             commands::panel::pause_state,
             commands::panel::identity,
+            commands::panel::appearance,
             commands::panel::list_projects,
             commands::panel::list_tasks,
             commands::panel::create_task,

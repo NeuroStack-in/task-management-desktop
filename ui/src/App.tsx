@@ -12,7 +12,7 @@ import { PauseCard } from "@/cards/PauseCard";
 import { PrivacyLogCard } from "@/cards/PrivacyLogCard";
 import { SessionsCard, type ResumeSelection } from "@/cards/SessionsCard";
 import { TimerCard } from "@/cards/TimerCard";
-import { AutostartToggle, IdentityChip, LiveDot, StatusBadge, ThemeToggle } from "@/components/panel";
+import { AutostartToggle, IdentityChip, LiveDot, StatusBadge } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import { startTimer, takePendingResume } from "@/lib/agent";
 import { recordHistory } from "@/lib/descriptionHistory";
@@ -49,7 +49,8 @@ function Panel() {
     dismissActionError,
     refresh,
   } = useAgent();
-  const { theme, toggle: toggleTheme } = useTheme();
+  // Theme follows the account (web Settings -> Appearance), so there is nothing to toggle here.
+  useTheme(Boolean(snapshot?.auth.signedIn));
   useResumeLastTask(snapshot?.auth.signedIn === true, snapshot?.timer.running === true, refresh);
 
   // The monitoring notice has been removed from the panel, but the core still gates activity and
@@ -137,7 +138,6 @@ function Panel() {
           {pause.paused ? <StatusBadge tone="warn">paused</StatusBadge> : null}
         </span>
         <AutostartToggle />
-        <ThemeToggle theme={theme} onToggle={toggleTheme} />
         {/* Hidden rather than faked when the core can't say who it's bound to. */}
         {snapshot.identity && (
           <>

@@ -255,6 +255,28 @@ pub async fn list_projects(
     crate::api::projects::fetch_projects(&client, &ingest_url, &id_token).await
 }
 
+/// The theme the user chose in the web app, so the panel matches it instead of keeping a second,
+/// rival preference of its own.
+///
+/// `None` when signed out or unreachable — the panel then keeps whatever it is already showing.
+/// Deliberately not an error: a theme that failed to load is not worth an error state, and failing
+/// loudly here would put a red banner on a working agent.
+#[tauri::command]
+pub async fn appearance(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Ok(None);
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    match crate::api::appearance::fetch_appearance(&client, &ingest_url, &id_token).await {
+        Ok(a) => Ok(Some(a.theme)),
+        Err(e) => {
+            tracing::debug!("appearance unavailable ({e}); panel keeps its current theme");
+            Ok(None)
+        }
+    }
+}
+
 /// The tasks the picker offers — the signed-in user's own, plus the unclaimed work in projects
 /// they belong to (`GET /v1/me/tasks?include_unassigned=true`). Empty when signed out.
 #[tauri::command]

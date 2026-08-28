@@ -1,4 +1,4 @@
-import { Moon, Power, Sun } from "lucide-react";
+import { Power } from "lucide-react";
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { getAutoStart, setAutoStart } from "@/lib/agent";
 import { initials } from "@/lib/format";
-import type { Theme } from "@/lib/theme";
 import type { Identity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -270,19 +269,3 @@ export function AutostartToggle() {
   );
 }
 
-/** Light/dark switch. Light is the default; the choice persists across restarts. */
-export function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () => void }) {
-  const next = theme === "dark" ? "light" : "dark";
-  return (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      onClick={onToggle}
-      aria-label={`Switch to ${next} theme`}
-      title={`Switch to ${next} theme`}
-      className="text-muted-foreground"
-    >
-      {theme === "dark" ? <Moon /> : <Sun />}
-    </Button>
-  );
-}
