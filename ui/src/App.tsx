@@ -125,14 +125,16 @@ function Panel() {
       <header className="mb-2.5 flex shrink-0 items-center gap-2">
         <LiveDot live={showLive} />
         <h1 className="font-heading text-[14px] font-semibold tracking-[0.2px]">WorkPulse</h1>
+        {/* The monitoring/idle badge is gone: `LiveDot` above already carries that state, and two
+            indicators for one fact just crowded a 320px-wide header. PRIVACY.md §5 asks for a
+            *persistent indicator*, not a specific control — the dot pulses green whenever capture
+            is actually running, so the invariant still holds. Don't remove the dot as well.
+
+            `paused` DOES keep a badge. It is not the same fact: the dot only distinguishes
+            capturing from not, and a user who paused capture themselves needs to see that it is
+            paused rather than merely idle — otherwise the pause looks like a malfunction. */}
         <span className="ml-auto">
-          {pause.paused ? (
-            <StatusBadge tone="warn">paused</StatusBadge>
-          ) : (
-            <StatusBadge tone={showLive ? "on" : "neutral"}>
-              {showLive ? "monitoring" : "idle"}
-            </StatusBadge>
-          )}
+          {pause.paused ? <StatusBadge tone="warn">paused</StatusBadge> : null}
         </span>
         <AutostartToggle />
         <ThemeToggle theme={theme} onToggle={toggleTheme} />
