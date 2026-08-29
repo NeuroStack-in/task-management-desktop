@@ -66,7 +66,7 @@ wp-agent-contract = { path = "../backend/crates/wp-agent-contract" }
 # CI must also run a job that fails on contract drift (compile the agent against the pinned rev).
 
 [workspace.package]
-version = "0.1.18"
+version = "0.1.19"
 edition = "2021"
 license = "UNLICENSED"
 
