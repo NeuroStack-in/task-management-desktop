@@ -1,4 +1,4 @@
-import { Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { ExternalLink, Eye, EyeOff, ShieldCheck } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
 import { LogoMark } from "@/components/shared/logo";
@@ -100,6 +100,14 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
     } finally {
       setPending(false);
     }
+  }
+
+  function openSite() {
+    // Opens in the system browser (core command; the panel itself never navigates). Opening rarely
+    // fails, but if the OS has no default browser, say where to go rather than swallow it.
+    void agent.openWebsite().catch(() => {
+      setError("Couldn't open your browser. Go to workpulse-ns.vercel.app to set up or manage your organization.");
+    });
   }
 
   async function onGoogle() {
@@ -357,11 +365,22 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
           )}
       </div>
 
-      {/* Compact footer: one line of assurance. */}
-      <p className="mt-3 flex shrink-0 items-start justify-center gap-1.5 px-2 text-center text-[11px] leading-[1.45] text-muted-foreground/70">
-        <ShieldCheck aria-hidden className="mt-[1px] size-3.5 shrink-0" />
-        <span>Forgotten your password? Your workspace admin can reset it.</span>
-      </p>
+      {/* Compact footer: one line of assurance, plus the way out to the web app (org setup lives
+          there — the agent panel has no navigation of its own). */}
+      <div className="mt-3 flex shrink-0 flex-col items-center gap-1.5 px-2 text-center text-[11px] leading-[1.45] text-muted-foreground/70">
+        <p className="flex items-start justify-center gap-1.5">
+          <ShieldCheck aria-hidden className="mt-[1px] size-3.5 shrink-0" />
+          <span>Forgotten your password? Your workspace admin can reset it.</span>
+        </p>
+        <button
+          type="button"
+          onClick={openSite}
+          className="inline-flex items-center gap-1 rounded underline-offset-2 transition-colors hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          New to WorkPulse? Set up your organization
+          <ExternalLink aria-hidden className="size-3 shrink-0" />
+        </button>
+      </div>
     </div>
   );
 }

@@ -200,6 +200,7 @@ pub fn run() {
             commands::auth_complete_mfa,
             commands::auth_logout,
             commands::auth_status,
+            commands::open_website,
             commands::set_consent,
             commands::consent_status,
             commands::timer_start,

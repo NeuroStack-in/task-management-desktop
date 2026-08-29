@@ -226,12 +226,21 @@ export function login(username: string, password: string): Promise<AuthStatus> {
 }
 
 /**
- * Sign in with Google. Opens the system browser to the Cognito Hosted UI (native OAuth + PKCE,
- * caught on a localhost loopback) and resolves to the same `AuthStatus` as a password login — so the
- * caller handles `signedIn` identically. Rejects if the browser flow is cancelled or times out.
+ * Sign in with Google. Opens the system browser to the Cognito Hosted UI (native OAuth + PKCE),
+ * returns to the app via the `workpulse://callback` deep link, and resolves to the same `AuthStatus`
+ * as a password login — so the caller handles `signedIn` identically. Rejects if the browser flow is
+ * cancelled or times out.
  */
 export function loginWithGoogle(): Promise<AuthStatus> {
   return invoke<AuthStatus>("auth_login_google");
+}
+
+/**
+ * Open the WorkPulse web app in the user's system browser (org sign-up, invites, the full dashboard).
+ * Egress stays Rust-side — the panel never navigates, so this is a core command, not an `<a href>`.
+ */
+export async function openWebsite(): Promise<void> {
+  await invoke<void>("open_website");
 }
 
 /** Second leg of the admin-created-account first login, using the session from `login`. */

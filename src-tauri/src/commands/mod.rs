@@ -141,6 +141,26 @@ pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
     state.auth.status()
 }
 
+// ---- external links ----
+
+/// The WorkPulse web app — where an organization is created, invites are sent, and the full
+/// dashboard lives. The agent panel is a small fixed window with no navigation of its own, so links
+/// out of it (creating an org after an `auth:oauth:no_org` sign-in, "forgot password", the dashboard)
+/// go here.
+const WEBSITE_URL: &str = "https://workpulse-ns.vercel.app";
+
+/// Open the WorkPulse web app in the user's **system browser** — never the webview, which is the
+/// panel itself. Routed through the core rather than an in-webview `<a href>` so the single place
+/// network egress happens stays Rust-side, matching the CSP contract (`default-src 'self'`).
+#[tauri::command]
+pub fn open_website(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    #[allow(deprecated)] // same rationale as `auth_login_google`: the shell plugin is already here.
+    app.shell()
+        .open(WEBSITE_URL.to_string(), None)
+        .map_err(|e| format!("open:website: couldn't open the browser ({e})"))
+}
+
 // ---- consent (M5 / PRIVACY.md) ----
 
 /// Grant or revoke monitoring consent. Capture (activity + screenshots) is gated on this and
