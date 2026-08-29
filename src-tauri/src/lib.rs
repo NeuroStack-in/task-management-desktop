@@ -176,10 +176,16 @@ pub fn run() {
     init_tracing();
 
     let app = tauri::Builder::default()
-        // single-instance must be registered first: a second launch focuses the running one.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // single-instance must be registered first: a second launch focuses the running one — and, on
+        // Windows/Linux, an OS deep-link handoff arrives here as an `argv` entry
+        // (`workpulse://callback?code=…`). Deliver that URL to a pending Google sign-in, then focus.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(url) = argv.iter().find(|a| a.starts_with("workpulse://")) {
+                app.state::<AppState>().auth.deliver_oauth_redirect(url.clone());
+            }
             focus_panel(app);
         }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -233,6 +239,26 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // Register the `workpulse://` scheme for THIS exe and route any incoming callback URL to a
+            // pending Google sign-in. The installer registers the scheme for real users; this runtime
+            // call is the dev/portable fallback, and `on_open_url` is the macOS (and in-process)
+            // delivery path — Windows/Linux also come through the single-instance argv above.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = app.deep_link().register("workpulse") {
+                    tracing::warn!("deep-link: could not register scheme at runtime ({e}) — the installer handles it for real users");
+                }
+                let dl = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        if url.scheme() == "workpulse" {
+                            dl.state::<AppState>().auth.deliver_oauth_redirect(url.to_string());
+                        }
+                    }
+                });
+            }
+
             // Resume a keyring session, then start the sender (Thread B) + monitor (A) + screenshots (C).
             let handle = app.handle().clone();
             // Consent first and synchronously: the monitor and screenshot threads start just below

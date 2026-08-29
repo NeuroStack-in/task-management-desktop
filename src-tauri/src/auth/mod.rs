@@ -24,12 +24,19 @@ use token::Tokens;
 /// Keyring key for the long-lived refresh secret.
 const REFRESH_KEY: &str = "refresh_token";
 
+/// How long a Google sign-in waits for the browser deep link before giving up.
+const OAUTH_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub struct AuthManager {
     cfg: CognitoConfig,
     http: reqwest::Client,
     tokens: RwLock<Option<Tokens>>,
     /// Serializes refresh so N racing callers do one network refresh, not N.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// The one-shot a pending `login_google` is waiting on; the deep-link handler fulfils it with the
+    /// `workpulse://callback?…` URL. `None` when no sign-in is in flight. Std mutex, never held across
+    /// an await, so the sync deep-link handler can drop a URL in without blocking.
+    oauth_wait: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
 }
 
 impl AuthManager {
@@ -43,6 +50,7 @@ impl AuthManager {
             http,
             tokens: RwLock::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
+            oauth_wait: std::sync::Mutex::new(None),
         }
     }
 
@@ -112,17 +120,63 @@ impl AuthManager {
         }
     }
 
-    /// Sign in through the **Hosted UI (Google)** — a native loopback + PKCE flow ([`oauth`]).
-    /// `open` launches the system browser (injected so the auth core stays free of the Tauri
-    /// handle). On success the tokens are stored exactly as a password login stores them, so
-    /// everything downstream (refresh, claims, the fleet heartbeat) is unchanged.
+    /// Sign in through the **Hosted UI (Google)** — a native **deep-link + PKCE** flow ([`oauth`]).
+    ///
+    /// `open` launches the system browser (injected so the auth core stays free of the Tauri handle);
+    /// the browser round-trips through Google and Cognito redirects to `workpulse://callback?…`,
+    /// which the OS hands to the app — the deep-link handler calls [`deliver_oauth_redirect`], which
+    /// fulfils the one-shot this awaits. On success the tokens are stored exactly as a password login
+    /// stores them, so refresh, claims, and the fleet heartbeat are unchanged.
+    ///
+    /// [`deliver_oauth_redirect`]: Self::deliver_oauth_redirect
     pub async fn login_google<F>(&self, open: F) -> Result<AuthStatus, String>
     where
         F: FnOnce(&str) -> Result<(), String>,
     {
-        let t = oauth::login(&self.http, &self.cfg, open).await?;
+        let (verifier, challenge) = oauth::pkce();
+        let state = oauth::random_b64url(24);
+        let url = oauth::authorize_url(&self.cfg, &challenge, &state)?;
+
+        // Arm the one-shot BEFORE opening the browser, so a very fast redirect can't beat us to it.
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        *self.oauth_wait.lock().unwrap() = Some(tx);
+        if let Err(e) = open(&url) {
+            *self.oauth_wait.lock().unwrap() = None; // browser didn't open — disarm
+            return Err(e);
+        }
+
+        let redirect = match tokio::time::timeout(OAUTH_TIMEOUT, rx).await {
+            Ok(Ok(u)) => u,
+            // Sender dropped (a new sign-in armed over this one) — treat as cancelled.
+            Ok(Err(_)) => return Err("auth:oauth: sign-in was cancelled".into()),
+            Err(_) => {
+                *self.oauth_wait.lock().unwrap() = None;
+                return Err("auth:oauth: timed out waiting for the browser sign-in".into());
+            }
+        };
+
+        let (code, st, err) = oauth::parse_callback(&redirect);
+        if let Some(e) = err {
+            return Err(format!("auth:oauth: the sign-in was declined ({e})"));
+        }
+        if st.as_deref() != Some(state.as_str()) {
+            return Err("auth:oauth: state mismatch (possible CSRF) — sign-in aborted".into());
+        }
+        let code = code.ok_or("auth:oauth: no authorization code in the redirect")?;
+        let t = oauth::exchange(&self.http, &self.cfg, &code, &verifier).await?;
         self.set(t);
         Ok(self.status())
+    }
+
+    /// Hand a `workpulse://callback?…` deep-link URL to a pending [`login_google`]. Called from the
+    /// OS deep-link / single-instance handlers. A no-op if no sign-in is waiting (a stray deep link)
+    /// or it already resolved — the one-shot is taken exactly once.
+    pub fn deliver_oauth_redirect(&self, url: String) {
+        if let Ok(mut guard) = self.oauth_wait.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(url);
+            }
+        }
     }
 
     /// Answer an outstanding MFA challenge. On success the tokens are stored exactly as a

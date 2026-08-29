@@ -11,6 +11,9 @@ members = ["src-tauri"]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-build = { version = "2", features = [] }
 tauri-plugin-shell = "2"
+# Custom-scheme deep link (`workpulse://callback`) — the production-grade return path for the
+# native Google OAuth flow, replacing the localhost loopback (no fixed port to collide, cleaner UX).
+tauri-plugin-deep-link = "2"
 # Shell polish (M6)
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"

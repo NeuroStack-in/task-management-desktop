@@ -35,6 +35,13 @@
         "https://wp-downloads-dev.s3.ap-south-1.amazonaws.com/agent/latest/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFNjFCQjdCNzM5MkQyNQpSV1FsTFRtM3R4dm1CcUFjK3ljNUpHMm9wcGVHbmxTZWJrcXoyY2ZjMmFGM1FaOUt0RVR0ay9XOAo="
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "workpulse"
+        ]
+      }
     }
   },
   "bundle": {

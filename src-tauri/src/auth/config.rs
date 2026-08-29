@@ -26,10 +26,6 @@ pub struct CognitoConfig {
     pub hosted_ui_host: String,
 }
 
-/// Fixed loopback port the desktop Google flow catches the Hosted-UI redirect on. Must match a
-/// `http://localhost:<port>/callback` entry in the Cognito app client's callback URLs.
-pub const OAUTH_LOOPBACK_PORT: u16 = 8788;
-
 /// `option_env!` → a plain `&str`. A variable that is *set but blank* (an unset GitHub `vars.*`
 /// expands to exactly that) yields `Some("")`, so emptiness is what callers check — not `None`.
 const fn baked(v: Option<&'static str>) -> &'static str {
