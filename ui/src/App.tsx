@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LogOut } from "lucide-react";
+import { ExternalLink, LogOut } from "lucide-react";
 
 import {
+  openWebsite,
   updateInstall,
   updateStatus,
   type UpdateStatus,
@@ -153,6 +154,18 @@ function Panel() {
             <IdentityChip identity={snapshot.identity} />
           </>
         )}
+        {/* Always-available way out to the web app (full dashboard + account settings). The panel
+            has no navigation of its own, so this stays in the header for signed-in users just as the
+            login card carries it for signed-out ones. Opens the system browser (core command). */}
+        <button
+          type="button"
+          onClick={() => void openWebsite().catch(() => {})}
+          aria-label="Open the WorkPulse web app"
+          title="Open the WorkPulse web app"
+          className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <ExternalLink className="size-4" />
+        </button>
         <button
           type="button"
           onClick={signOut}

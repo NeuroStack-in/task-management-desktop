@@ -106,7 +106,7 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
     // Opens in the system browser (core command; the panel itself never navigates). Opening rarely
     // fails, but if the OS has no default browser, say where to go rather than swallow it.
     void agent.openWebsite().catch(() => {
-      setError("Couldn't open your browser. Go to workpulse-ns.vercel.app to set up or manage your organization.");
+      setError("Couldn't open your browser. Go to workpulse-ns.vercel.app to reach the WorkPulse web app.");
     });
   }
 
@@ -365,8 +365,8 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
           )}
       </div>
 
-      {/* Compact footer: one line of assurance, plus the way out to the web app (org setup lives
-          there — the agent panel has no navigation of its own). */}
+      {/* Compact footer: one line of assurance, plus the way out to the web app — the full dashboard
+          and account settings live there, and the agent panel has no navigation of its own. */}
       <div className="mt-3 flex shrink-0 flex-col items-center gap-1.5 px-2 text-center text-[11px] leading-[1.45] text-muted-foreground/70">
         <p className="flex items-start justify-center gap-1.5">
           <ShieldCheck aria-hidden className="mt-[1px] size-3.5 shrink-0" />
@@ -377,7 +377,7 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
           onClick={openSite}
           className="inline-flex items-center gap-1 rounded underline-offset-2 transition-colors hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
-          New to WorkPulse? Set up your organization
+          Open the WorkPulse web app
           <ExternalLink aria-hidden className="size-3 shrink-0" />
         </button>
       </div>
@@ -448,7 +448,7 @@ function explain(e: unknown): string {
   }
   // Distinct from the above: the address itself isn't in the directory.
   if (raw.includes("UserNotFound"))
-    return "No account with that email. Check the address, or ask your admin to invite you.";
+    return "There is no account with this email.";
 
   // Second-factor answers (`complete_mfa`) surface here too — a wrong or stale 6-digit code.
   if (raw.includes("CodeMismatch"))
