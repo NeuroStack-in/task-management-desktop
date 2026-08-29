@@ -21,7 +21,14 @@ pub struct CognitoConfig {
     pub region: String,
     pub client_id: String,
     pub ingest_url: String,
+    /// Hosted-UI host (no scheme), e.g. `wp-workpulse-dev.auth.ap-south-1.amazoncognito.com`. Only
+    /// the Google sign-in flow uses it; password auth talks to the regional IdP endpoint directly.
+    pub hosted_ui_host: String,
 }
+
+/// Fixed loopback port the desktop Google flow catches the Hosted-UI redirect on. Must match a
+/// `http://localhost:<port>/callback` entry in the Cognito app client's callback URLs.
+pub const OAUTH_LOOPBACK_PORT: u16 = 8788;
 
 /// `option_env!` → a plain `&str`. A variable that is *set but blank* (an unset GitHub `vars.*`
 /// expands to exactly that) yields `Some("")`, so emptiness is what callers check — not `None`.
@@ -36,12 +43,14 @@ const fn baked(v: Option<&'static str>) -> &'static str {
 const BUILD_CLIENT_ID: &str = baked(option_env!("WP_COGNITO_CLIENT_ID"));
 const BUILD_REGION: &str = baked(option_env!("WP_COGNITO_REGION"));
 const BUILD_INGEST_URL: &str = baked(option_env!("WP_INGEST_URL"));
+const BUILD_HOSTED_UI: &str = baked(option_env!("WP_COGNITO_HOSTED_UI"));
 
 // The shared `dev` stack — the fallback when a build bakes nothing. All three point at the *same*
 // environment, so an unconfigured build is coherent rather than half-aimed at two stacks.
 const DEV_CLIENT_ID: &str = "1b13u9ic3740m56ilmmrsfng7";
 const DEV_REGION: &str = "ap-south-1";
 const DEV_INGEST_URL: &str = "https://oqlla6l5oc.execute-api.ap-south-1.amazonaws.com";
+const DEV_HOSTED_UI: &str = "wp-workpulse-dev.auth.ap-south-1.amazoncognito.com";
 
 /// Build-time value if the build supplied one, else the dev fallback.
 fn baked_or(build: &'static str, dev: &'static str) -> &'static str {
@@ -65,12 +74,21 @@ impl CognitoConfig {
                 baked_or(BUILD_CLIENT_ID, DEV_CLIENT_ID),
             ),
             ingest_url: env_or("WP_INGEST_URL", baked_or(BUILD_INGEST_URL, DEV_INGEST_URL)),
+            hosted_ui_host: env_or(
+                "WP_COGNITO_HOSTED_UI",
+                baked_or(BUILD_HOSTED_UI, DEV_HOSTED_UI),
+            ),
         }
     }
 
     /// The regional Cognito Identity Provider endpoint.
     pub fn idp_endpoint(&self) -> String {
         format!("https://cognito-idp.{}.amazonaws.com/", self.region)
+    }
+
+    /// A Hosted-UI URL (`/oauth2/authorize`, `/oauth2/token`, …) for the Google sign-in flow.
+    pub fn hosted_ui_url(&self, path: &str) -> String {
+        format!("https://{}{}", self.hosted_ui_host, path)
     }
 
     /// Auth cannot proceed without an App Client ID. Kept as a guard rather than removed: it now

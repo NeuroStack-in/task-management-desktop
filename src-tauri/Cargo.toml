@@ -50,6 +50,9 @@ image_hasher = { workspace = true }
 # Cryptographic content hash for screenshot tamper-evidence (verify bytes at upload == bytes at
 # capture). Already in the tree; pinned to 0.10.
 sha2 = "0.10"
+# High-entropy OS randomness for the OAuth PKCE verifier + CSRF state (native Google sign-in). Tiny,
+# already in the tree transitively.
+getrandom = "0.2"
 wp-agent-contract = { workspace = true }
 
 # Native device geolocation (precise GPS / OS positioning) for the heartbeat — one platform-standard

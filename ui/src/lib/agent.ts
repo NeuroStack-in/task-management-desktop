@@ -225,6 +225,15 @@ export function login(username: string, password: string): Promise<AuthStatus> {
   return invoke<AuthStatus>("auth_login", { username, password });
 }
 
+/**
+ * Sign in with Google. Opens the system browser to the Cognito Hosted UI (native OAuth + PKCE,
+ * caught on a localhost loopback) and resolves to the same `AuthStatus` as a password login — so the
+ * caller handles `signedIn` identically. Rejects if the browser flow is cancelled or times out.
+ */
+export function loginWithGoogle(): Promise<AuthStatus> {
+  return invoke<AuthStatus>("auth_login_google");
+}
+
 /** Second leg of the admin-created-account first login, using the session from `login`. */
 export function completeNewPassword(
   username: string,

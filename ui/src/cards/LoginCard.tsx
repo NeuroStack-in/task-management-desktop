@@ -102,6 +102,26 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
     }
   }
 
+  async function onGoogle() {
+    if (pending) return;
+    setError(null);
+    setPending(true);
+    try {
+      // Opens the OS browser; resolves once the loopback catches the redirect. Same result shape as
+      // a password login, so `signedIn` is handled identically.
+      const status = await agent.loginWithGoogle();
+      if (status.signedIn) {
+        onSignedIn();
+        return;
+      }
+      setError("Sign-in didn't complete. Try again.");
+    } catch (e) {
+      setError(explain(e));
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function onSubmitCode(e: FormEvent) {
     e.preventDefault();
     if (pending || !mfa) return;
@@ -314,6 +334,25 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
               <Button type="submit" className="h-11 w-full text-[14px]" disabled={pending}>
                 {pending ? "Signing in…" : "Sign in"}
               </Button>
+
+              <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                <span className="h-px flex-1 bg-border" />
+                or
+                <span className="h-px flex-1 bg-border" />
+              </div>
+
+              {/* Opens the system browser for Google sign-in (native OAuth + PKCE), then returns
+                  here signed in. Works for an existing account and a brand-new one. */}
+              <Button
+                type="button"
+                variant="outline"
+                className="h-11 w-full gap-2 text-[14px]"
+                disabled={pending}
+                onClick={onGoogle}
+              >
+                <GoogleGlyph />
+                {pending ? "Opening browser…" : "Continue with Google"}
+              </Button>
             </form>
           )}
       </div>
@@ -433,5 +472,17 @@ function Field({
         )}
       </div>
     </div>
+  );
+}
+
+/** The Google "G" mark — inline SVG, so it needs no icon dependency or bundled asset. */
+function GoogleGlyph() {
+  return (
+    <svg viewBox="0 0 18 18" className="size-4 shrink-0" aria-hidden="true">
+      <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z" />
+      <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z" />
+      <path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z" />
+      <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z" />
+    </svg>
   );
 }

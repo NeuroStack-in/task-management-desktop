@@ -189,6 +189,7 @@ pub fn run() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::auth_login,
+            commands::auth_login_google,
             commands::auth_complete_new_password,
             commands::auth_complete_mfa,
             commands::auth_logout,

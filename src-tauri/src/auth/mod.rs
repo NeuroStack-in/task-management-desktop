@@ -9,6 +9,7 @@
 
 pub mod cognito;
 pub mod config;
+pub mod oauth;
 pub mod token;
 pub mod token_store;
 
@@ -109,6 +110,19 @@ impl AuthManager {
                 Ok(AuthStatus::mfa(challenge, session))
             }
         }
+    }
+
+    /// Sign in through the **Hosted UI (Google)** — a native loopback + PKCE flow ([`oauth`]).
+    /// `open` launches the system browser (injected so the auth core stays free of the Tauri
+    /// handle). On success the tokens are stored exactly as a password login stores them, so
+    /// everything downstream (refresh, claims, the fleet heartbeat) is unchanged.
+    pub async fn login_google<F>(&self, open: F) -> Result<AuthStatus, String>
+    where
+        F: FnOnce(&str) -> Result<(), String>,
+    {
+        let t = oauth::login(&self.http, &self.cfg, open).await?;
+        self.set(t);
+        Ok(self.status())
     }
 
     /// Answer an outstanding MFA challenge. On success the tokens are stored exactly as a

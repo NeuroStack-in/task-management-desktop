@@ -56,6 +56,33 @@ pub async fn auth_login(
     Ok(status)
 }
 
+/// Sign in with **Google** via the Hosted UI. Opens the system browser and catches the redirect on a
+/// localhost loopback (native OAuth + PKCE); resolves to the same `AuthStatus` a password login does.
+/// Works for an invited user signing in and for a brand-new user (who then lands on onboarding).
+#[tauri::command]
+pub async fn auth_login_google(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AuthStatus, String> {
+    use tauri_plugin_shell::ShellExt;
+    let status = state
+        .auth
+        .login_google(move |url| {
+            // `shell().open` is deprecated in favour of tauri-plugin-opener, but the shell plugin is
+            // already initialized here and pulling in a second plugin just to open one URL isn't
+            // worth it. It still opens the OS default browser, which is exactly what the flow needs.
+            #[allow(deprecated)]
+            app.shell()
+                .open(url.to_string(), None)
+                .map_err(|e| format!("auth:oauth: couldn't open the browser ({e})"))
+        })
+        .await?;
+    if status.signed_in {
+        state.flush.notify_one();
+    }
+    Ok(status)
+}
+
 #[tauri::command]
 pub async fn auth_complete_new_password(
     state: State<'_, AppState>,
