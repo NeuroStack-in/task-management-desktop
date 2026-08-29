@@ -107,8 +107,8 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
     setError(null);
     setPending(true);
     try {
-      // Opens the OS browser; resolves once the loopback catches the redirect. Same result shape as
-      // a password login, so `signedIn` is handled identically.
+      // Opens the OS browser; resolves once the `workpulse://callback` deep link returns to the app.
+      // Same result shape as a password login, so `signedIn` is handled identically.
       const status = await agent.loginWithGoogle();
       if (status.signedIn) {
         onSignedIn();
@@ -373,6 +373,31 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
  */
 function explain(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e);
+
+  // ── Google (Hosted UI) sign-in ────────────────────────────────────────────────────────────────
+  // A brand-new Google account that belongs to no organization. Open self-signup admits it to the web
+  // app (which routes to onboarding), but the agent has no org to track against — so say that plainly
+  // rather than sign in to an empty session or show a bare `invalid_request`.
+  if (raw.includes("auth:oauth:no_org"))
+    return "This Google account isn't part of a WorkPulse organization yet. Create one at workpulse-ns.vercel.app, or ask your workspace admin to invite this email — then sign in here.";
+  // The person closed the Google window or declined the consent prompt.
+  if (raw.includes("access_denied"))
+    return "Google sign-in was cancelled. Try again, and choose your work account when Google asks.";
+  if (raw.includes("auth:oauth:state_mismatch"))
+    return "Google sign-in couldn't be verified, so it was stopped for your safety. Please try again.";
+  if (
+    raw.includes("auth:oauth: sign-in was cancelled") ||
+    raw.includes("auth:oauth: timed out") ||
+    raw.includes("auth:oauth:no_code")
+  )
+    return "Google sign-in didn't finish. Try again — a browser window opens for you to pick your Google account, then brings you straight back here.";
+  // Any other Hosted-UI/Cognito OAuth refusal arrives as `auth:oauth:<code>: <description>`. Show
+  // Cognito's own sentence (after the code) when present — that names the real reason; the bare code
+  // does not.
+  const oauth = /auth:oauth:[a-z_]+(?::\s*(.+))?/i.exec(raw);
+  if (oauth)
+    return oauth[1]?.trim() || "Google sign-in couldn't be completed. Try again, or ask your workspace admin.";
+
   if (raw.includes("not_configured"))
     return "This agent isn't configured for your organization yet (missing Cognito client id). Contact your admin.";
   if (raw.includes("UserNotConfirmed"))
@@ -405,6 +430,20 @@ function explain(e: unknown): string {
   // Distinct from the above: the address itself isn't in the directory.
   if (raw.includes("UserNotFound"))
     return "No account with that email. Check the address, or ask your admin to invite you.";
+
+  // Second-factor answers (`complete_mfa`) surface here too — a wrong or stale 6-digit code.
+  if (raw.includes("CodeMismatch"))
+    return "That code didn't match. Check your authenticator app or text message and enter the current 6-digit code.";
+  if (raw.includes("ExpiredCode"))
+    return "That code has expired. Start sign-in again to get a fresh one.";
+
+  // The service answered but with nothing usable (an empty result, or a body we couldn't read). Not
+  // the user's doing — a plain retry is the right advice.
+  if (raw.includes("auth:no_result") || raw.includes("auth:parse"))
+    return "Sign-in didn't complete. Please try again in a moment.";
+  // A gateway 5xx wears the `auth:cognito:<status>:…` shape — the sign-in service is briefly down.
+  if (/auth:cognito:5\d\d/.test(raw))
+    return "The sign-in service is temporarily unavailable. Try again in a minute.";
 
   return raw;
 }

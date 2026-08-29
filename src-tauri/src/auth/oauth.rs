@@ -56,19 +56,32 @@ pub fn authorize_url(cfg: &CognitoConfig, challenge: &str, state: &str) -> Resul
     Ok(u.into())
 }
 
-/// `(code, state, error)` parsed from a `workpulse://callback?code=…&state=…` redirect URL.
-pub fn parse_callback(url: &str) -> (Option<String>, Option<String>, Option<String>) {
+/// What a `workpulse://callback?…` redirect carried. Success brings `code` (+ `state`); a refusal
+/// brings `error` (a short OAuth code like `invalid_request`/`access_denied`) and usually
+/// `error_description` — **Cognito's own human sentence** for the failure, which is the part worth
+/// showing. Dropping it left the UI with a bare code that means nothing to a person.
+#[derive(Debug, Default)]
+pub struct Callback {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+/// Parse the query of a `workpulse://callback?code=…&state=…` (or `?error=…&error_description=…`).
+pub fn parse_callback(url: &str) -> Callback {
     let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
-    let (mut code, mut state, mut error) = (None, None, None);
+    let mut cb = Callback::default();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         match k.as_ref() {
-            "code" => code = Some(v.into_owned()),
-            "state" => state = Some(v.into_owned()),
-            "error" => error = Some(v.into_owned()),
+            "code" => cb.code = Some(v.into_owned()),
+            "state" => cb.state = Some(v.into_owned()),
+            "error" => cb.error = Some(v.into_owned()),
+            "error_description" => cb.error_description = Some(v.into_owned()),
             _ => {}
         }
     }
-    (code, state, error)
+    cb
 }
 
 #[derive(Deserialize)]
@@ -133,12 +146,21 @@ mod tests {
 
     #[test]
     fn parse_callback_pulls_code_state_and_error_from_the_scheme_url() {
-        let (code, state, err) = parse_callback("workpulse://callback?code=abc123&state=xyz");
-        assert_eq!(code.as_deref(), Some("abc123"));
-        assert_eq!(state.as_deref(), Some("xyz"));
-        assert!(err.is_none());
-        let (_, _, err) = parse_callback("workpulse://callback?error=access_denied&state=xyz");
-        assert_eq!(err.as_deref(), Some("access_denied"));
+        let ok = parse_callback("workpulse://callback?code=abc123&state=xyz");
+        assert_eq!(ok.code.as_deref(), Some("abc123"));
+        assert_eq!(ok.state.as_deref(), Some("xyz"));
+        assert!(ok.error.is_none());
+
+        // The description is Cognito's human sentence — it must survive parsing (it used to be
+        // dropped, leaving the UI only the opaque `invalid_request`).
+        let bad = parse_callback(
+            "workpulse://callback?error=invalid_request&error_description=Sign-in%20couldn%27t%20be%20completed.&state=xyz",
+        );
+        assert_eq!(bad.error.as_deref(), Some("invalid_request"));
+        assert_eq!(
+            bad.error_description.as_deref(),
+            Some("Sign-in couldn't be completed.")
+        );
     }
 
     #[test]

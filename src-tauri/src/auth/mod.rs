@@ -155,15 +155,37 @@ impl AuthManager {
             }
         };
 
-        let (code, st, err) = oauth::parse_callback(&redirect);
-        if let Some(e) = err {
-            return Err(format!("auth:oauth: the sign-in was declined ({e})"));
+        let cb = oauth::parse_callback(&redirect);
+        if let Some(code) = cb.error {
+            // Keep the OAuth code as a stable tag the UI can branch on, and append Cognito's own
+            // sentence when it sent one — that description is the actual diagnosis (a failed Lambda
+            // trigger, a config problem), where the bare `invalid_request` alone tells a person
+            // nothing.
+            return Err(match cb.error_description {
+                Some(d) if !d.trim().is_empty() => format!("auth:oauth:{code}: {d}"),
+                _ => format!("auth:oauth:{code}"),
+            });
         }
-        if st.as_deref() != Some(state.as_str()) {
-            return Err("auth:oauth: state mismatch (possible CSRF) — sign-in aborted".into());
+        if cb.state.as_deref() != Some(state.as_str()) {
+            return Err("auth:oauth:state_mismatch: sign-in couldn't be verified".into());
         }
-        let code = code.ok_or("auth:oauth: no authorization code in the redirect")?;
+        let code = cb
+            .code
+            .ok_or("auth:oauth:no_code: the sign-in returned no authorization code")?;
         let t = oauth::exchange(&self.http, &self.cfg, &code, &verifier).await?;
+
+        // Open self-signup (the `presignup` trigger) lets a brand-new Google account in with **no
+        // org** — correct on the web, where onboarding then creates one, but the agent has nothing to
+        // track for an org-less account. Reject it with a clear code instead of signing in to an empty,
+        // unusable session. A decode failure is not treated as org-less (we can't tell — let it
+        // through and let downstream auth speak).
+        if token::decode_id_claims(&t.id_token)
+            .map(|c| c.tenant_id.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return Err("auth:oauth:no_org".into());
+        }
+
         self.set(t);
         Ok(self.status())
     }

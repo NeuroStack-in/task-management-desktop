@@ -110,6 +110,18 @@ mod tests {
         assert_eq!(c.username, "owner");
     }
 
+    /// The org-less guard in `login_google` keys off exactly this: a Google shell account (open
+    /// self-signup, no org) issues an ID token with **no `tenant_id`**, which must decode to the empty
+    /// string so the guard can reject it — not to some non-empty placeholder that reads as a real org.
+    #[test]
+    fn an_org_less_token_decodes_to_an_empty_tenant() {
+        let payload = r#"{"sub":"u1","perm":"0","exp":1720000000,"cognito:username":"new@self.test","email":"new@self.test"}"#;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        let jwt = format!("header.{b64}.signature");
+        let c = decode_id_claims(&jwt).unwrap();
+        assert!(c.tenant_id.trim().is_empty());
+    }
+
     fn claims(name: &str, email: &str, username: &str) -> IdClaims {
         IdClaims {
             sub: "u1".into(),
