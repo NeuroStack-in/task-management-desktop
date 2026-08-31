@@ -95,6 +95,23 @@ pub struct AppState {
     /// publish a clean `{"online":false}` (mqtt::shutdown). **Device-level, like config**: the
     /// credential and connection are per-install, so `reset_for_account_switch` leaves this alone.
     pub mqtt: Mutex<Option<crate::mqtt::MqttHandle>>,
+    /// The session target remembered when the timer was stopped **by the agent** (idle cut-off,
+    /// suspend/lid, or lock) — never by the user. The monitor restarts this same work on the next
+    /// keyboard/mouse input. `None` when there is nothing to resume. Per-user, so it's cleared on an
+    /// account switch. See `monitor`'s auto-resume block.
+    pub auto_resume: Mutex<Option<AutoResume>>,
+}
+
+/// A remembered timer target for auto-resume-on-activity (see `AppState::auto_resume`).
+#[derive(Clone, Debug)]
+pub struct AutoResume {
+    pub task_id: String,
+    pub subtask_id: String,
+    pub project_id: String,
+    pub description: String,
+    /// When the timer stopped (epoch ms). Bounds how long the offer stays open — a short break
+    /// resumes; an overnight sleep does not (that would restart a stale task, maybe on a new day).
+    pub stopped_at: i64,
 }
 
 impl AppState {
@@ -114,6 +131,7 @@ impl AppState {
             location: Mutex::new(None),
             auth: AuthManager::new(),
             mqtt: Mutex::new(None),
+            auto_resume: Mutex::new(None),
         }
     }
 }
@@ -148,6 +166,8 @@ impl AppState {
         self.outbox.lock().unwrap().clear();
         *self.location.lock().unwrap() = None;
         *self.pause.lock().unwrap() = PauseState::default();
+        // The next person must not have their timer auto-started onto the previous user's task.
+        *self.auto_resume.lock().unwrap() = None;
 
         // The transparency log is this user's own record of what was captured on their machine; the
         // next person to sign in must not inherit (or be able to read) it.
