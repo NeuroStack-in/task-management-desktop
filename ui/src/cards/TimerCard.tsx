@@ -489,37 +489,48 @@ const TASK_STATUSES: { value: string; label: string }[] = [
 ];
 
 /**
- * A compact status selector for the chosen task. A native `<select>` — it is the most compact
- * accessible control for a five-way choice in a narrow panel, and it themes with the surrounding
- * card. A `closed` task (or any status the server sends that isn't settable) is shown as a leading
- * disabled option so the current state is never misrepresented, while the change targets stay the
- * five real ones.
+ * A compact status selector for the chosen task — a **custom, themed dropdown** (the Base UI menu the
+ * pickers use), not a native `<select>`, so its trigger and options match the panel instead of the
+ * OS. A `closed` task (or any status the server sends that isn't settable here) is shown on the
+ * trigger as-is but never offered as a choice; the menu lists only the five real targets.
  */
 function TaskStatusRow({ status, onChange }: { status: string; onChange: (s: string) => void }) {
-  const known = TASK_STATUSES.some((s) => s.value === status);
+  const current = TASK_STATUSES.find((s) => s.value === status);
+  const label = current?.label ?? (status === "closed" ? "Closed (reviewed)" : status || "—");
   return (
-    <label className="flex items-center gap-2 text-[11px] text-feature-foreground/70">
+    <div className="flex items-center gap-2 text-[11px] text-feature-foreground/70">
       <span className="shrink-0">Task status</span>
-      <select
-        value={known ? status : ""}
-        onChange={(e) => {
-          const next = (e.target as HTMLSelectElement).value;
-          if (next && next !== status) onChange(next);
-        }}
-        className="min-w-0 flex-1 rounded-md border border-border bg-card px-2 py-1 text-[11px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-      >
-        {!known && (
-          <option value="" disabled>
-            {status === "closed" ? "Closed (reviewed)" : status || "—"}
-          </option>
-        )}
-        {TASK_STATUSES.map((s) => (
-          <option key={s.value} value={s.value}>
-            {s.label}
-          </option>
-        ))}
-      </select>
-    </label>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <button
+              type="button"
+              className="group inline-flex min-w-0 flex-1 items-center justify-between gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            />
+          }
+        >
+          <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-fast ease-standard group-data-[popup-open]:rotate-180" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" sideOffset={6} className="min-w-40 p-1">
+          {TASK_STATUSES.map((s) => (
+            <DropdownMenuItem
+              key={s.value}
+              onClick={() => {
+                if (s.value !== status) onChange(s.value);
+              }}
+              className={cn(
+                "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[12px]",
+                s.value === status && "bg-accent/60",
+              )}
+            >
+              {s.label}
+              {s.value === status && <Check className="size-3.5 shrink-0 text-primary" />}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   );
 }
 
