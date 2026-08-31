@@ -48,7 +48,35 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Safe to call twice (see the module note) and safe to call while signed out — with no token the
 /// flush is skipped and the teardown still runs, leaving the agent in the clean signed-out state a
 /// release is meant to produce.
-pub async fn stop_and_sign_out(app: &tauri::AppHandle) {
+/// Whether `released_at` is a release this agent has **not** already acted on.
+///
+/// The fleet row stays released once IT presses the button, so the server keeps reporting the same
+/// instant on every batch — including the first batch after the employee signs back in. Acting on
+/// that unconditionally is what locked them out of v0.1.20: sign in, batch, told "released", sign
+/// out, about a second a cycle. Comparing against the latch makes a repeat a no-op while a later
+/// release still stops the agent.
+///
+/// A `0` is "never released" and is never actionable.
+pub fn is_unhandled(released_at: i64) -> bool {
+    is_newer(released_at, crate::session_state::load().released_ack_ms)
+}
+
+/// The decision itself, split from the disk read so the rule that keeps an employee signed in is
+/// unit-tested rather than only exercised by releasing a real laptop.
+fn is_newer(released_at: i64, acked: i64) -> bool {
+    released_at > 0 && released_at > acked
+}
+
+/// Stop the timer, flush what this agent owes, then sign out — recording `released_at` so this
+/// release is never acted on twice.
+pub async fn stop_and_sign_out(app: &tauri::AppHandle, released_at: i64) {
+    // Latched **first**, before anything can fail. The teardown that follows signs the user out, and
+    // if the latch were written last a failure in between would leave the agent signing itself out
+    // on every subsequent sign-in — the exact lockout this exists to prevent. Recording a release
+    // that was then only partly carried out costs at most one un-stopped timer; the other order
+    // costs the employee their machine.
+    crate::session_state::update(|s| s.released_ack_ms = s.released_ack_ms.max(released_at));
+
     let state = app.state::<AppState>();
 
     // 1 — Stop the clock, and **keep the event**. `reset_for_account_switch` would discard it; here
@@ -91,4 +119,60 @@ pub async fn stop_and_sign_out(app: &tauri::AppHandle) {
     //     their hours are safe, and that signing in again is the expected next step.
     let _ = app.emit(crate::events::DEVICE_RELEASED, ());
     tracing::info!("release: timer stopped, work flushed, signed out");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    /// `0` is "this device has never been released" and must never trigger a teardown — it is what
+    /// every ordinary ack carries.
+    #[test]
+    fn a_device_that_was_never_released_is_never_torn_down() {
+        assert!(!is_newer(0, 0));
+        assert!(!is_newer(0, 1_700_000_000_000));
+    }
+
+    #[test]
+    fn an_unhandled_release_stops_the_agent() {
+        assert!(is_newer(1_700_000_000_000, 0));
+    }
+
+    /// **The lockout.** The fleet row stays released, so the server reports the same instant on
+    /// every batch — including the first batch after the employee signs back in. v0.1.20 acted on
+    /// it unconditionally and signed them straight out again, about a second per attempt, with no
+    /// way through. Having acted on it once, the agent must ignore it thereafter.
+    #[test]
+    fn the_same_release_is_ignored_once_it_has_been_acted_on() {
+        let at = 1_700_000_000_000;
+        assert!(is_newer(at, 0), "first delivery acts");
+        assert!(
+            !is_newer(at, at),
+            "the same release must not sign the employee out of a session they just started",
+        );
+    }
+
+    /// Idempotent across both paths: MQTT and the batch ack carry the same instant, so whichever
+    /// arrives second is recognised as the release already handled.
+    #[test]
+    fn the_second_delivery_path_is_a_no_op() {
+        let at = 1_700_000_000_000;
+        assert!(!is_newer(at, at));
+    }
+
+    /// A device released again later must still stop — the latch remembers one release, not "ever
+    /// released".
+    #[test]
+    fn a_later_release_still_stops_the_agent() {
+        let first = 1_700_000_000_000;
+        let second = first + 60_000;
+        assert!(is_newer(second, first));
+    }
+
+    /// A clock that went backwards, or an out-of-order delivery, must not re-trigger a teardown the
+    /// agent has already performed.
+    #[test]
+    fn an_older_release_arriving_late_is_ignored() {
+        assert!(!is_newer(1_699_999_000_000, 1_700_000_000_000));
+    }
 }

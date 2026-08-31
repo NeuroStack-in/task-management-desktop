@@ -97,14 +97,16 @@ pub fn spawn_sender(app: tauri::AppHandle) {
 
             refresh_location(&app).await;
             cycle::assemble_and_enqueue(&state);
-            let released = drain(&http, &upload, &ingest_url, &id_token, &state).await;
+            let released_at = drain(&http, &upload, &ingest_url, &id_token, &state).await;
 
             // The durable half of a device release: this agent was offline when IT pressed the
             // button and so never saw the MQTT command, and the ack it just got is how it finds
             // out. Dropped here rather than inside `drain` because the teardown flushes through
             // the same path (see `release::stop_and_sign_out`).
-            if released {
-                crate::release::stop_and_sign_out(&app).await;
+            // `is_unhandled` is the guard that keeps a signed-back-in employee signed in: the
+            // fleet row stays released, so this same instant arrives on every batch forever.
+            if crate::release::is_unhandled(released_at) {
+                crate::release::stop_and_sign_out(&app, released_at).await;
             }
         }
     });
@@ -200,8 +202,8 @@ async fn drain(
     ingest_url: &str,
     id_token: &str,
     state: &AppState,
-) -> bool {
-    let mut released = false;
+) -> i64 {
+    let mut released_at = 0i64;
     loop {
         let next = { state.outbox.lock().unwrap().next_batch().cloned() };
         let Some(batch) = next else { break };
@@ -213,7 +215,7 @@ async fn drain(
                 // The batch was still accepted and pruned above — the release rides an ordinary
                 // ack precisely so this send is not wasted. Keep draining: everything already
                 // queued should reach the server before the teardown clears it.
-                released |= ack.released;
+                released_at = released_at.max(ack.released_at);
 
                 // Config rail: the ack advertises the server version; on a mismatch, pull (ETag-conditional)
                 // and apply live — cadence/blur/silent + app/URL rules the monitor threads read each tick.
@@ -243,7 +245,7 @@ async fn drain(
             }
         }
     }
-    released
+    released_at
 }
 
 /// PUT one screenshot's bytes to its presigned S3 URL (host-pinned). Success deletes the local file;

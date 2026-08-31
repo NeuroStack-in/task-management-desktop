@@ -72,6 +72,19 @@ pub struct SessionState {
     /// previous run ended without one.
     #[serde(default)]
     pub open: Option<OpenSession>,
+    /// The `released_at` of the last device release this agent has already acted on.
+    ///
+    /// **This is what lets the employee sign back in.** The fleet row stays released after the fact,
+    /// so the server keeps reporting the same instant; without a record of having handled it, the
+    /// agent tore itself down on the first batch of every new session — sign in, sign out, about a
+    /// second apart, with no way through. Comparing against this makes the release idempotent: the
+    /// same one is ignored, a genuinely later one still stops the agent.
+    ///
+    /// Deliberately **survives sign-out** (`auth_logout` does not clear it) and lives in this file
+    /// rather than memory, because the whole point is to be remembered across the sign-out a release
+    /// causes and the restart that may follow it.
+    #[serde(default)]
+    pub released_ack_ms: i64,
 }
 
 impl SessionState {
@@ -159,6 +172,7 @@ mod tests {
                 stopped_at_ms,
             }),
             open: None,
+            released_ack_ms: 0,
         }
     }
 
