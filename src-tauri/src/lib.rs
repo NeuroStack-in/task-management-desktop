@@ -229,6 +229,7 @@ pub fn run() {
             commands::panel::create_task,
             commands::panel::create_subtask,
             commands::panel::set_subtask_status,
+            commands::panel::set_task_status,
             commands::panel::list_sessions,
             commands::panel::take_pending_resume,
             commands::panel::privacy_log,

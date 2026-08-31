@@ -361,6 +361,22 @@ export async function setSubtaskStatus(
   await invoke<SubtaskRow>("set_subtask_status", { projectId, taskId, subtaskId, status });
 }
 
+/**
+ * Change a **task's** status (`todo` | `in_progress` | `in_review` | `done` | `blocked`).
+ *
+ * Rejects with `task:status-not-yours` when the task is someone else's and the caller is only a
+ * project Member — a plain Member may move only a task they're assigned to; a Lead/Manager moves
+ * anyone's. `closed` is not settable here (it's the reviewed state). The panel re-reads after, so no
+ * return value is needed.
+ */
+export async function setTaskStatus(
+  projectId: string,
+  taskId: string,
+  status: string,
+): Promise<void> {
+  await invoke<TaskRow>("set_task_status", { projectId, taskId, status });
+}
+
 /** The task the agent was running when it last closed. See {@link takePendingResume}. */
 export interface PendingResume {
   taskId: string;

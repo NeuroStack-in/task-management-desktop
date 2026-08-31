@@ -265,15 +265,60 @@ pub async fn create_task(
     if !status.is_success() {
         return Err(format!("create_task:status:{}:{text}", status.as_u16()));
     }
-    parse_task(&text)
+    parse_task("create_task", &text)
+}
+
+/// `PATCH /v1/projects/{project_id}/tasks/{task_id}` — change a task's **status** from the panel
+/// (To do / In progress / In review / Done / Blocked). Same user Cognito JWT as the reads.
+///
+/// The backend gates this: a plain project Member may move only a task **they are assigned to**; a
+/// Lead/Manager may move anyone's. A **403** therefore means "not your task to move" — surfaced as a
+/// message the person can act on rather than a raw status. `closed` is not settable here (it's the
+/// reviewed state); the picker never offers it.
+pub async fn set_task_status(
+    client: &reqwest::Client,
+    ingest_url: &str,
+    id_token: &str,
+    project_id: &str,
+    task_id: &str,
+    status: &str,
+) -> Result<TaskDto, String> {
+    let url = format!(
+        "{}/v1/projects/{}/tasks/{}",
+        ingest_url.trim_end_matches('/'),
+        project_id,
+        task_id
+    );
+    let resp = client
+        .patch(url)
+        .bearer_auth(id_token)
+        .json(&serde_json::json!({ "status": status }))
+        .send()
+        .await
+        .map_err(|e| format!("set_task_status:network:{e}"))?;
+    let http = resp.status();
+    if http.as_u16() == 401 {
+        return Err("auth:expired".into());
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("set_task_status:read:{e}"))?;
+    if http.as_u16() == 403 {
+        return Err("task:status-not-yours".into());
+    }
+    if !http.is_success() {
+        return Err(format!("set_task_status:status:{}:{text}", http.as_u16()));
+    }
+    parse_task("set_task_status", &text)
 }
 
 /// Unwrap `{ "data": { ...TaskView } }` into the picker's `TaskDto` (extra fields serde-dropped).
-fn parse_task(text: &str) -> Result<TaskDto, String> {
+fn parse_task(op: &str, text: &str) -> Result<TaskDto, String> {
     let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("create_task:parse:{e}"))?;
+        serde_json::from_str(text).map_err(|e| format!("{op}:parse:{e}"))?;
     let inner = value.get("data").cloned().unwrap_or(value);
-    serde_json::from_value(inner).map_err(|e| format!("create_task:parse:{e}"))
+    serde_json::from_value(inner).map_err(|e| format!("{op}:parse:{e}"))
 }
 
 #[cfg(test)]

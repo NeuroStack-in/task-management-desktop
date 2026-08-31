@@ -52,6 +52,7 @@ export function TimerCard({
   onSwitch,
   onCreateSubtask,
   onSetSubtaskDone,
+  onSetTaskStatus,
   onRefresh,
 }: {
   timer: TimerState;
@@ -66,6 +67,8 @@ export function TimerCard({
     subtaskId: string,
     done: boolean,
   ) => Promise<boolean>;
+  /** Change the chosen task's status. Backend gates it (assignee, or a project Lead/Manager). */
+  onSetTaskStatus: (projectId: string, taskId: string, status: string) => void;
   /** Create a task in a project; resolves to its id (to select) or null on failure. */
   onRefresh: () => Promise<void>;
 }) {
@@ -427,6 +430,16 @@ export function TimerCard({
           </Button>
         </div>
 
+        {/* Task status — set it right from the panel instead of leaving to the web board. Shown
+            only once a task is picked (there is no status without a task). The backend enforces who
+            may change it: the assignee, or a project Lead/Manager. */}
+        {task && (
+          <TaskStatusRow
+            status={task.status}
+            onChange={(s) => onSetTaskStatus(projectId, task.id, s)}
+          />
+        )}
+
         {/* The breakdown under the chosen task. Renders only once a task is picked — before that
             there is nothing to break down, and an empty strip under an empty picker would read as
             a second prompt for one decision. */}
@@ -458,6 +471,55 @@ export function TimerCard({
         </p>
       </CardContent>
     </PanelCard>
+  );
+}
+
+/**
+ * The settable task statuses, in board order. **`closed` is deliberately absent** — a task becomes
+ * closed only by being reviewed (`POST …/review`), and the backend rejects it on a plain status
+ * edit, so offering it here would just produce an error. A task that already *is* closed still shows
+ * that state (below) and can be reopened by picking any of these.
+ */
+const TASK_STATUSES: { value: string; label: string }[] = [
+  { value: "todo", label: "To do" },
+  { value: "in_progress", label: "In progress" },
+  { value: "in_review", label: "In review" },
+  { value: "done", label: "Done" },
+  { value: "blocked", label: "Blocked" },
+];
+
+/**
+ * A compact status selector for the chosen task. A native `<select>` — it is the most compact
+ * accessible control for a five-way choice in a narrow panel, and it themes with the surrounding
+ * card. A `closed` task (or any status the server sends that isn't settable) is shown as a leading
+ * disabled option so the current state is never misrepresented, while the change targets stay the
+ * five real ones.
+ */
+function TaskStatusRow({ status, onChange }: { status: string; onChange: (s: string) => void }) {
+  const known = TASK_STATUSES.some((s) => s.value === status);
+  return (
+    <label className="flex items-center gap-2 text-[11px] text-feature-foreground/70">
+      <span className="shrink-0">Task status</span>
+      <select
+        value={known ? status : ""}
+        onChange={(e) => {
+          const next = (e.target as HTMLSelectElement).value;
+          if (next && next !== status) onChange(next);
+        }}
+        className="min-w-0 flex-1 rounded-md border border-border bg-card px-2 py-1 text-[11px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        {!known && (
+          <option value="" disabled>
+            {status === "closed" ? "Closed (reviewed)" : status || "—"}
+          </option>
+        )}
+        {TASK_STATUSES.map((s) => (
+          <option key={s.value} value={s.value}>
+            {s.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

@@ -397,6 +397,34 @@ pub async fn set_subtask_status(
     .await
 }
 
+/// Change a task's **status** from the panel (To do / In progress / In review / Done / Blocked).
+///
+/// Fails with `task:status-not-yours` when the caller is a project Member and the task is somebody
+/// else's — the backend gate: a Member may move only a task they're assigned to; a Lead/Manager moves
+/// anyone's. The panel turns that into a sentence rather than showing a raw 403.
+#[tauri::command]
+pub async fn set_task_status(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+    status: String,
+) -> Result<crate::api::tasks::TaskDto, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Err("auth:expired".into());
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    crate::api::tasks::set_task_status(
+        &client,
+        &ingest_url,
+        &id_token,
+        &project_id,
+        &task_id,
+        &status,
+    )
+    .await
+}
+
 // ── today's sessions (backend-fed) ───────────────────────────────────────────
 
 /// The signed-in user's folded time entries for `date` (the client's local `YYYY-MM-DD`), aggregated

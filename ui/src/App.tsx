@@ -41,6 +41,7 @@ function Panel() {
     grantConsent,
     toggleTimer,
     switchTo,
+    setTaskStatus,
     createSubtask,
     setSubtaskDone,
     requestPause,
@@ -325,6 +326,7 @@ function Panel() {
           onSwitch={switchTo}
           onCreateSubtask={createSubtask}
           onSetSubtaskDone={setSubtaskDone}
+          onSetTaskStatus={setTaskStatus}
           onRefresh={refresh}
         />
 

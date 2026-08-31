@@ -27,6 +27,12 @@ function humanizeActionError(e: unknown): string {
   if (raw.includes("not_running") || raw.includes("no session")) {
     return "No timer is running.";
   }
+  // A task/subtask status change the backend refused because it belongs to someone else and the
+  // caller is only a project Member — `task:status-not-yours` / `subtask:not-yours`. Name the rule
+  // rather than show the raw code, since it is one the person can act on.
+  if (raw.includes("not-yours")) {
+    return "You can only change the status of a task assigned to you. A project lead or manager can change anyone's.";
+  }
   // Strip the `module:` prefix rather than inventing wording for an error we do not know.
   return raw.replace(/^[a-z_]+:/, "");
 }
@@ -56,6 +62,8 @@ export interface Agent {
   toggleTimer: (sel: TimerSelection) => void;
   /** Re-attribute a running timer without stopping the clock. */
   switchTo: (sel: TimerSelection) => void;
+  /** Change a task's status. Backend-gated (assignee, or a project Lead/Manager); refreshes after. */
+  setTaskStatus: (projectId: string, taskId: string, status: string) => void;
   /** Add a subtask under a task; resolves to it (so the strip can target it) or null on failure. */
   createSubtask: (projectId: string, taskId: string, title: string) => Promise<Subtask | null>;
   /** Tick a subtask off or reopen it; resolves true when the write landed. */
@@ -226,6 +234,17 @@ export function useAgent(): Agent {
     [snapshot, run],
   );
 
+  // Uses `run` (unlike the subtask writes): the caller doesn't need the result, and `run` gives it
+  // the busy-guard, the refused-action error banner, and — crucially — the refresh, so the status
+  // dropdown reflects the new value the moment the write lands. A 403 (`task:status-not-yours`)
+  // surfaces through `reportAction` as the assignee-only sentence.
+  const setTaskStatus = useCallback(
+    (projectId: string, taskId: string, status: string) => {
+      run(() => agent.setTaskStatus(projectId, taskId, status));
+    },
+    [run],
+  );
+
   // Both subtask writes bypass `run` deliberately: the caller awaits the result to retarget the
   // timer, and a fire-and-forget would leave the strip a poll behind.
   const createSubtask = useCallback(
@@ -319,6 +338,7 @@ export function useAgent(): Agent {
     grantConsent,
     toggleTimer,
     switchTo,
+    setTaskStatus,
     createSubtask,
     setSubtaskDone,
     requestPause,
