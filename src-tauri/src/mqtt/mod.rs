@@ -114,6 +114,11 @@ enum Command {
         /// the device, and naming a colleague in a sign-out banner invites the wrong conversation.
         #[serde(default)]
         released_by: String,
+        /// **Which** release this is (epoch ms), so acting on it is idempotent — the batch ack
+        /// carries the same instant, and whichever arrives second is recognised and ignored.
+        /// Absent (an older server) ⇒ 0, which is never actionable.
+        #[serde(default)]
+        released_at: i64,
     },
     #[serde(other)]
     Unknown,
@@ -346,15 +351,24 @@ async fn handle_command(
                 }
             });
         }
-        Ok(Command::Release { released_by }) => {
-            tracing::info!(%released_by, "mqtt: device released — stopping and signing out");
+        Ok(Command::Release {
+            released_by,
+            released_at,
+        }) => {
+            // Already handled — the ack path or an earlier delivery of this same release got here
+            // first. Acting again would sign the employee out of the session they just started.
+            if !crate::release::is_unhandled(released_at) {
+                tracing::info!(released_at, "mqtt: release already handled — ignoring");
+                return;
+            }
+            tracing::info!(%released_by, released_at, "mqtt: device released — stopping and signing out");
             // Off the event loop, like `capture_now`: the teardown flushes the outbox over the
             // network (up to 20 s), and the loop must keep polling or the connection misses its
             // keepalive. No ack is published — the agent signs out mid-teardown, and the server
             // already has its own durable record of the release.
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                crate::release::stop_and_sign_out(&app).await;
+                crate::release::stop_and_sign_out(&app, released_at).await;
             });
         }
         Ok(Command::Unknown) => {
@@ -457,9 +471,15 @@ mod tests {
     /// *logged and ignored*, not surfaced as an error.
     #[test]
     fn parses_release_command() {
-        let raw = br#"{"kind":"release","released_by":"u7"}"#;
+        let raw = br#"{"kind":"release","released_by":"u7","released_at":1700000000000}"#;
         match serde_json::from_slice::<Command>(raw).unwrap() {
-            Command::Release { released_by } => assert_eq!(released_by, "u7"),
+            Command::Release {
+                released_by,
+                released_at,
+            } => {
+                assert_eq!(released_by, "u7");
+                assert_eq!(released_at, 1_700_000_000_000);
+            }
             other => panic!("expected Release, got {other:?}"),
         }
     }

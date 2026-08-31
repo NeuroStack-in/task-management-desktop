@@ -218,18 +218,6 @@ export function LoginCard({
     // centred inside it. So the whitespace ends up inside the card, where it looks like padding,
     // instead of around it, where it looked like a mistake.
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {releasedByAdmin && (
-        <div
-          role="status"
-          className="mb-3 shrink-0 rounded-xl border border-primary/25 bg-primary/10 px-3 py-2.5 text-[12px] leading-snug text-foreground"
-        >
-          <p className="font-medium">Your administrator released this device</p>
-          <p className="mt-0.5 text-muted-foreground">
-            Your timer was stopped and the time you tracked has been saved. Sign in again to carry
-            on — here or on your new laptop.
-          </p>
-        </div>
-      )}
       {/* Brand lockup — the panel header is hidden behind this gate, so sign-in carries it. */}
       <div className="mb-3 flex shrink-0 items-center justify-center gap-2.5">
         <LogoMark className="size-9 shrink-0 rounded-[12px] shadow-sm" />
@@ -241,7 +229,27 @@ export function LoginCard({
 
       {/* The card gives the form an edge to sit against — without it the inputs float on the
           panel background and the whole screen reads as unstyled. */}
-      <div className="flex min-h-0 flex-1 flex-col justify-center rounded-2xl border border-border bg-card px-7 py-6 shadow-sm">
+      <div className="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto rounded-2xl border border-border bg-card px-7 py-6 shadow-sm">
+          {/* **Inside the card, not above it.**
+              As a strip across the top of the panel it took ~80px out of a fixed 590px window, so
+              the card below it was squeezed and the form crowded its own edges; and being
+              primary-tinted it competed with the Sign in button for the one bit of colour on the
+              screen. Here it reads as context for the form it belongs to, the card keeps its shape,
+              and the accent stays on the action. Muted rather than an alert colour on purpose:
+              nothing has gone wrong, and a red or amber banner would tell the employee it had. */}
+          {releasedByAdmin && (
+            <div
+              role="status"
+              className="mb-4 rounded-lg border border-border bg-muted/50 px-3 py-2 text-[11.5px] leading-snug"
+            >
+              <p className="font-medium text-foreground">
+                Your administrator released this device
+              </p>
+              <p className="mt-0.5 text-muted-foreground">
+                Your tracked time is saved. Sign in again to carry on.
+              </p>
+            </div>
+          )}
           <h2 className="font-heading text-[19px] font-semibold tracking-[0.2px]">
             {mfa ? "Two-step verification" : challenge ? "Choose a password" : "Sign in"}
           </h2>
