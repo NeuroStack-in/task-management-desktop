@@ -199,6 +199,83 @@ async fn read_subtask(resp: reqwest::Response, op: &str) -> Result<SubtaskDto, S
     serde_json::from_value(inner).map_err(|e| format!("{op}:parse:{e}"))
 }
 
+// ── Task creation ────────────────────────────────────────────────────────────────────────────
+//
+// Removed in 0.1.18 on the reasoning that "tasks are created in the web app; this app creates
+// subtasks", then asked for again: an employee who needs a task to time against should not have to
+// leave the panel and go to a browser to make one. Restored as its own section so it sits apart
+// from the subtask calls above rather than interleaved with them.
+
+/// Optional fields the panel can set when creating a task. Empty strings mean "omit" — the server
+/// then applies its own default (unassigned; no due date; `medium` priority).
+#[derive(Default)]
+pub struct NewTaskFields<'a> {
+    pub description: &'a str,
+    /// User id to assign (the caller's own `sub` for "assign to me"). Empty = unassigned, which is
+    /// the "offer it to everyone on the project" state the picker surfaces.
+    pub assignee_id: &'a str,
+    /// `YYYY-MM-DD`, or empty for no due date.
+    pub due: &'a str,
+    /// `low` | `medium` | `high`, or empty to let the server default to `medium`.
+    pub priority: &'a str,
+}
+
+/// `POST /v1/projects/{project_id}/tasks` — create a task from the panel. Only `title` is required;
+/// every field in [`NewTaskFields`] is optional and omitted from the body when empty. Same user
+/// Cognito JWT as the reads; the backend gates on the caller's per-project role (and, for an
+/// assignee, that they belong to the project).
+pub async fn create_task(
+    client: &reqwest::Client,
+    ingest_url: &str,
+    id_token: &str,
+    project_id: &str,
+    title: &str,
+    fields: NewTaskFields<'_>,
+) -> Result<TaskDto, String> {
+    let url = format!(
+        "{}/v1/projects/{}/tasks",
+        ingest_url.trim_end_matches('/'),
+        project_id
+    );
+    let mut body = serde_json::json!({ "title": title, "description": fields.description });
+    if !fields.assignee_id.is_empty() {
+        body["assignee_ids"] = serde_json::json!([fields.assignee_id]);
+    }
+    if !fields.due.is_empty() {
+        body["due"] = serde_json::json!(fields.due);
+    }
+    if !fields.priority.is_empty() {
+        body["priority"] = serde_json::json!(fields.priority);
+    }
+    let resp = client
+        .post(url)
+        .bearer_auth(id_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("create_task:network:{e}"))?;
+    let status = resp.status();
+    if status.as_u16() == 401 {
+        return Err("auth:expired".into());
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("create_task:read:{e}"))?;
+    if !status.is_success() {
+        return Err(format!("create_task:status:{}:{text}", status.as_u16()));
+    }
+    parse_task(&text)
+}
+
+/// Unwrap `{ "data": { ...TaskView } }` into the picker's `TaskDto` (extra fields serde-dropped).
+fn parse_task(text: &str) -> Result<TaskDto, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("create_task:parse:{e}"))?;
+    let inner = value.get("data").cloned().unwrap_or(value);
+    serde_json::from_value(inner).map_err(|e| format!("create_task:parse:{e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

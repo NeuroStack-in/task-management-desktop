@@ -298,6 +298,34 @@ export async function stopTimer(): Promise<void> {
 }
 
 /**
+ * Create a task in a project and return it.
+ *
+ * Only the title is sent, and the core assigns it to the caller: someone creating a task from their
+ * own timer panel is telling you who is going to do it. Description, due date and priority are
+ * editable in the web app, which is where task detail belongs — this exists so nobody has to open a
+ * browser to have something to time against.
+ *
+ * Returns the task rather than an id so the picker can select it immediately, without waiting for
+ * the next poll to join it into the list.
+ */
+export async function createTask(projectId: string, title: string): Promise<Task> {
+  const row = await invoke<TaskRow>("create_task", { projectId, title });
+  return {
+    id: row.id,
+    title: row.title,
+    project_id: row.project_id,
+    // The create response carries no project name or billable flag — both belong to the project,
+    // not the task, and the next poll fills them in. Blank beats guessing: a wrong billable flag on
+    // a row someone is about to time is a billing error, not a cosmetic one.
+    project_name: "",
+    billable: false,
+    status: row.status ?? "todo",
+    subtasks: [],
+    unassigned: row.unassigned ?? false,
+  };
+}
+
+/**
  * Add a subtask under a task and return it.
  *
  * Only the title is sent: the core's server defaults the status to `todo` and the assignee to the

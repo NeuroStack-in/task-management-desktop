@@ -28,6 +28,7 @@ import { recordHistory, suggestHistory } from "@/lib/descriptionHistory";
 import { formatElapsed } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Project, Subtask, Task, TimerSelection, TimerState } from "@/lib/types";
+import { NewTaskItem } from "./NewTaskItem";
 
 /**
  * The timer hero, mirroring the web app's Time Tracking hero
@@ -359,7 +360,7 @@ export function TimerCard({
             icon={ListChecks}
             label={task?.title ?? "Select task (optional)"}
             // Enabled whenever a project is picked, even with zero tasks — that's how you reach
-            // "New task…" below to create the first one.
+            // "New task…" at the foot of the menu to create the first one.
             disabled={!projectId}
             // Matches the project picker. It was `w-[19rem]` (304px): anchored `align="start"` from
             // this trigger — which sits in the right half of the row — a 304px popup overran the
@@ -392,6 +393,10 @@ export function TimerCard({
                 No tasks in this project yet.
               </p>
             )}
+
+            {/* Kept to one line here on purpose — the composer lives in its own file so this
+                component stays out of the way of other work in it. */}
+            <NewTaskItem projectId={projectId} onCreated={chooseTask} />
           </HeroPicker>
 
           {/* Same translucent treatment as the pickers either side — a semantic fill would

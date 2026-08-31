@@ -300,6 +300,46 @@ pub async fn list_tasks(
     crate::api::tasks::fetch_tasks(&client, &ingest_url, &id_token).await
 }
 
+/// Create a task in `project_id` from the panel and return it, so the picker can offer it (and the
+/// UI select it) without waiting for the next poll. Errors when signed out (`auth:expired`) or if the
+/// backend refuses (e.g. the caller's project role can't create tasks) — surfaced as the panel's
+/// action error, not swallowed.
+#[tauri::command]
+pub async fn create_task(
+    state: State<'_, AppState>,
+    project_id: String,
+    title: String,
+) -> Result<crate::api::tasks::TaskDto, String> {
+    let Some(id_token) = state.auth.id_token().await else {
+        return Err("auth:expired".into());
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    let client = crate::api::client::api_client();
+    // **Title only, and assigned to the caller.** The removed version also took description, due
+    // date, priority and an assign-to-me switch — five controls in a 320px panel for something the
+    // employee is about to start timing anyway. Everything else is editable in the web app, which
+    // is where task detail belongs; this exists so nobody has to leave the panel to have something
+    // to time against.
+    //
+    // "Assign to me" resolves to the caller's own user id — the Cognito `sub`, which is exactly
+    // what the backend stores as the member/assignee id (`wp_platform::auth`: `user_id = sub`).
+    let assignee_id = crate::auth::token::decode_id_claims(&id_token)
+        .map(|c| c.sub)
+        .unwrap_or_default();
+    crate::api::tasks::create_task(
+        &client,
+        &ingest_url,
+        &id_token,
+        &project_id,
+        &title,
+        crate::api::tasks::NewTaskFields {
+            assignee_id: &assignee_id,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
 /// Add a subtask under `task_id` and return it, so the picker can show it (and select it) without
 /// waiting for the next poll.
 ///
