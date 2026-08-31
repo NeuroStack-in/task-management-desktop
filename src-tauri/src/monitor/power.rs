@@ -101,6 +101,11 @@ fn stop_for(reason: &'static str) {
     // `now`, not backdated: these arrive *before* the machine goes down, so this instant is the
     // last moment of work. The wake-side detector is the one that has a gap to subtract.
     let ts = clock::now_epoch_ms();
+    // Remember the running task **before** the stop consumes it, so returning — unlock, or wake +
+    // input — auto-resumes the same work. This is the path that actually fires for a lock / lid /
+    // suspend (the monitor loop's gap detector only catches suspends this module missed), so without
+    // arming here the feature never triggered for the case people hit most: Win+L and back.
+    super::arm_auto_resume(&state, ts);
     let ev = state.timer.lock().unwrap().stop(ts, StopReason::Idle);
     let Some(ev) = ev else { return };
     state.pending_events.lock().unwrap().push(ev);

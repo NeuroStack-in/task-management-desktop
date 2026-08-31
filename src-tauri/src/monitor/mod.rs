@@ -78,13 +78,19 @@ fn arm_auto_resume(state: &AppState, stopped_at: i64) {
     if !snap.running {
         return;
     }
-    *state.auto_resume.lock().unwrap() = Some(crate::state::AutoResume {
+    let candidate = crate::state::AutoResume {
         task_id: snap.task_id.unwrap_or_default(),
         subtask_id: snap.subtask_id.unwrap_or_default(),
         project_id: snap.project_id.unwrap_or_default(),
         description: snap.description,
         stopped_at,
-    });
+    };
+    tracing::info!(
+        project = %candidate.project_id,
+        task = %candidate.task_id,
+        "armed auto-resume — next input will restart this task"
+    );
+    *state.auto_resume.lock().unwrap() = Some(candidate);
 }
 
 /// What to do this tick with an armed auto-resume target. Pure so the three rules — resume on the
