@@ -165,6 +165,8 @@ pub fn start_timer(
     };
     state.pending_events.lock().unwrap().push(event);
     state.flush.notify_one(); // flush now — don't wait for the 300 s cycle (LLD §4)
+                              // A manual start takes over — drop any armed auto-resume so it can't later restart a stale task.
+    state.auto_resume.lock().unwrap().take();
     Ok(read_timer(&state))
 }
 
@@ -176,6 +178,8 @@ pub fn stop_timer(state: State<'_, AppState>) -> TimerStateDto {
         state.pending_events.lock().unwrap().push(e);
         state.flush.notify_one(); // a stop should reflect as fast as a start
     }
+    // A deliberate stop must not auto-resume — clear any target armed by an earlier idle/suspend stop.
+    state.auto_resume.lock().unwrap().take();
     read_timer(&state)
 }
 

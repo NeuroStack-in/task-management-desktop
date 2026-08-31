@@ -42,6 +42,16 @@ const IDLE_PROMPT_SECS: u64 = 300;
 const HEARTBEAT_IDLE_SECS: u64 = 60;
 /// Hard-stop the timer after this much continuous idle (no productive time is invented).
 const AUTO_STOP_SECS: u64 = 900;
+/// After the agent auto-stopped a timer, the next input within this many `user-idle` seconds means
+/// the person is back — auto-resume. Small, so it fires on the return interaction, not on the
+/// residual idle that armed it.
+const RESUME_ON_INPUT_SECS: u64 = 3;
+/// Don't auto-resume if the stop was longer ago than this. A break, a meeting, lunch — the same
+/// working session — resumes; an overnight sleep does not. Restarting a stale task on a fresh morning
+/// (a different day, maybe different work) is the outcome this bound exists to prevent, and the core
+/// has no local timezone to reason about "day" directly (only UTC ms), so a gap cap is the honest
+/// stand-in.
+const AUTO_RESUME_MAX_GAP_MS: i64 = 4 * 60 * 60 * 1000;
 /// A tick gap beyond this means the process wasn't running — the machine slept, hibernated, or the
 /// lid shut. The loop ticks every 1 s, so this is generous enough that scheduler jitter, a busy
 /// machine, or a slow disk can never look like a suspend.
@@ -57,6 +67,47 @@ const ALIVE_HEARTBEAT_TICKS: u64 = 15;
 /// timer stops at the wake instead of the sleep, billing the night.
 fn last_wake_ms(now: i64, gap: i64) -> i64 {
     now - gap
+}
+
+/// Remember the running session's target so the next input can auto-resume it. Called on the paths
+/// that stop the timer **for** the person (idle, suspend/lid, lock) — never on a user stop. A no-op
+/// when nothing is running. `stopped_at` is the instant the session actually ended (backdated to the
+/// last awake tick on a suspend), so the resume window is measured from when work really stopped.
+fn arm_auto_resume(state: &AppState, stopped_at: i64) {
+    let snap = state.timer.lock().unwrap().snapshot(stopped_at);
+    if !snap.running {
+        return;
+    }
+    *state.auto_resume.lock().unwrap() = Some(crate::state::AutoResume {
+        task_id: snap.task_id.unwrap_or_default(),
+        subtask_id: snap.subtask_id.unwrap_or_default(),
+        project_id: snap.project_id.unwrap_or_default(),
+        description: snap.description,
+        stopped_at,
+    });
+}
+
+/// What to do this tick with an armed auto-resume target. Pure so the three rules — resume on the
+/// return input, drop it once it's too stale to be the same session, otherwise keep waiting — are
+/// unit-tested rather than only exercised by a live agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeAction {
+    /// Still armed, but no input yet (or not old enough to drop) — keep waiting.
+    Wait,
+    /// Input is back within the window — restart the remembered task.
+    Resume,
+    /// Too long since the stop — discard, so a stale/overnight task never silently restarts.
+    Drop,
+}
+
+fn resume_action(now: i64, stopped_at: i64, idle_secs: u64) -> ResumeAction {
+    if now - stopped_at > AUTO_RESUME_MAX_GAP_MS {
+        ResumeAction::Drop
+    } else if idle_secs <= RESUME_ON_INPUT_SECS {
+        ResumeAction::Resume
+    } else {
+        ResumeAction::Wait
+    }
 }
 
 /// What the idle thresholds say to do this tick.
@@ -301,6 +352,46 @@ fn run(app: AppHandle) {
         // Needed by the idle auto-stop below, which runs whether or not capture does.
         let now = clock::now_epoch_ms();
 
+        // ── Auto-resume on activity ─────────────────────────────────────────────────────────
+        //
+        // A timer the agent stopped **for** the person — idle cut-off, suspend/lid, or lock — is
+        // remembered (`arm_auto_resume`). The next keyboard/mouse input brings `idle` back down; when
+        // it does, restart that same task automatically, as long as the stop is recent enough to be
+        // the same working session (`AUTO_RESUME_MAX_GAP_MS` rules out, e.g., an overnight sleep).
+        //
+        // `running` is this tick's opening state, so the tick that *does* the stopping never resumes
+        // on the same pass — the timer is still marked running here, and by the next tick `idle` is
+        // still high (it only drops on real input), so nothing resumes until the person is genuinely
+        // back. A user stop or a fresh manual start clears the armed target (see the panel commands).
+        if !running {
+            let armed = state.auto_resume.lock().unwrap().clone();
+            if let Some(r) = armed {
+                match resume_action(now, r.stopped_at, idle) {
+                    ResumeAction::Wait => {}
+                    ResumeAction::Drop => *state.auto_resume.lock().unwrap() = None,
+                    ResumeAction::Resume => {
+                        let session_id = uuid::Uuid::new_v4().to_string();
+                        let started = state.timer.lock().unwrap().start(
+                            session_id,
+                            r.task_id,
+                            r.subtask_id,
+                            r.project_id,
+                            r.description,
+                            now,
+                        );
+                        if let Ok(ev) = started {
+                            state.pending_events.lock().unwrap().push(ev);
+                            state.flush.notify_one();
+                            let _ = app.emit(events::TRACKING_CHANGED, ());
+                            idle_prompted = false;
+                            tracing::info!("auto-resumed the timer on input after a non-user stop");
+                        }
+                        *state.auto_resume.lock().unwrap() = None;
+                    }
+                }
+            }
+        }
+
         // ── Woke from suspend ───────────────────────────────────────────────────────────────
         //
         // This loop ticks once a second, so a gap materially larger than that means the process was
@@ -320,11 +411,10 @@ fn run(app: AppHandle) {
         let gap = now - last_tick_ms;
         last_tick_ms = now;
         if running && gap > SUSPEND_GAP_MS {
-            let ev = state
-                .timer
-                .lock()
-                .unwrap()
-                .stop(last_wake_ms(now, gap), StopReason::Idle);
+            let stop_ts = last_wake_ms(now, gap);
+            // Remember the task so a return-to-keyboard after a short lid-close/sleep resumes it.
+            arm_auto_resume(&state, stop_ts);
+            let ev = state.timer.lock().unwrap().stop(stop_ts, StopReason::Idle);
             if let Some(e) = ev {
                 state.pending_events.lock().unwrap().push(e);
                 state.flush.notify_one();
@@ -450,6 +540,8 @@ fn run(app: AppHandle) {
         // `idle` is read every tick above, outside the gate, so this needs nothing capture provides.
         match idle_action(running, idle, idle_prompted) {
             IdleAction::Stop => {
+                // Remember the task so the next input auto-resumes it (the person came back).
+                arm_auto_resume(&state, now);
                 let ev = state.timer.lock().unwrap().stop(now, StopReason::Idle);
                 if let Some(e) = ev {
                     state.pending_events.lock().unwrap().push(e);
@@ -521,6 +613,36 @@ fn run(app: AppHandle) {
 #[cfg(test)]
 mod idle_action_tests {
     use super::*;
+
+    /// Auto-resume rules: input is back → resume; still idle → wait; too long since the stop → drop
+    /// (so an overnight sleep never silently restarts yesterday's task).
+    #[test]
+    fn auto_resume_fires_on_return_but_not_after_too_long() {
+        let stopped = 1_700_000_000_000i64;
+        // Back within a minute, input right now (or within the window) → resume.
+        assert_eq!(
+            resume_action(stopped + 60_000, stopped, 0),
+            ResumeAction::Resume
+        );
+        assert_eq!(
+            resume_action(stopped + 60_000, stopped, RESUME_ON_INPUT_SECS),
+            ResumeAction::Resume
+        );
+        // Recent enough, but no input yet (still idle) → keep the target armed and wait.
+        assert_eq!(
+            resume_action(stopped + 60_000, stopped, RESUME_ON_INPUT_SECS + 1),
+            ResumeAction::Wait
+        );
+        assert_eq!(
+            resume_action(stopped + 60_000, stopped, 900),
+            ResumeAction::Wait
+        );
+        // An overnight sleep — too long since the stop → drop, even with input right now.
+        assert_eq!(
+            resume_action(stopped + AUTO_RESUME_MAX_GAP_MS + 1, stopped, 0),
+            ResumeAction::Drop
+        );
+    }
 
     /// An eight-hour sleep must close the timer at the moment it went to sleep, not at the wake.
     ///
