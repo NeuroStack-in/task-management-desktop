@@ -97,7 +97,15 @@ pub fn spawn_sender(app: tauri::AppHandle) {
 
             refresh_location(&app).await;
             cycle::assemble_and_enqueue(&state);
-            drain(&http, &upload, &ingest_url, &id_token, &state).await;
+            let released = drain(&http, &upload, &ingest_url, &id_token, &state).await;
+
+            // The durable half of a device release: this agent was offline when IT pressed the
+            // button and so never saw the MQTT command, and the ack it just got is how it finds
+            // out. Dropped here rather than inside `drain` because the teardown flushes through
+            // the same path (see `release::stop_and_sign_out`).
+            if released {
+                crate::release::stop_and_sign_out(&app).await;
+            }
         }
     });
 }
@@ -168,15 +176,32 @@ async fn refresh_location(app: &tauri::AppHandle) {
     *state.location.lock().unwrap() = fix;
 }
 
+/// Push everything the outbox owes, once, on demand — used by the release teardown to file the
+/// employee's last stretch of work **before** anything is cleared ([`crate::release`]).
+///
+/// Its own clients rather than the sender loop's: this runs from whichever task handled the release
+/// (an MQTT command, or the ack that carried it), which has no access to those. Any `released` the
+/// server repeats on these acks is ignored — we are already releasing.
+pub async fn flush_outbox(ingest_url: &str, id_token: &str, state: &AppState) {
+    let http = client::api_client();
+    let upload = client::upload_client();
+    let _ = drain(&http, &upload, ingest_url, id_token, state).await;
+}
+
 /// Send oldest-first until the outbox is empty or a send fails (then retry next tick). After each ack,
 /// prune and upload that ack's screenshots.
+///
+/// Returns **true when the server said this device has been released**, so the caller can stop and
+/// sign out. Reported rather than acted on here: the teardown re-enters this very function to flush
+/// the final `TimerStopped`, and doing that from inside the drain loop would recurse.
 async fn drain(
     http: &reqwest::Client,
     upload: &reqwest::Client,
     ingest_url: &str,
     id_token: &str,
     state: &AppState,
-) {
+) -> bool {
+    let mut released = false;
     loop {
         let next = { state.outbox.lock().unwrap().next_batch().cloned() };
         let Some(batch) = next else { break };
@@ -184,6 +209,11 @@ async fn drain(
         match batch::send_batch(http, ingest_url, id_token, &batch).await {
             Ok(ack) => {
                 state.outbox.lock().unwrap().prune_to(ack.watermark_seq);
+
+                // The batch was still accepted and pruned above — the release rides an ordinary
+                // ack precisely so this send is not wasted. Keep draining: everything already
+                // queued should reach the server before the teardown clears it.
+                released |= ack.released;
 
                 // Config rail: the ack advertises the server version; on a mismatch, pull (ETag-conditional)
                 // and apply live — cadence/blur/silent + app/URL rules the monitor threads read each tick.
@@ -213,6 +243,7 @@ async fn drain(
             }
         }
     }
+    released
 }
 
 /// PUT one screenshot's bytes to its presigned S3 URL (host-pinned). Success deletes the local file;

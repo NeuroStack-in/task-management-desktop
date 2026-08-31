@@ -53,6 +53,14 @@ export interface Agent {
   restrictedHit: string | null;
   /** The last admin on-demand capture notice (`privacy:admin-capture`); null = nothing to show. */
   adminCapture: string | null;
+  /**
+   * IT released this device, so the core signed the employee out (`device:released`).
+   *
+   * Deliberately **outlives the sign-out** — it is cleared when someone next signs in successfully,
+   * not when the session drops — because the whole point is to explain the sign-in screen the
+   * employee is now looking at.
+   */
+  deviceReleased: boolean;
   /** Set when a user action (start/stop/switch/consent/pause) failed; shown inline until dismissed. */
   actionError: string | null;
   /** True while a write action is in flight — buttons disable / ignore re-clicks. */
@@ -102,6 +110,8 @@ export function useAgent(): Agent {
   const [screenshotBlocked, setScreenshotBlocked] = useState<string | null>(null);
   const [restrictedHit, setRestrictedHit] = useState<string | null>(null);
   const [adminCapture, setAdminCapture] = useState<string | null>(null);
+  /** IT released this machine — survives the sign-out so the login screen can explain it. */
+  const [deviceReleased, setDeviceReleased] = useState(false);
   // User-action feedback: set when an explicit action (start/stop/switch/consent/pause) fails, so the
   // panel can show it — unlike the poll's `error`, which is cleared on the next successful read.
   const [actionError, setActionError] = useState<string | null>(null);
@@ -157,6 +167,13 @@ export function useAgent(): Agent {
         setAdminCapture(detail);
         void refresh();
       }),
+      // IT released this device. The core has already stopped, flushed and signed out by the time
+      // this arrives; refreshing pulls the now-signed-out snapshot so the login gate takes over in
+      // the same beat as the explanation appears.
+      agent.listen(EVENTS.deviceReleased, () => {
+        setDeviceReleased(true);
+        void refresh();
+      }),
     ];
     return () => {
       for (const s of subs) void s.then((un) => un());
@@ -171,6 +188,12 @@ export function useAgent(): Agent {
   // Whenever the session drops — an explicit sign-out OR a token that expired (auth:expired) — clear
   // the ephemeral per-session banners so a policy violation, pause-refusal or idle prompt from one
   // user can never greet the next person who signs in on this device.
+  // The release notice is cleared on the next successful **sign-in**, not on the sign-out that
+  // follows a release — clearing it there would erase the message in the same beat it was raised.
+  useEffect(() => {
+    if (snapshot?.auth.signedIn) setDeviceReleased(false);
+  }, [snapshot?.auth.signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (snapshot && !snapshot.auth.signedIn) {
       setRestrictedHit(null);
@@ -333,6 +356,7 @@ export function useAgent(): Agent {
     screenshotBlocked,
     restrictedHit,
     adminCapture,
+    deviceReleased,
     actionError,
     busy,
     grantConsent,

@@ -103,6 +103,18 @@ enum Command {
         #[serde(default)]
         requested_by: String,
     },
+    /// "IT released this device" — stop the timer, flush, sign out ([`crate::release`]).
+    ///
+    /// The fast path of a release. The employee signs back in afterwards, here or on a replacement
+    /// laptop, so this is a clean sign-out and not a wipe: their recorded work is pushed to the
+    /// server first. A laptop that was offline when the button was pressed never receives this and
+    /// is caught instead by `released` on its next batch ack.
+    Release {
+        /// The admin who released it. Logged, not shown — the employee is told *that* IT released
+        /// the device, and naming a colleague in a sign-out banner invites the wrong conversation.
+        #[serde(default)]
+        released_by: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -334,6 +346,17 @@ async fn handle_command(
                 }
             });
         }
+        Ok(Command::Release { released_by }) => {
+            tracing::info!(%released_by, "mqtt: device released — stopping and signing out");
+            // Off the event loop, like `capture_now`: the teardown flushes the outbox over the
+            // network (up to 20 s), and the loop must keep polling or the connection misses its
+            // keepalive. No ack is published — the agent signs out mid-teardown, and the server
+            // already has its own durable record of the release.
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::release::stop_and_sign_out(&app).await;
+            });
+        }
         Ok(Command::Unknown) => {
             tracing::info!("mqtt: unknown command kind ignored (forward-compatible)");
         }
@@ -428,6 +451,27 @@ mod tests {
 
     /// An older backend that omits `requested_by` must still capture — the ack simply has nobody to
     /// route back to (the server drops it), which is better than refusing the command outright.
+    /// **The exact payload `fleet::features::release_device` publishes.** Pinning it here is the
+    /// only thing standing between a renamed field and a release that silently does nothing —
+    /// `#[serde(other)]` means a payload this agent cannot parse folds into `Unknown` and is
+    /// *logged and ignored*, not surfaced as an error.
+    #[test]
+    fn parses_release_command() {
+        let raw = br#"{"kind":"release","released_by":"u7"}"#;
+        match serde_json::from_slice::<Command>(raw).unwrap() {
+            Command::Release { released_by } => assert_eq!(released_by, "u7"),
+            other => panic!("expected Release, got {other:?}"),
+        }
+    }
+
+    /// An older server, or a release published without attribution, must still stop the agent —
+    /// `released_by` is for the log, never a precondition for acting.
+    #[test]
+    fn release_without_an_actor_still_parses() {
+        let c: Command = serde_json::from_slice(br#"{"kind":"release"}"#).unwrap();
+        assert!(matches!(c, Command::Release { .. }));
+    }
+
     #[test]
     fn capture_now_without_a_requester_still_parses() {
         let raw = br#"{"kind":"capture_now","screenshot_id":"s","upload_url":"https://x.amazonaws.com/k"}"#;

@@ -65,6 +65,12 @@ export const EVENTS = {
    * the banner doesn't erase the record.
    */
   adminCapture: "privacy:admin-capture",
+  /**
+   * IT released this device: the core stopped the timer, flushed what it owed and signed out. The
+   * panel is about to drop to the sign-in screen, so this is the only chance to say why — an
+   * unexplained bounce to login reads as a crash rather than something an admin deliberately did.
+   */
+  deviceReleased: "device:released",
 } as const;
 
 /**

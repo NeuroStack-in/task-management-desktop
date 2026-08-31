@@ -37,6 +37,7 @@ function Panel() {
     screenshotBlocked,
     restrictedHit,
     adminCapture,
+    deviceReleased,
     actionError,
     grantConsent,
     toggleTimer,
@@ -91,7 +92,7 @@ function Panel() {
   // re-reading it is what proves the sign-in actually took. (There is no separate consent gate any
   // more — the monitoring notice was removed; consent is recorded silently above.)
   if (!auth.signedIn) {
-    return <LoginCard onSignedIn={() => void refresh()} />;
+    return <LoginCard onSignedIn={() => void refresh()} releasedByAdmin={deviceReleased} />;
   }
 
   // Silent mode suppresses the capture indicator by policy — the disclosure already covered it.

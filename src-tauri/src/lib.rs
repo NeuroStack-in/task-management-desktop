@@ -26,6 +26,7 @@ pub mod monitor;
 pub mod mqtt;
 pub mod outbox;
 pub mod privacy_log;
+pub mod release;
 pub mod rules;
 pub mod session_state;
 pub mod state;

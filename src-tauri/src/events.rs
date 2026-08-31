@@ -4,6 +4,12 @@
 /// The session/refresh token expired → the UI must return to the login screen (M1).
 pub const AUTH_EXPIRED: &str = "auth:expired";
 
+/// **IT released this device** — the timer was stopped, the outbox flushed, and the agent signed out
+/// ([`crate::release`]). The UI must say so rather than just showing the login screen: an unexplained
+/// bounce to sign-in reads as a crash, when in fact this was deliberate, the employee's hours are
+/// safe, and signing in again (here or on a replacement laptop) is the expected next step.
+pub const DEVICE_RELEASED: &str = "device:released";
+
 /// The user has been idle past the prompt threshold → offer keep/stop (M4, 5 min; hard stop 15 min).
 pub const IDLE_PROMPT: &str = "monitor:idle-prompt";
 
