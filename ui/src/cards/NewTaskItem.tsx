@@ -95,6 +95,11 @@ export function NewTaskItem({
           disabled={busy}
           className="h-8 text-[12.5px]"
           onKeyDown={(e) => {
+            // Keep every keystroke inside this input. The composer lives inside a Base UI dropdown
+            // menu, which runs its own typeahead + Enter/arrow handling on keydown — without this it
+            // swallowed the letters (typeahead jumping between tasks) and stole Enter (activating the
+            // highlighted task instead of submitting), so a title could never be typed or created.
+            e.stopPropagation();
             if (e.key === "Enter") {
               e.preventDefault();
               void submit();
