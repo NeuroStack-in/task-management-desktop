@@ -23,7 +23,21 @@ import * as agent from "@/lib/agent";
  */
 const MIN_PASSWORD = 8;
 
-export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
+export function LoginCard({
+  onSignedIn,
+  releasedByAdmin = false,
+}: {
+  onSignedIn: () => void;
+  /**
+   * IT released this device, so the core signed this person out mid-session.
+   *
+   * Without saying so, the sign-in screen is indistinguishable from a crash or an expired session,
+   * and the employee's first thought is that they have lost the hours they were tracking. The two
+   * facts that actually matter to them are that their work was saved and that signing back in is
+   * the expected next step — so those are what this says.
+   */
+  releasedByAdmin?: boolean;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [reveal, setReveal] = useState(false);
@@ -204,6 +218,18 @@ export function LoginCard({ onSignedIn }: { onSignedIn: () => void }) {
     // centred inside it. So the whitespace ends up inside the card, where it looks like padding,
     // instead of around it, where it looked like a mistake.
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {releasedByAdmin && (
+        <div
+          role="status"
+          className="mb-3 shrink-0 rounded-xl border border-primary/25 bg-primary/10 px-3 py-2.5 text-[12px] leading-snug text-foreground"
+        >
+          <p className="font-medium">Your administrator released this device</p>
+          <p className="mt-0.5 text-muted-foreground">
+            Your timer was stopped and the time you tracked has been saved. Sign in again to carry
+            on — here or on your new laptop.
+          </p>
+        </div>
+      )}
       {/* Brand lockup — the panel header is hidden behind this gate, so sign-in carries it. */}
       <div className="mb-3 flex shrink-0 items-center justify-center gap-2.5">
         <LogoMark className="size-9 shrink-0 rounded-[12px] shadow-sm" />
