@@ -201,6 +201,30 @@ impl AuthManager {
         }
     }
 
+    /// Abandon a Google sign-in that is still waiting on the browser.
+    ///
+    /// Dropping the one-shot sender is the whole mechanism: the `rx` inside [`login_google`] wakes
+    /// immediately with a `RecvError`, which that function already reports as
+    /// `auth:oauth: sign-in was cancelled` — the same path a superseding sign-in takes. Nothing new
+    /// has to be plumbed through; the wait simply ends.
+    ///
+    /// **Why this exists.** The only other way out of that wait was `OAUTH_TIMEOUT`, five minutes.
+    /// Someone who opens Google sign-in and then closes the tab — thinks better of it, picks the
+    /// wrong account, or just changes their mind — had no way to say so, and the card sat disabled
+    /// on "Opening browser…" with both buttons dead. Five minutes of a frozen sign-in screen reads
+    /// as a hung app, and the honest response to it is to kill the agent.
+    ///
+    /// Returns whether a sign-in was actually waiting, so a stray cancel is distinguishable from a
+    /// real one rather than silently reported as success.
+    pub fn cancel_oauth(&self) -> bool {
+        match self.oauth_wait.lock() {
+            Ok(mut guard) => guard.take().is_some(),
+            // Poisoned only if a previous holder panicked while armed; there is then no live wait to
+            // cancel, and reporting `false` is truthful.
+            Err(_) => false,
+        }
+    }
+
     /// Answer an outstanding MFA challenge. On success the tokens are stored exactly as a
     /// password-only login would store them, so everything downstream is unchanged.
     pub async fn complete_mfa(

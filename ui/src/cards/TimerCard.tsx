@@ -546,7 +546,17 @@ function TickingClock({ secs }: { secs: number }) {
         .split("")
         .map((ch, i) =>
           ch === ":" ? (
-            <span key={`c${i}`} className="inline-block">
+            // Same box as a digit — `inline-block overflow-hidden align-baseline` — even though a
+            // colon never animates and has nothing to clip.
+            //
+            // It has to match, because `overflow` decides what "baseline" MEANS for an inline-block:
+            // with `overflow: visible` the box aligns on its text baseline, but with anything else
+            // it aligns on its BOTTOM MARGIN EDGE (CSS 2.1 §10.8.1). The digits need
+            // `overflow-hidden` to clip the tick animation, so they were aligning bottom-edge while
+            // the colon aligned text-baseline. At 44px/leading-none that put the digits about 10px
+            // high and the colons visibly low — the readout looked broken while both spans claimed
+            // `align-baseline`. Matching the box makes both sides mean the same thing.
+            <span key={`c${i}`} className="inline-block overflow-hidden align-baseline">
               :
             </span>
           ) : (
