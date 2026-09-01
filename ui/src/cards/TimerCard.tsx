@@ -53,6 +53,7 @@ export function TimerCard({
   onCreateSubtask,
   onSetSubtaskDone,
   onSetTaskStatus,
+  onAdvanceTaskStatus,
   onRefresh,
 }: {
   timer: TimerState;
@@ -69,6 +70,9 @@ export function TimerCard({
   ) => Promise<boolean>;
   /** Change the chosen task's status. Backend gates it (assignee, or a project Lead/Manager). */
   onSetTaskStatus: (projectId: string, taskId: string, status: string) => void;
+  /** Silent best-effort status nudge (todo→in_progress on start) — bypasses the busy guard, so it
+   *  isn't dropped when fired right after the start action. */
+  onAdvanceTaskStatus: (projectId: string, taskId: string, status: string) => void;
   /** Create a task in a project; resolves to its id (to select) or null on failure. */
   onRefresh: () => Promise<void>;
 }) {
@@ -149,7 +153,9 @@ export function TimerCard({
   // 403 it, popping a spurious error just for pressing Start. The write is otherwise best-effort.
   const advanceTodoToInProgress = (t: Task | null) => {
     if (t && !t.unassigned && t.status === "todo") {
-      onSetTaskStatus(projectId, t.id, "in_progress");
+      // `onAdvanceTaskStatus`, not `onSetTaskStatus`: this fires right after the start action, which
+      // still holds the single-flight busy lock — the run-based setter would be dropped by it.
+      onAdvanceTaskStatus(projectId, t.id, "in_progress");
     }
   };
 

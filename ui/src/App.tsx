@@ -43,6 +43,7 @@ function Panel() {
     toggleTimer,
     switchTo,
     setTaskStatus,
+    advanceTaskStatus,
     createSubtask,
     setSubtaskDone,
     requestPause,
@@ -328,6 +329,7 @@ function Panel() {
           onCreateSubtask={createSubtask}
           onSetSubtaskDone={setSubtaskDone}
           onSetTaskStatus={setTaskStatus}
+          onAdvanceTaskStatus={advanceTaskStatus}
           onRefresh={refresh}
         />
 
