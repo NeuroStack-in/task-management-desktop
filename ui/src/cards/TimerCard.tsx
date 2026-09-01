@@ -53,6 +53,7 @@ export function TimerCard({
   onCreateSubtask,
   onSetSubtaskDone,
   onSetTaskStatus,
+  onAdvanceTaskStatus,
   onRefresh,
 }: {
   timer: TimerState;
@@ -69,6 +70,9 @@ export function TimerCard({
   ) => Promise<boolean>;
   /** Change the chosen task's status. Backend gates it (assignee, or a project Lead/Manager). */
   onSetTaskStatus: (projectId: string, taskId: string, status: string) => void;
+  /** Silent best-effort status nudge (todo→in_progress on start) — bypasses the busy guard, so it
+   *  isn't dropped when fired right after the start action. */
+  onAdvanceTaskStatus: (projectId: string, taskId: string, status: string) => void;
   /** Create a task in a project; resolves to its id (to select) or null on failure. */
   onRefresh: () => Promise<void>;
 }) {
@@ -142,6 +146,19 @@ export function TimerCard({
     }
   };
 
+  // Putting the clock on a task means it's being worked now — nudge a still-"todo" task to
+  // "In progress" so its status stops contradicting the running timer. Only from `todo` (deliberate
+  // states — in_review/blocked/done — are left alone), and only for a task **assigned to this user**
+  // (`!unassigned`): an unclaimed task isn't theirs to move, and the backend's assignee-gate would
+  // 403 it, popping a spurious error just for pressing Start. The write is otherwise best-effort.
+  const advanceTodoToInProgress = (t: Task | null) => {
+    if (t && !t.unassigned && t.status === "todo") {
+      // `onAdvanceTaskStatus`, not `onSetTaskStatus`: this fires right after the start action, which
+      // still holds the single-flight busy lock — the run-based setter would be dropped by it.
+      onAdvanceTaskStatus(projectId, t.id, "in_progress");
+    }
+  };
+
   const chooseTask = (t: Task) => {
     setTaskId(t.id);
     // A subtask belongs to the task it was broken out of; carrying it across would file the time
@@ -151,7 +168,10 @@ export function TimerCard({
     // empty field, which meant the commonest way to start a timer was to accept a label nobody
     // wrote — and a timesheet full of task titles says what the work was filed under, not what was
     // done. The field is required now, so it has to be answered rather than pre-answered.
-    if (timer.running) onSwitch(selection({ taskId: t.id, subtaskId: null }));
+    if (timer.running) {
+      onSwitch(selection({ taskId: t.id, subtaskId: null }));
+      advanceTodoToInProgress(t);
+    }
   };
 
   const toggle = () => {
@@ -161,6 +181,7 @@ export function TimerCard({
       // A suggestion still has to be clicked; it never fills the field on its own.
       recordHistory(description);
       onToggle(selection());
+      advanceTodoToInProgress(task);
       return;
     }
     onToggle(selection());
@@ -238,19 +259,22 @@ export function TimerCard({
     );
   };
 
-  // A description is **required**, not encouraged. It is the timesheet row's label, and a blank
-  // one produces a row nobody can account for later — which is exactly when it gets queried.
+  // A description labels the timesheet row. When a **task or subtask** is chosen it already names the
+  // work — the timesheet falls back to that name for a blank description — so the description is
+  // optional then. For a **bare project** (no task) it is the only label the row would ever have, so
+  // it stays required there. This is what stops the panel demanding a re-typed restatement of the
+  // subtask you just picked.
   const described = description.trim().length > 0;
-  const canStart = Boolean(projectId) && described;
+  const canStart = Boolean(projectId) && (Boolean(taskId) || described);
   // Name the missing thing rather than a generic "can't start": the two are fixed in different
   // controls, and "Ready" appearing only when both are done is what teaches the rule.
   const status = timer.running
     ? "Recording"
     : !projectId
       ? "Select a project"
-      : !described
-        ? "Describe your work"
-        : "Ready";
+      : canStart
+        ? "Ready"
+        : "Pick a task or describe your work";
 
   return (
     <PanelCard
@@ -297,7 +321,8 @@ export function TimerCard({
           <div className="relative">
             <Input
               aria-label="What are you working on?"
-              placeholder="What are you working on?"
+              // Optional once a task/subtask names the work; the only label otherwise.
+              placeholder={taskId ? "What are you working on? (optional)" : "What are you working on?"}
               value={description}
               onValueChange={setDescription}
               onFocus={() => setDescFocused(true)}
@@ -467,7 +492,7 @@ export function TimerCard({
             ? "Tracking — switching project or task re-attributes without stopping the clock."
             : projects.length === 0
               ? "No projects yet. Ask your admin to add you to one, then hit refresh."
-              : "Pick a project and describe what you're doing — both are required. A task is optional."}
+              : "Pick a project, then a task — or describe your work if there's no task."}
         </p>
       </CardContent>
     </PanelCard>
@@ -475,28 +500,43 @@ export function TimerCard({
 }
 
 /**
- * The settable task statuses, in board order. **`closed` is deliberately absent** — a task becomes
- * closed only by being reviewed (`POST …/review`), and the backend rejects it on a plain status
- * edit, so offering it here would just produce an error. A task that already *is* closed still shows
- * that state (below) and can be reopened by picking any of these.
+ * The statuses an **assignee** may set from their own panel — the desktop is the assignee's tool, so
+ * it offers only the transitions their work makes: `todo → in_progress → in_review`.
+ *
+ * **`done` and `blocked` are deliberately excluded.** `done` is a sign-off the backend gates to a
+ * reviewer (Manager/Lead via review), not something the person doing the work awards themselves — an
+ * assignee picking it just 403s. `blocked` is an escalation a lead/manager owns, not a self-declared
+ * state. **`closed` is likewise absent** — it is the reviewed state, reachable only through review.
+ * A task already in any of those shows that state on the trigger (the leading label) and can still be
+ * moved back to one of these three.
  */
 const TASK_STATUSES: { value: string; label: string }[] = [
   { value: "todo", label: "To do" },
   { value: "in_progress", label: "In progress" },
   { value: "in_review", label: "In review" },
-  { value: "done", label: "Done" },
-  { value: "blocked", label: "Blocked" },
 ];
+
+/** Human labels for **every** status the trigger might have to display — including the ones an
+ *  assignee can't set (`done`/`blocked`/`closed`), so a task already in one reads properly rather
+ *  than showing the raw slug. The dropdown's *options* are still only the settable `TASK_STATUSES`. */
+const STATUS_LABEL: Record<string, string> = {
+  todo: "To do",
+  in_progress: "In progress",
+  in_review: "In review",
+  done: "Done",
+  blocked: "Blocked",
+  closed: "Closed (reviewed)",
+};
 
 /**
  * A compact status selector for the chosen task — a **custom, themed dropdown** (the Base UI menu the
  * pickers use), not a native `<select>`, so its trigger and options match the panel instead of the
- * OS. A `closed` task (or any status the server sends that isn't settable here) is shown on the
- * trigger as-is but never offered as a choice; the menu lists only the five real targets.
+ * OS. The trigger shows the current status (whatever it is); the menu offers only the three an
+ * assignee may set (`TASK_STATUSES`) — a task already `done`/`blocked`/`closed` shows that on the
+ * trigger but those are never offered as choices.
  */
 function TaskStatusRow({ status, onChange }: { status: string; onChange: (s: string) => void }) {
-  const current = TASK_STATUSES.find((s) => s.value === status);
-  const label = current?.label ?? (status === "closed" ? "Closed (reviewed)" : status || "—");
+  const label = STATUS_LABEL[status] ?? status ?? "—";
   return (
     <div className="flex items-center gap-2 text-[11px] text-feature-foreground/70">
       <span className="shrink-0">Task status</span>
@@ -546,7 +586,17 @@ function TickingClock({ secs }: { secs: number }) {
         .split("")
         .map((ch, i) =>
           ch === ":" ? (
-            <span key={`c${i}`} className="inline-block">
+            // Same box as a digit — `inline-block overflow-hidden align-baseline` — even though a
+            // colon never animates and has nothing to clip.
+            //
+            // It has to match, because `overflow` decides what "baseline" MEANS for an inline-block:
+            // with `overflow: visible` the box aligns on its text baseline, but with anything else
+            // it aligns on its BOTTOM MARGIN EDGE (CSS 2.1 §10.8.1). The digits need
+            // `overflow-hidden` to clip the tick animation, so they were aligning bottom-edge while
+            // the colon aligned text-baseline. At 44px/leading-none that put the digits about 10px
+            // high and the colons visibly low — the readout looked broken while both spans claimed
+            // `align-baseline`. Matching the box makes both sides mean the same thing.
+            <span key={`c${i}`} className="inline-block overflow-hidden align-baseline">
               :
             </span>
           ) : (

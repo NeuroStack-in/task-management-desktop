@@ -72,6 +72,8 @@ export interface Agent {
   switchTo: (sel: TimerSelection) => void;
   /** Change a task's status. Backend-gated (assignee, or a project Lead/Manager); refreshes after. */
   setTaskStatus: (projectId: string, taskId: string, status: string) => void;
+  /** Silent best-effort status nudge (e.g. todo→in_progress on start); bypasses the busy guard. */
+  advanceTaskStatus: (projectId: string, taskId: string, status: string) => void;
   /** Add a subtask under a task; resolves to it (so the strip can target it) or null on failure. */
   createSubtask: (projectId: string, taskId: string, title: string) => Promise<Subtask | null>;
   /** Tick a subtask off or reopen it; resolves true when the write landed. */
@@ -268,6 +270,22 @@ export function useAgent(): Agent {
     [run],
   );
 
+  // The auto-advance to "In progress" when a timer starts fires *immediately after* the start
+  // action, which is still holding `run`'s single-flight lock (`busyRef`) — so routing it through
+  // `run` like `setTaskStatus` above meant it hit the busy guard and was silently dropped, leaving a
+  // running timer sitting on a "To do" task. This is a best-effort background nudge, so it bypasses
+  // `run` entirely: no busy state, no error banner (a refusal is swallowed), just the write and a
+  // refresh so the new status shows on the next paint.
+  const advanceTaskStatus = useCallback(
+    (projectId: string, taskId: string, status: string) => {
+      void agent
+        .setTaskStatus(projectId, taskId, status)
+        .then(() => refresh())
+        .catch(() => {});
+    },
+    [refresh],
+  );
+
   // Both subtask writes bypass `run` deliberately: the caller awaits the result to retarget the
   // timer, and a fire-and-forget would leave the strip a poll behind.
   const createSubtask = useCallback(
@@ -363,6 +381,7 @@ export function useAgent(): Agent {
     toggleTimer,
     switchTo,
     setTaskStatus,
+    advanceTaskStatus,
     createSubtask,
     setSubtaskDone,
     requestPause,

@@ -83,6 +83,15 @@ pub async fn auth_login_google(
     Ok(status)
 }
 
+/// Abandon a Google sign-in that is still waiting on the browser.
+///
+/// Not `async`: it takes a lock and drops a sender, and making it async would let a second cancel
+/// interleave with the first for no benefit. Returns whether anything was actually waiting.
+#[tauri::command]
+pub fn auth_cancel_google(state: State<'_, AppState>) -> bool {
+    state.auth.cancel_oauth()
+}
+
 #[tauri::command]
 pub async fn auth_complete_new_password(
     state: State<'_, AppState>,

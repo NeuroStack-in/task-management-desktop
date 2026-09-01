@@ -242,6 +242,20 @@ export function loginWithGoogle(): Promise<AuthStatus> {
 }
 
 /**
+ * Abandon a Google sign-in that is still waiting on the browser.
+ *
+ * This makes the pending {@link loginWithGoogle} promise **reject** with the ordinary "sign-in was
+ * cancelled" error, so the caller's existing `catch`/`finally` does the cleanup and no separate
+ * teardown path is needed. Without it the only exit was the agent's five-minute timeout, which
+ * leaves the sign-in card disabled long enough to look like a hang.
+ *
+ * Resolves `false` when nothing was waiting — a cancel that raced the redirect home.
+ */
+export function cancelGoogleLogin(): Promise<boolean> {
+  return invoke<boolean>("auth_cancel_google");
+}
+
+/**
  * Open the WorkPulse web app in the user's system browser (org sign-up, invites, the full dashboard).
  * Egress stays Rust-side — the panel never navigates, so this is a core command, not an `<a href>`.
  */

@@ -1,5 +1,5 @@
 import { ExternalLink, Eye, EyeOff, ShieldCheck } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 
 import { LogoMark } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
@@ -42,6 +42,13 @@ export function LoginCard({
   const [password, setPassword] = useState("");
   const [reveal, setReveal] = useState(false);
   const [pending, setPending] = useState(false);
+  // Which flow owns `pending`. Without this the password button also read "Signing in…" while the
+  // browser was open for Google — the screen claimed two sign-ins were running, and neither could be
+  // stopped.
+  const [awaitingBrowser, setAwaitingBrowser] = useState(false);
+  // Set when the person cancels, read in the rejection that cancelling causes. A ref, not state:
+  // it is written and read within one turn and must not schedule a render of its own.
+  const cancelledByUser = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   /** Set when Cognito demands a new password; carries the session that leg must echo back. */
@@ -124,10 +131,27 @@ export function LoginCard({
     });
   }
 
+  /**
+   * Abandon a Google sign-in that is still waiting on the browser.
+   *
+   * Deliberately does not touch `pending` itself. Cancelling makes the in-flight `loginWithGoogle`
+   * promise reject, and the `finally` in `onGoogle` is what clears the flags — so there is exactly
+   * one place that ends this flow, whether it ends by success, failure, timeout or this button.
+   */
+  function onCancelGoogle() {
+    cancelledByUser.current = true;
+    void agent.cancelGoogleLogin().catch(() => {
+      // Nothing to report: either the wait had already ended, or the agent is gone — in both cases
+      // the pending promise settles on its own and clears the card.
+    });
+  }
+
   async function onGoogle() {
     if (pending) return;
     setError(null);
     setPending(true);
+    setAwaitingBrowser(true);
+    cancelledByUser.current = false;
     try {
       // Opens the OS browser; resolves once the `workpulse://callback` deep link returns to the app.
       // Same result shape as a password login, so `signedIn` is handled identically.
@@ -138,9 +162,14 @@ export function LoginCard({
       }
       setError("Sign-in didn't complete. Try again.");
     } catch (e) {
-      setError(explain(e));
+      // Cancelling is not a failure, so it gets no banner. The person just told us they were done;
+      // explaining back at them what they chose is noise — and this card is a fixed 590px, so a
+      // three-line error pushes the Google button and the footer off the bottom of the window.
+      if (!cancelledByUser.current) setError(explain(e));
     } finally {
       setPending(false);
+      setAwaitingBrowser(false);
+      cancelledByUser.current = false;
     }
   }
 
@@ -374,7 +403,9 @@ export function LoginCard({
                 onToggleReveal={() => setReveal((r) => !r)}
               />
               <Button type="submit" className="h-11 w-full text-[14px]" disabled={pending}>
-                {pending ? "Signing in…" : "Sign in"}
+                {/* Only speaks for the password flow. It used to say "Signing in…" during a Google
+                    sign-in too, which described an attempt that was not happening. */}
+                {pending && !awaitingBrowser ? "Signing in…" : "Sign in"}
               </Button>
 
               <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
@@ -393,8 +424,22 @@ export function LoginCard({
                 onClick={onGoogle}
               >
                 <GoogleGlyph />
-                {pending ? "Opening browser…" : "Continue with Google"}
+                {awaitingBrowser ? "Waiting for your browser…" : "Continue with Google"}
               </Button>
+
+              {/* The way out. The wait's only other exit is a five-minute timeout, so closing the
+                  browser tab — or picking the wrong account, or simply changing your mind — left
+                  this card disabled for long enough to read as a hung app. Shown only while that
+                  wait is live, so it never adds a control to the resting state. */}
+              {awaitingBrowser ? (
+                <button
+                  type="button"
+                  onClick={onCancelGoogle}
+                  className="mx-auto -mt-1 text-[12px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              ) : null}
             </form>
           )}
       </div>
@@ -443,7 +488,10 @@ function explain(e: unknown): string {
     raw.includes("auth:oauth: timed out") ||
     raw.includes("auth:oauth:no_code")
   )
-    return "Google sign-in didn't finish. Try again — a browser window opens for you to pick your Google account, then brings you straight back here.";
+    // Kept to one line on purpose. The card is a fixed 590px window, so a three-line banner pushes
+    // the Google button and the footer links off the bottom — the explanation cost more than it
+    // gave, and the button beneath already says what pressing it does.
+    return "Google sign-in didn't finish. Try again.";
   // Any other Hosted-UI/Cognito OAuth refusal arrives as `auth:oauth:<code>: <description>`. Show
   // Cognito's own sentence (after the code) when present — that names the real reason; the bare code
   // does not.
