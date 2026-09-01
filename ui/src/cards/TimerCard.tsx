@@ -142,6 +142,17 @@ export function TimerCard({
     }
   };
 
+  // Putting the clock on a task means it's being worked now — nudge a still-"todo" task to
+  // "In progress" so its status stops contradicting the running timer. Only from `todo` (deliberate
+  // states — in_review/blocked/done — are left alone), and only for a task **assigned to this user**
+  // (`!unassigned`): an unclaimed task isn't theirs to move, and the backend's assignee-gate would
+  // 403 it, popping a spurious error just for pressing Start. The write is otherwise best-effort.
+  const advanceTodoToInProgress = (t: Task | null) => {
+    if (t && !t.unassigned && t.status === "todo") {
+      onSetTaskStatus(projectId, t.id, "in_progress");
+    }
+  };
+
   const chooseTask = (t: Task) => {
     setTaskId(t.id);
     // A subtask belongs to the task it was broken out of; carrying it across would file the time
@@ -151,7 +162,10 @@ export function TimerCard({
     // empty field, which meant the commonest way to start a timer was to accept a label nobody
     // wrote — and a timesheet full of task titles says what the work was filed under, not what was
     // done. The field is required now, so it has to be answered rather than pre-answered.
-    if (timer.running) onSwitch(selection({ taskId: t.id, subtaskId: null }));
+    if (timer.running) {
+      onSwitch(selection({ taskId: t.id, subtaskId: null }));
+      advanceTodoToInProgress(t);
+    }
   };
 
   const toggle = () => {
@@ -161,6 +175,7 @@ export function TimerCard({
       // A suggestion still has to be clicked; it never fills the field on its own.
       recordHistory(description);
       onToggle(selection());
+      advanceTodoToInProgress(task);
       return;
     }
     onToggle(selection());
@@ -479,28 +494,43 @@ export function TimerCard({
 }
 
 /**
- * The settable task statuses, in board order. **`closed` is deliberately absent** — a task becomes
- * closed only by being reviewed (`POST …/review`), and the backend rejects it on a plain status
- * edit, so offering it here would just produce an error. A task that already *is* closed still shows
- * that state (below) and can be reopened by picking any of these.
+ * The statuses an **assignee** may set from their own panel — the desktop is the assignee's tool, so
+ * it offers only the transitions their work makes: `todo → in_progress → in_review`.
+ *
+ * **`done` and `blocked` are deliberately excluded.** `done` is a sign-off the backend gates to a
+ * reviewer (Manager/Lead via review), not something the person doing the work awards themselves — an
+ * assignee picking it just 403s. `blocked` is an escalation a lead/manager owns, not a self-declared
+ * state. **`closed` is likewise absent** — it is the reviewed state, reachable only through review.
+ * A task already in any of those shows that state on the trigger (the leading label) and can still be
+ * moved back to one of these three.
  */
 const TASK_STATUSES: { value: string; label: string }[] = [
   { value: "todo", label: "To do" },
   { value: "in_progress", label: "In progress" },
   { value: "in_review", label: "In review" },
-  { value: "done", label: "Done" },
-  { value: "blocked", label: "Blocked" },
 ];
+
+/** Human labels for **every** status the trigger might have to display — including the ones an
+ *  assignee can't set (`done`/`blocked`/`closed`), so a task already in one reads properly rather
+ *  than showing the raw slug. The dropdown's *options* are still only the settable `TASK_STATUSES`. */
+const STATUS_LABEL: Record<string, string> = {
+  todo: "To do",
+  in_progress: "In progress",
+  in_review: "In review",
+  done: "Done",
+  blocked: "Blocked",
+  closed: "Closed (reviewed)",
+};
 
 /**
  * A compact status selector for the chosen task — a **custom, themed dropdown** (the Base UI menu the
  * pickers use), not a native `<select>`, so its trigger and options match the panel instead of the
- * OS. A `closed` task (or any status the server sends that isn't settable here) is shown on the
- * trigger as-is but never offered as a choice; the menu lists only the five real targets.
+ * OS. The trigger shows the current status (whatever it is); the menu offers only the three an
+ * assignee may set (`TASK_STATUSES`) — a task already `done`/`blocked`/`closed` shows that on the
+ * trigger but those are never offered as choices.
  */
 function TaskStatusRow({ status, onChange }: { status: string; onChange: (s: string) => void }) {
-  const current = TASK_STATUSES.find((s) => s.value === status);
-  const label = current?.label ?? (status === "closed" ? "Closed (reviewed)" : status || "—");
+  const label = STATUS_LABEL[status] ?? status ?? "—";
   return (
     <div className="flex items-center gap-2 text-[11px] text-feature-foreground/70">
       <span className="shrink-0">Task status</span>
