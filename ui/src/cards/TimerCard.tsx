@@ -238,19 +238,22 @@ export function TimerCard({
     );
   };
 
-  // A description is **required**, not encouraged. It is the timesheet row's label, and a blank
-  // one produces a row nobody can account for later — which is exactly when it gets queried.
+  // A description labels the timesheet row. When a **task or subtask** is chosen it already names the
+  // work — the timesheet falls back to that name for a blank description — so the description is
+  // optional then. For a **bare project** (no task) it is the only label the row would ever have, so
+  // it stays required there. This is what stops the panel demanding a re-typed restatement of the
+  // subtask you just picked.
   const described = description.trim().length > 0;
-  const canStart = Boolean(projectId) && described;
+  const canStart = Boolean(projectId) && (Boolean(taskId) || described);
   // Name the missing thing rather than a generic "can't start": the two are fixed in different
   // controls, and "Ready" appearing only when both are done is what teaches the rule.
   const status = timer.running
     ? "Recording"
     : !projectId
       ? "Select a project"
-      : !described
-        ? "Describe your work"
-        : "Ready";
+      : canStart
+        ? "Ready"
+        : "Pick a task or describe your work";
 
   return (
     <PanelCard
@@ -297,7 +300,8 @@ export function TimerCard({
           <div className="relative">
             <Input
               aria-label="What are you working on?"
-              placeholder="What are you working on?"
+              // Optional once a task/subtask names the work; the only label otherwise.
+              placeholder={taskId ? "What are you working on? (optional)" : "What are you working on?"}
               value={description}
               onValueChange={setDescription}
               onFocus={() => setDescFocused(true)}
@@ -467,7 +471,7 @@ export function TimerCard({
             ? "Tracking — switching project or task re-attributes without stopping the clock."
             : projects.length === 0
               ? "No projects yet. Ask your admin to add you to one, then hit refresh."
-              : "Pick a project and describe what you're doing — both are required. A task is optional."}
+              : "Pick a project, then a task — or describe your work if there's no task."}
         </p>
       </CardContent>
     </PanelCard>
