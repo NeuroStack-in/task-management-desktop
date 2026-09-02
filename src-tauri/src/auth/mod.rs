@@ -351,7 +351,10 @@ impl AuthManager {
         // Diagnostic (presence only, not values): if the header still shows a UUID, this tells us the
         // ID token carries no `name`/`email` claim — a Cognito app-client attribute config, not an
         // agent bug. Falls back to the username only when both are absent.
-        tracing::info!(
+        // `debug`, not `info`: the panel calls this every second on its core poll, so at `info` it
+        // wrote ~14k identical lines a day and buried every other diagnostic. Presence-only (never
+        // the values) — still enough to tell whether the ID token carries `name`/`email`.
+        tracing::debug!(
             has_name = !claims.name.trim().is_empty(),
             has_email = !claims.email.trim().is_empty(),
             "identity: resolving display name from ID-token claims"

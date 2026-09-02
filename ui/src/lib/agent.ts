@@ -156,11 +156,27 @@ function joinTasks(rows: TaskRow[], projects: Project[]): Task[] {
   });
 }
 
-export async function readSnapshot(): Promise<AgentSnapshot> {
-  // Auth first: signed out, the backend-fed lists are all empty anyway (the commands short-circuit
-  // on a missing token), so skipping them saves four IPC round-trips per poll.
-  const auth = await invoke<AuthStatus>("auth_status");
+/**
+ * The panel's cheap, **local-only** state — read from the core over IPC, with no backend HTTP.
+ * Safe to poll every second (see {@link readLists} for what deliberately isn't).
+ *
+ * `identity` stays here even though it names the signed-in user: it decodes the stored ID token
+ * locally, so it costs no network — only IPC.
+ */
+export type CoreSnapshot = Pick<
+  AgentSnapshot,
+  "auth" | "identity" | "consent" | "capture" | "config" | "timer" | "pause" | "activity"
+>;
 
+/** The backend-fed lists — each is a live HTTP call. */
+export type SnapshotLists = Pick<AgentSnapshot, "projects" | "tasks" | "sessions">;
+
+/** Signed-out, or before the first list read lands: everything empty, so the picker shows nothing
+ *  rather than a previous user's projects. */
+export const EMPTY_LISTS: SnapshotLists = { projects: [], tasks: [], sessions: [] };
+
+export async function readCore(): Promise<CoreSnapshot> {
+  const auth = await invoke<AuthStatus>("auth_status");
   const [consent, capture, config, timer, pause] = await Promise.all([
     invoke<AgentSnapshot["consent"]>("get_consent_state"),
     invoke<AgentSnapshot["capture"]>("capture_state"),
@@ -168,29 +184,52 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
     invoke<TimerState>("timer_state"),
     invoke<PauseState>("pause_state"),
   ]);
-
-  const base = {
+  // Local token decode, not a network call — cheap enough to keep on the per-second path.
+  const identity = auth.signedIn ? await soft(invoke<Identity | null>("identity"), null) : null;
+  return {
     auth,
+    identity,
     consent,
     capture,
     config,
     timer,
     pause,
-    activity: [] as number[],
+    activity: [] as AgentSnapshot["activity"],
   };
+}
 
-  if (!auth.signedIn) {
-    return { ...base, identity: null, projects: [], tasks: [], sessions: [] };
-  }
-
-  const [identity, rows, projects, sessions] = await Promise.all([
-    soft(invoke<Identity | null>("identity"), null),
+/**
+ * The backend-fed lists: the user's projects, the tasks the picker offers, and today's folded
+ * sessions — three live HTTP reads (`/v1/projects`, `/v1/me/tasks`, `/v1/me/timesheet/today`).
+ *
+ * **Deliberately NOT on the per-second poll.** These change on the order of minutes at most — the
+ * timesheet can't move faster than the agent's own 300 s batch fold, and projects/tasks change only
+ * on a user edit. Polling them every second (as the snapshot once did) spent ~3 req/s per open
+ * panel, 24/7, re-fetching an answer that had not changed — it was ~96% of the API Gateway bill.
+ * The caller ({@link useAgent}) reads these slowly and on demand instead, keeping the last-good copy
+ * between reads.
+ */
+export async function readLists(signedIn: boolean): Promise<SnapshotLists> {
+  // Signed out, the core commands short-circuit on the missing token and return empty anyway — so
+  // skip the three IPC round-trips rather than spend them to be told nothing.
+  if (!signedIn) return { ...EMPTY_LISTS };
+  const [rows, projects, sessions] = await Promise.all([
     soft(invoke<TaskRow[]>("list_tasks"), []),
     soft(invoke<Project[]>("list_projects"), []),
     soft(invoke<Session[]>("list_sessions", { date: localDate() }), []),
   ]);
+  return { projects, tasks: joinTasks(rows, projects), sessions };
+}
 
-  return { ...base, identity, projects, tasks: joinTasks(rows, projects), sessions };
+/**
+ * A full snapshot — core + lists — for the initial load and any explicit "refresh now" (the hero
+ * refresh, a core event, after a write). The per-second poll must **not** use this: it would read
+ * the backend lists every second, which is exactly the waste {@link readLists} documents.
+ */
+export async function readSnapshot(): Promise<AgentSnapshot> {
+  const core = await readCore();
+  const lists = await readLists(core.auth.signedIn);
+  return { ...core, ...lists };
 }
 
 // ── auth ─────────────────────────────────────────────────────────────────────

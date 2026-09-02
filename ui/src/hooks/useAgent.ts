@@ -5,7 +5,14 @@ import { EVENTS } from "@/lib/agent";
 import { clearHistory } from "@/lib/descriptionHistory";
 import type { AgentSnapshot, Subtask, TimerSelection } from "@/lib/types";
 
+// The core (timer/pause/consent/capture/config/identity) is cheap local IPC — read it every second
+// so the clock and any out-of-panel transition show up promptly.
 const POLL_MS = 1000;
+// The backend-fed lists (projects/tasks/today's sessions) are live HTTP reads that change on the
+// order of minutes at most, so they get a slow poll — plus an on-focus and after-every-write refresh
+// so they still feel live. Polling them at POLL_MS put projects + time-attendance at ~3 req/s, 24/7,
+// which was ~96% of the API Gateway bill; this is the fix (see agent.readLists).
+const LISTS_POLL_MS = 30_000;
 
 /**
  * Turn a core error into something a person can act on.
@@ -118,27 +125,70 @@ export function useAgent(): Agent {
   // call can fire (state updates are async and would let both clicks through).
   const busyRef = useRef(false);
 
-  // Avoids a slow poll landing after a newer one and rewinding the UI.
-  const seq = useRef(0);
+  // Avoids a slow poll landing after a newer one and rewinding the UI. Core and lists refresh on
+  // independent cadences, so they get independent sequence guards.
+  const coreSeq = useRef(0);
+  const listsSeq = useRef(0);
+  // Latest known sign-in state, read synchronously by the slow lists poll + focus handler so they
+  // can skip the backend reads while signed out without waiting on a render.
+  const signedInRef = useRef(false);
 
-  const refresh = useCallback(async () => {
-    const id = ++seq.current;
+  // The fast path: local core state only (timer/pause/consent/capture/config/identity). No backend
+  // HTTP, so it is safe every second. The backend lists are left untouched — the last-good copy.
+  const refreshCore = useCallback(async () => {
+    const id = ++coreSeq.current;
     try {
-      const next = await agent.readSnapshot();
-      if (id !== seq.current) return;
-      setSnapshot(next);
+      const core = await agent.readCore();
+      if (id !== coreSeq.current) return;
+      signedInRef.current = core.auth.signedIn;
+      // Signing out clears the lists in the same beat, so a previous user's projects can't linger.
+      setSnapshot((prev) =>
+        prev
+          ? { ...prev, ...core, ...(core.auth.signedIn ? {} : agent.EMPTY_LISTS) }
+          : { ...core, ...agent.EMPTY_LISTS },
+      );
       setError(null);
     } catch (e) {
-      if (id !== seq.current) return;
+      if (id !== coreSeq.current) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
+  // The slow path: the backend-fed lists. Polled on LISTS_POLL_MS and refreshed on demand (focus,
+  // after a write, on a core event) — never per second. Keeps the last-good lists on failure so the
+  // picker never blanks.
+  const refreshLists = useCallback(async () => {
+    const id = ++listsSeq.current;
+    try {
+      const lists = await agent.readLists(signedInRef.current);
+      if (id !== listsSeq.current) return;
+      setSnapshot((prev) => (prev ? { ...prev, ...lists } : prev));
+    } catch {
+      /* keep the last-good lists */
+    }
+  }, []);
+
+  // Force everything fresh now: core, then lists (sequential so the lists read sees the sign-in
+  // state the core just set). Used by the hero refresh, the core events, and after every write —
+  // all low-frequency, so the list read here is not the poll's concern.
+  const refresh = useCallback(async () => {
+    await refreshCore();
+    await refreshLists();
+  }, [refreshCore, refreshLists]);
+
   useEffect(() => {
     void refresh();
-    const t = setInterval(() => void refresh(), POLL_MS);
-    return () => clearInterval(t);
-  }, [refresh]);
+    const coreTimer = setInterval(() => void refreshCore(), POLL_MS);
+    const listsTimer = setInterval(() => void refreshLists(), LISTS_POLL_MS);
+    // A panel brought back to the front should show current lists at once, not up to 30 s late.
+    const onFocus = () => void refreshLists();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(coreTimer);
+      clearInterval(listsTimer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refresh, refreshCore, refreshLists]);
 
   // Core events. Each unlisten is awaited on cleanup so a remount can't double-subscribe.
   useEffect(() => {
