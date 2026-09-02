@@ -97,7 +97,12 @@ pub async fn handle(
     // consent one, so it survives the policy change.
     if !screenshot::is_allowed_upload_host(upload_url) {
         tracing::warn!("capture_now: rejected non-amazonaws upload host");
-        return refuse(app, screenshot_id, requested_by, Refusal::UploadHostRejected);
+        return refuse(
+            app,
+            screenshot_id,
+            requested_by,
+            Refusal::UploadHostRejected,
+        );
     }
 
     // One frame of the primary display, through the periodic pipeline (downscale → blur → WebP →
