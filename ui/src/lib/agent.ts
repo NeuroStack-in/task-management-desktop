@@ -16,7 +16,6 @@ import type {
   AuthStatus,
   ConsentState,
   Identity,
-  LocalEvent,
   PauseGrant,
   PauseState,
   Project,
@@ -59,12 +58,6 @@ export const EVENTS = {
   screenshotUnavailable: "monitor:screenshot-unavailable",
   /** A restricted app/site was focused while tracking; payload = the offending identifier. */
   policyBlocked: "monitor:policy-blocked",
-  /**
-   * An administrator asked for an on-demand screenshot of this machine; payload = the sentence to
-   * show, whether it was taken or refused. The same line is in the local privacy log, so dismissing
-   * the banner doesn't erase the record.
-   */
-  adminCapture: "privacy:admin-capture",
   /**
    * IT released this device: the core stopped the timer, flushed what it owed and signed out. The
    * panel is about to drop to the sign-in screen, so this is the only chance to say why — an
@@ -168,15 +161,12 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
   // on a missing token), so skipping them saves four IPC round-trips per poll.
   const auth = await invoke<AuthStatus>("auth_status");
 
-  const [consent, capture, config, timer, pause, privacyLog] = await Promise.all([
+  const [consent, capture, config, timer, pause] = await Promise.all([
     invoke<AgentSnapshot["consent"]>("get_consent_state"),
     invoke<AgentSnapshot["capture"]>("capture_state"),
     invoke<AgentSnapshot["config"]>("effective_config"),
     invoke<TimerState>("timer_state"),
     invoke<PauseState>("pause_state"),
-    // Local, not backend-fed: it must still render when signed out or offline — the whole point is
-    // that the employee can always see what was done to their machine.
-    soft(invoke<LocalEvent[]>("privacy_log", { limit: 20 }), []),
   ]);
 
   const base = {
@@ -186,7 +176,6 @@ export async function readSnapshot(): Promise<AgentSnapshot> {
     config,
     timer,
     pause,
-    privacyLog,
     activity: [] as number[],
   };
 

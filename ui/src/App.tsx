@@ -10,7 +10,6 @@ import {
 
 import { LoginCard } from "@/cards/LoginCard";
 import { PauseCard } from "@/cards/PauseCard";
-import { PrivacyLogCard } from "@/cards/PrivacyLogCard";
 import { SessionsCard, type ResumeSelection } from "@/cards/SessionsCard";
 import { TimerCard } from "@/cards/TimerCard";
 import { AutostartToggle, IdentityChip, LiveDot, StatusBadge } from "@/components/panel";
@@ -36,7 +35,6 @@ function Panel() {
     idleSecs,
     screenshotBlocked,
     restrictedHit,
-    adminCapture,
     deviceReleased,
     actionError,
     grantConsent,
@@ -50,7 +48,6 @@ function Panel() {
     signOut,
     dismissIdle,
     dismissRestricted,
-    dismissAdminCapture,
     dismissActionError,
     refresh,
   } = useAgent();
@@ -87,7 +84,7 @@ function Panel() {
     );
   }
 
-  const { auth, capture, config, timer, pause, projects, tasks, sessions, privacyLog } = snapshot;
+  const { auth, capture, config, timer, pause, projects, tasks, sessions } = snapshot;
 
   // Sign-in gates everything. `refresh` rather than a local flag: the core owns auth state, so
   // re-reading it is what proves the sign-in actually took. (There is no separate consent gate any
@@ -113,7 +110,6 @@ function Panel() {
     Boolean(actionError) ||
     (idleSecs !== null && timer.running) ||
     Boolean(restrictedHit) ||
-    Boolean(adminCapture) ||
     Boolean(screenshotBlocked);
 
   // Resume from a session row: start a new session on that row's (project, description) — the
@@ -284,27 +280,6 @@ function Panel() {
           </div>
         )}
 
-        {/* An administrator asked for an on-demand screenshot of this machine — taken or refused.
-            This is the one capture the employee has no other way to notice, so it is announced
-            rather than merely logged (PRIVACY.md §5: no silent access). Dismissing hides the
-            banner; the entry stays in the privacy log below. */}
-        {adminCapture && (
-          <div
-            role="alert"
-            className="flex shrink-0 items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-1.5"
-          >
-            <span className="min-w-0 flex-1 text-[11px]">{adminCapture}</span>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-6 px-2 text-[11px]"
-              onClick={dismissAdminCapture}
-            >
-              Dismiss
-            </Button>
-          </div>
-        )}
-
         {/* Capture produced nothing. Silence here would read as "screenshots are off by policy",
             which is a very different thing from "capture is failing" (monitor risk #5).
 
@@ -346,9 +321,6 @@ function Panel() {
         />
 
         <PauseCard pause={pause} refused={pauseRefused} onRequest={requestPause} />
-
-        {/* Renders only when something has actually been done to this machine — see the card. */}
-        <PrivacyLogCard events={privacyLog} />
       </div>
     </>
   );

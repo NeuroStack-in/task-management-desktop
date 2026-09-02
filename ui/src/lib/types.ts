@@ -219,8 +219,6 @@ export interface AgentSnapshot {
   /** Still empty — no `recent_activity` command exists (see ActivitySeries above). */
   activity: ActivitySeries;
   sessions: Session[];
-  /** Local transparency log, newest first. Empty for a machine nothing has been done to. */
-  privacyLog: LocalEvent[];
 }
 
 const CADENCE_PRESET_LABEL: Record<Exclude<Cadence, object>, string> = {

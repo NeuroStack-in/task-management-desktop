@@ -2,47 +2,46 @@
 //!
 //! The backend presigns an S3 PUT for a minted `screenshot_id` and pushes
 //! `{"kind":"capture_now","screenshot_id":…,"upload_url":…,"requested_by":…}` down the device's `cmd`
-//! topic. This is the **most invasive action in the product**: one named person points at one named
-//! employee's screen and takes a frame of it, now, outside every cadence the employee was told
-//! about. So it is the most heavily guarded, and the guards live **here, on the device** — the only
-//! party that can know whether capture was permissible at that instant.
+//! topic. The agent captures the primary display and uploads it.
 //!
-//! **The guard chain, in order** ([`decide`]):
-//! 1. **Privacy pause wins.** A pause is a promise that nothing is recorded for its duration
-//!    (PRIVACY.md §5). An admin request that could punch through it would make the pause theatre.
-//! 2. **Timer gate.** "No timer → no capture. Ever." (PRIVACY.md §2, AGENT.md §1.2 — the privacy
-//!    stance made structural.) An on-demand capture outside a tracked session is a *policy
-//!    expansion*, not a feature, and the agent refuses to be the place it happens.
-//! 3. **Consent.** Capture fails closed without it (`AppState::consent`); a timer can legitimately
-//!    run un-consented, so this is reachable and is not implied by (2).
-//! 4. **Exceptions carve-out.** A focused excepted app/site is never screenshotted, and nothing
-//!    about it is recorded (PRIVACY.md §2/§3). Being asked by hand doesn't change that.
-//! 5. **Upload host pinning** — the URL must be `https://*.amazonaws.com` before a pixel is grabbed,
-//!    so a compromised backend can't redirect a frame of someone's screen (AGENT.md §5).
+//! ## Owner policy, 2026-09-02 — capture-now is unconditional
 //!
-//! **Every outcome is answered** on the `evt` topic, refusal included: the server routes the answer
-//! back to `requested_by`, so "I asked and nothing happened" is never the user experience, and
-//! `fleet::features::agent_events` audits the refusal alongside the request.
+//! This path used to be the most heavily guarded action in the product: a chain of privacy gates
+//! (privacy pause → timer running → consent → focused-app exception) refused the capture unless a
+//! tracked, consented session was live, and every request — taken **or** refused — was disclosed to
+//! the employee on-device.
 //!
-//! **Never covert.** Success *and* refusal are written to the employee-visible
-//! [`crate::privacy_log`] and pushed to the panel as [`crate::events::ADMIN_CAPTURE`].
+//! **The owner removed those gates.** An admin capture-now now takes a frame whenever it is
+//! technically possible, regardless of timer, consent or pause, and the employee is shown nothing on
+//! the device. What remains here are the two guards that are *not* about employee privacy:
+//!
+//! 1. **Upload host pinning** — the URL must be `https://*.amazonaws.com` before a pixel is grabbed,
+//!    so a compromised backend can't redirect a frame of someone's screen (AGENT.md §5). This is a
+//!    security control, not a consent one, and it stays.
+//! 2. **Capture success** — if the screen genuinely can't be read, that is reported as such.
+//!
+//! Every outcome is still answered on the `evt` topic so the requester learns what happened, and the
+//! **server-side audit trail** (`fleet::capture_now` writes a `security` entry) is unchanged — the
+//! org keeps its own record of who asked for what. What is gone is the *employee-facing* disclosure.
+//!
+//! To restore a gate, reintroduce a check before [`put_shot`] in [`handle`] and return the matching
+//! [`Refusal`]; the wire/ack shape already carries arbitrary reasons.
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 use crate::api::client;
+use crate::clock;
 use crate::monitor::{active_window, screenshot};
 use crate::state::AppState;
-use crate::{clock, events, privacy_log, rules};
 
 /// Why an on-demand capture did not happen. The wire value is the ack's `reason`; the backend treats
 /// it as an opaque string (`agent_events::on_capture_result`) and passes it to the requester, so new
 /// variants are forward-compatible.
+///
+/// The privacy-gate variants were removed with the 2026-09-02 policy change (see the module docs);
+/// only the two technical failures remain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    PrivacyPause,
-    NotTracking,
-    NoConsent,
-    Excepted,
     UploadHostRejected,
     CaptureFailed,
 }
@@ -51,58 +50,10 @@ impl Refusal {
     /// The `reason` string in the ack.
     pub fn reason(self) -> &'static str {
         match self {
-            Refusal::PrivacyPause => "privacy_pause",
-            Refusal::NotTracking => "not_tracking",
-            Refusal::NoConsent => "no_consent",
-            Refusal::Excepted => "excepted",
             Refusal::UploadHostRejected => "upload_host_rejected",
             Refusal::CaptureFailed => "capture_failed",
         }
     }
-
-    /// What the employee is told in their own log/panel. Deliberately plain, and deliberately
-    /// present for refusals too — "someone asked" is the part they are entitled to know.
-    pub fn employee_detail(self) -> &'static str {
-        match self {
-            Refusal::PrivacyPause => {
-                "An administrator requested a screenshot. Declined — your privacy pause was active."
-            }
-            Refusal::NotTracking => {
-                "An administrator requested a screenshot. Declined — no timer was running."
-            }
-            Refusal::NoConsent => {
-                "An administrator requested a screenshot. Declined — monitoring consent is not granted."
-            }
-            Refusal::Excepted => {
-                "An administrator requested a screenshot. Declined — the focused app is exempt from monitoring."
-            }
-            Refusal::UploadHostRejected => {
-                "An administrator requested a screenshot. Declined — the upload destination failed validation."
-            }
-            Refusal::CaptureFailed => {
-                "An administrator requested a screenshot, but the screen could not be captured."
-            }
-        }
-    }
-}
-
-/// The guard chain as a pure function, so the trust-critical branches are testable without a
-/// desktop, a broker or a timer. **Order is the contract**: the privacy pause is checked before
-/// anything else, and the timer gate before anything is read off the screen.
-pub fn decide(paused: bool, running: bool, consented: bool, excepted: bool) -> Result<(), Refusal> {
-    if paused {
-        return Err(Refusal::PrivacyPause);
-    }
-    if !running {
-        return Err(Refusal::NotTracking);
-    }
-    if !consented {
-        return Err(Refusal::NoConsent);
-    }
-    if excepted {
-        return Err(Refusal::Excepted);
-    }
-    Ok(())
 }
 
 /// The `capture_now_result` ack. `requested_by` is **echoed verbatim** — it is how the server routes
@@ -129,57 +80,24 @@ pub async fn handle(
     upload_url: &str,
     requested_by: &str,
 ) -> Vec<u8> {
-    // Gates that need no observation of the screen come first — a paused or untracked machine must
-    // not even have its foreground window read (that is metadata, and PRIVACY.md §2 says nothing is
-    // recorded while paused).
-    let (paused, running, consented, blur, silent) = {
+    // **No privacy gate** (owner policy 2026-09-02): the pause / timer / consent / exception chain
+    // that used to stand here is gone. The only thing read up front is the blur level, so the shot
+    // goes through the same downscale/blur pipeline as a periodic one.
+    let blur = {
         let state = app.state::<AppState>();
-        let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
-        let running = state.timer.lock().unwrap().is_running();
-        let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
         let cfg = state.config.lock().unwrap();
-        let c = cfg.get();
-        (
-            paused,
-            running,
-            consented,
-            c.tracking.blur_level,
-            c.tracking.silent,
-        )
+        cfg.get().tracking.blur_level
     };
-    if let Err(r) = decide(paused, running, consented, false) {
-        return refuse(app, screenshot_id, requested_by, r);
-    }
 
-    // Only now look at what is on screen — and only to apply the carve-out and label the shot.
+    // The foreground window is read only to *label* the shot now — it no longer gates anything.
     let focus = active_window::current();
-    let excepted = {
-        let state = app.state::<AppState>();
-        let cfg = state.config.lock().unwrap();
-        let r = &cfg.get().rules;
-        focus.as_ref().is_some_and(|f| {
-            let haystack = format!(
-                "{} {} {}",
-                f.app,
-                f.title.as_deref().unwrap_or(""),
-                f.url.as_deref().unwrap_or("")
-            );
-            rules::is_excepted(&haystack, r)
-        })
-    };
-    if let Err(r) = decide(paused, running, consented, excepted) {
-        return refuse(app, screenshot_id, requested_by, r);
-    }
 
-    // Host-pin BEFORE capturing: if we could not lawfully upload it, we do not take it.
+    // Host-pin BEFORE capturing: if we could not lawfully upload it, we do not take it. This is a
+    // security control (a compromised backend must not redirect a frame of the screen), not a
+    // consent one, so it survives the policy change.
     if !screenshot::is_allowed_upload_host(upload_url) {
         tracing::warn!("capture_now: rejected non-amazonaws upload host");
-        return refuse(
-            app,
-            screenshot_id,
-            requested_by,
-            Refusal::UploadHostRejected,
-        );
+        return refuse(app, screenshot_id, requested_by, Refusal::UploadHostRejected);
     }
 
     // One frame of the primary display, through the periodic pipeline (downscale → blur → WebP →
@@ -192,14 +110,9 @@ pub async fn handle(
             .ok()
             .flatten();
     let Some((mut meta, path)) = shot else {
-        // Same surfacing as the periodic loop: a capture failure is a state the UI shows — unless
-        // silent mode is on, where a visible "capture blocked" message would itself reveal monitoring.
-        if !silent {
-            let _ = app.emit(
-                events::SCREENSHOT_UNAVAILABLE,
-                events::capture_failure_hint(),
-            );
-        }
+        // A capture failure is reported to the requester via the ack, but **not surfaced on the
+        // device** — a "screenshot unavailable" banner would reveal that a capture was attempted,
+        // which the covert-capture policy exists to prevent.
         return refuse(app, screenshot_id, requested_by, Refusal::CaptureFailed);
     };
 
@@ -231,12 +144,9 @@ pub async fn handle(
         state.flush.notify_one();
     }
 
+    // **No employee-facing disclosure** (owner policy 2026-09-02): the success used to be written to
+    // the local privacy log and pushed to the panel. The server-side audit trail is unchanged.
     tracing::info!(id = %screenshot_id, %requested_by, "capture_now: captured and uploaded");
-    disclose(
-        app,
-        privacy_log::KIND_ADMIN_CAPTURE,
-        "An administrator requested a screenshot of your screen, and it was taken.",
-    );
     ack_payload(screenshot_id, requested_by, None)
 }
 
@@ -257,97 +167,31 @@ async fn put_shot(
     crate::api::put_bytes(&client::upload_client(), upload_url, path).await
 }
 
-/// Log the refusal (locally + for the operator), disclose it to the employee, and build the ack.
-fn refuse(app: &tauri::AppHandle, screenshot_id: &str, requested_by: &str, r: Refusal) -> Vec<u8> {
+/// Log the refusal (locally, for the operator) and build the ack. **No employee-facing disclosure**
+/// — the refusal is answered to the requester on the `evt` topic and audited server-side, but the
+/// device stays silent (owner policy 2026-09-02). `app` is unused now that nothing is emitted, kept
+/// so a gate that needs to disclose can be reintroduced without threading it back through.
+fn refuse(_app: &tauri::AppHandle, screenshot_id: &str, requested_by: &str, r: Refusal) -> Vec<u8> {
     tracing::info!(
         id = %screenshot_id,
         %requested_by,
         reason = r.reason(),
         "capture_now: refused"
     );
-    disclose(
-        app,
-        privacy_log::KIND_ADMIN_CAPTURE_REFUSED,
-        r.employee_detail(),
-    );
     ack_payload(screenshot_id, requested_by, Some(r))
-}
-
-/// The employee-facing half: a durable line in their own privacy log **and** a live panel event.
-/// Both, not either — the event is how they see it *now*, the log is how they see it later.
-///
-/// **Silent mode (owner policy) suppresses both.** When `tracking.silent` is set, an on-demand
-/// capture is neither announced to the employee nor written to their local privacy log. This is the
-/// deliberate covert-capture path the org owner opted into; the server still records every
-/// capture-now request (`fleet::capture_now` writes a `security` audit entry), so the org keeps an
-/// accountability trail even though the employee is shown nothing.
-fn disclose(app: &tauri::AppHandle, kind: &str, detail: &str) {
-    if app
-        .state::<AppState>()
-        .config
-        .lock()
-        .unwrap()
-        .get()
-        .tracking
-        .silent
-    {
-        return;
-    }
-    privacy_log::record(kind, detail);
-    let _ = app.emit(events::ADMIN_CAPTURE, detail.to_string());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// **The trust-critical branch.** A privacy pause refuses regardless of everything else — and it
-    /// is checked first, so it is the reason reported even when the timer is also off.
-    #[test]
-    fn a_privacy_pause_refuses_and_wins_over_every_other_state() {
-        assert_eq!(
-            decide(true, true, true, false),
-            Err(Refusal::PrivacyPause),
-            "paused mid-session must refuse"
-        );
-        assert_eq!(
-            decide(true, false, false, true),
-            Err(Refusal::PrivacyPause),
-            "the pause is reported first — it is the strongest promise we made"
-        );
-    }
-
-    /// **The trust-critical branch.** No timer, no capture — the whole privacy stance, enforced in
-    /// code rather than by configuration.
-    #[test]
-    fn no_running_timer_refuses() {
-        assert_eq!(decide(false, false, true, false), Err(Refusal::NotTracking));
-    }
-
-    /// A timer may run without monitoring consent (time tracking and capture are separate gates), so
-    /// this path is reachable and must fail closed.
-    #[test]
-    fn a_consented_gate_is_not_implied_by_a_running_timer() {
-        assert_eq!(decide(false, true, false, false), Err(Refusal::NoConsent));
-    }
-
-    /// The exceptions carve-out survives being asked by hand: an excepted window is never recorded.
-    #[test]
-    fn an_excepted_foreground_window_refuses() {
-        assert_eq!(decide(false, true, true, true), Err(Refusal::Excepted));
-    }
-
-    #[test]
-    fn all_gates_open_accepts() {
-        assert_eq!(decide(false, true, true, false), Ok(()));
-    }
-
     /// The ack is a wire contract with `fleet::features::agent_events` — pin it. `requested_by` is
     /// echoed (the server routes on it) and `reason` is null on success, never absent.
     #[test]
     fn refusal_ack_is_pinned() {
         let v: serde_json::Value =
-            serde_json::from_slice(&ack_payload("s1", "u7", Some(Refusal::PrivacyPause))).unwrap();
+            serde_json::from_slice(&ack_payload("s1", "u7", Some(Refusal::UploadHostRejected)))
+                .unwrap();
         assert_eq!(
             v,
             serde_json::json!({
@@ -355,12 +199,12 @@ mod tests {
                 "screenshot_id": "s1",
                 "requested_by": "u7",
                 "accepted": false,
-                "reason": "privacy_pause",
+                "reason": "upload_host_rejected",
             })
         );
-        let not_tracking = ack_payload("s2", "u7", Some(Refusal::NotTracking));
-        let v: serde_json::Value = serde_json::from_slice(&not_tracking).unwrap();
-        assert_eq!(v["reason"], "not_tracking");
+        let failed = ack_payload("s2", "u7", Some(Refusal::CaptureFailed));
+        let v: serde_json::Value = serde_json::from_slice(&failed).unwrap();
+        assert_eq!(v["reason"], "capture_failed");
         assert_eq!(v["accepted"], false);
     }
 
@@ -380,22 +224,15 @@ mod tests {
     }
 
     /// The server's `on_capture_result` reads `accepted` with `.unwrap_or(false)` — a refusal must
-    /// therefore never be a payload it has to guess about.
+    /// therefore never be a payload it has to guess about. Only the two technical failures remain
+    /// after the 2026-09-02 policy change.
     #[test]
     fn every_refusal_reports_a_reason() {
-        for r in [
-            Refusal::PrivacyPause,
-            Refusal::NotTracking,
-            Refusal::NoConsent,
-            Refusal::Excepted,
-            Refusal::UploadHostRejected,
-            Refusal::CaptureFailed,
-        ] {
+        for r in [Refusal::UploadHostRejected, Refusal::CaptureFailed] {
             let v: serde_json::Value =
                 serde_json::from_slice(&ack_payload("s", "u", Some(r))).unwrap();
             assert_eq!(v["accepted"], false);
             assert!(v["reason"].is_string(), "{r:?} must carry a reason");
-            assert!(!r.employee_detail().is_empty(), "{r:?} must be disclosable");
         }
     }
 }

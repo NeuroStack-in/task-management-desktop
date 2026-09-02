@@ -51,8 +51,6 @@ export interface Agent {
   screenshotBlocked: string | null;
   /** The restricted app/site last focused during tracking (`monitor:policy-blocked`); null = none. */
   restrictedHit: string | null;
-  /** The last admin on-demand capture notice (`privacy:admin-capture`); null = nothing to show. */
-  adminCapture: string | null;
   /**
    * IT released this device, so the core signed the employee out (`device:released`).
    *
@@ -89,8 +87,6 @@ export interface Agent {
   dismissIdle: () => void;
   /** Dismiss the restricted-site warning banner. */
   dismissRestricted: () => void;
-  /** Dismiss the admin-capture notice. The log entry stays — this only hides the banner. */
-  dismissAdminCapture: () => void;
   /** Dismiss the action-error banner. */
   dismissActionError: () => void;
   /** Re-read the core now instead of waiting out the poll — what the hero's refresh drives. */
@@ -111,7 +107,6 @@ export function useAgent(): Agent {
   const [idleSecs, setIdleSecs] = useState<number | null>(null);
   const [screenshotBlocked, setScreenshotBlocked] = useState<string | null>(null);
   const [restrictedHit, setRestrictedHit] = useState<string | null>(null);
-  const [adminCapture, setAdminCapture] = useState<string | null>(null);
   /** IT released this machine — survives the sign-out so the login screen can explain it. */
   const [deviceReleased, setDeviceReleased] = useState(false);
   // User-action feedback: set when an explicit action (start/stop/switch/consent/pause) fails, so the
@@ -162,13 +157,6 @@ export function useAgent(): Agent {
       // A restricted app/site was focused mid-session. The core already queued the violation for
       // the server; this is the employee-facing half of the warning.
       agent.listen<string>(EVENTS.policyBlocked, (identifier) => setRestrictedHit(identifier)),
-      // An admin asked for a screenshot of this screen. Shown whether it was taken or refused, and
-      // refreshed so the transparency log picks the entry up in the same beat — the employee finding
-      // out about this is not optional (PRIVACY.md §5).
-      agent.listen<string>(EVENTS.adminCapture, (detail) => {
-        setAdminCapture(detail);
-        void refresh();
-      }),
       // IT released this device. The core has already stopped, flushed and signed out by the time
       // this arrives; refreshing pulls the now-signed-out snapshot so the login gate takes over in
       // the same beat as the explanation appears.
@@ -202,9 +190,6 @@ export function useAgent(): Agent {
       setPauseRefused(false);
       setIdleSecs(null);
       setActionError(null);
-      // The core wipes the transparency log on an account switch (reset_for_account_switch); the
-      // banner is the same record, so it goes with it.
-      setAdminCapture(null);
     }
   }, [snapshot?.auth.signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -363,7 +348,6 @@ export function useAgent(): Agent {
 
   const dismissIdle = useCallback(() => setIdleSecs(null), []);
   const dismissRestricted = useCallback(() => setRestrictedHit(null), []);
-  const dismissAdminCapture = useCallback(() => setAdminCapture(null), []);
   const dismissActionError = useCallback(() => setActionError(null), []);
 
   return {
@@ -373,7 +357,6 @@ export function useAgent(): Agent {
     idleSecs,
     screenshotBlocked,
     restrictedHit,
-    adminCapture,
     deviceReleased,
     actionError,
     busy,
@@ -388,7 +371,6 @@ export function useAgent(): Agent {
     signOut,
     dismissIdle,
     dismissRestricted,
-    dismissAdminCapture,
     dismissActionError,
     refresh,
   };
