@@ -5,9 +5,18 @@ import { CardContent, CardHeader } from "@/components/ui/card";
 import { formatElapsed } from "@/lib/format";
 import type { Project, Session, Task, TimerState } from "@/lib/types";
 
-/** What a row hands back to resume: the fold grain, (project, description). No task id exists here. */
+/**
+ * What a row hands back to resume. It carries the **task and subtask ids as well as** the (project,
+ * description) fold grain, because a session timed on a task often has no typed description at all —
+ * its label is the task's own name, resolved from `task_id`. Resuming with only (project, description)
+ * then dropped the task and reused the empty description, so continuing "New Feature" started a new
+ * session with no task and no note that read as **"No description"**. Carrying the ids keeps the
+ * resumed session pointed at the same work, so it shows the same name.
+ */
 export interface ResumeSelection {
   projectId: string | null;
+  taskId: string | null;
+  subtaskId: string | null;
   description: string;
 }
 
@@ -129,7 +138,12 @@ export function SessionsCard({
                       type="button"
                       disabled={running}
                       onClick={() =>
-                        onResume({ projectId: s.project_id || null, description: s.description })
+                        onResume({
+                          projectId: s.project_id || null,
+                          taskId: s.task_id || null,
+                          subtaskId: s.subtask_id || null,
+                          description: s.description,
+                        })
                       }
                       title={running ? undefined : "Resume — start a new session on this work"}
                       aria-label={

@@ -33,7 +33,6 @@ function Panel() {
     error,
     pauseRefused,
     idleSecs,
-    screenshotBlocked,
     restrictedHit,
     deviceReleased,
     actionError,
@@ -109,18 +108,19 @@ function Panel() {
   const hasBanner =
     Boolean(actionError) ||
     (idleSecs !== null && timer.running) ||
-    Boolean(restrictedHit) ||
-    Boolean(screenshotBlocked);
+    Boolean(restrictedHit);
 
   // Resume from a session row: start a new session on that row's (project, description) — the
   // grain the server folds on, so the time lands in the same timesheet row. While a timer runs,
   // resuming another row re-attributes to it (same semantics as the hero's pickers).
   const resumeSession = (sel: ResumeSelection) => {
-    // Resuming a past row re-attributes to its project only — the subtask that produced it is not
-    // carried, because the row is a (project, description) aggregate and no longer names one.
+    // Resume the SAME work: carry the task and subtask the row was filed against, not just its
+    // project. A session timed on a task often has no typed description — its name comes from the
+    // task — so resuming with the ids is what keeps the new session showing that name instead of
+    // "No description".
     const full = {
-      taskId: null,
-      subtaskId: null,
+      taskId: sel.taskId,
+      subtaskId: sel.subtaskId,
       projectId: sel.projectId,
       description: sel.description,
     };
@@ -280,20 +280,9 @@ function Panel() {
           </div>
         )}
 
-        {/* Capture produced nothing. Silence here would read as "screenshots are off by policy",
-            which is a very different thing from "capture is failing" (monitor risk #5).
-
-            The text comes from the core (`events::capture_failure_hint`) rather than being written
-            here, because only macOS has a screen-recording permission to grant — this banner used
-            to tell Windows and Linux users to grant one anyway. */}
-        {screenshotBlocked && (
-          <div
-            role="alert"
-            className="shrink-0 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px]"
-          >
-            {screenshotBlocked}
-          </div>
-        )}
+        {/* No "screen capture failed" banner: a capture failure is not something the person at the
+            keyboard can act on, and it fired on transient blips. The reason is logged for the admin
+            (monitor::screenshot); the employee is left alone. */}
 
         <TimerCard
           timer={timer}

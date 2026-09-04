@@ -7,8 +7,10 @@
 //! **Every connected display is captured** — a dual-monitor machine yields one shot per monitor, all
 //! sharing the same `captured_at`/`bucket_minute` so they ride the SAME batch and map to the same
 //! activity minute (each is a distinct row: unique `id` + its own pHash). macOS needs a
-//! Screen-Recording (TCC) grant; a denial yields an empty result and the caller surfaces a
-//! "grant permission" state rather than silently collecting nothing (risk #5).
+//! Screen-Recording (TCC) grant; a denial yields an empty result, logged like every other capture
+//! failure. There is no employee-facing "capture failed" banner — a screenshot failure is not
+//! something the person at the keyboard can act on, so the reason lives in the agent log for the
+//! admin, and this path never surfaces anything to the panel.
 
 use std::path::{Path, PathBuf};
 
@@ -79,10 +81,11 @@ pub fn is_allowed_upload_host(url: &str) -> bool {
 /// Capture **every** connected display, process each to WebP, write temp files. Returns one
 /// `(ScreenshotMeta, PathBuf)` per successfully-captured monitor (dual-monitor → two entries), all
 /// sharing `captured_at`/`bucket_minute`. Empty when nothing could be captured (no monitor, macOS
-/// grant denied, encode/IO error) — the caller surfaces the "grant permission" state on empty.
+/// grant denied, encode/IO error) — the caller logs the reason and skips the cycle; there is no
+/// user-facing banner.
 ///
 /// One monitor failing to capture doesn't sink the others: each is processed independently and only
-/// its own `None` is dropped.
+/// its own `None` is dropped — including a monitor whose grab *panics* (see [`process_monitor`]).
 pub fn capture_all(app: &str, blur_level: u8, captured_at: i64) -> Vec<(ScreenshotMeta, PathBuf)> {
     let Some((monitors, dir)) = displays_and_dir() else {
         return Vec::new();
@@ -230,10 +233,33 @@ fn process_monitor(
     // On macOS this is where a denied Screen-Recording grant lands. Everywhere else it is a real
     // capture failure (driver reset, RDP/locked session, resource pressure) — which is why the
     // error text matters and a bare `.ok()?` did not.
-    let rgba = match monitor.capture_image() {
-        Ok(r) => r,
-        Err(e) => {
+    //
+    // **Wrapped in `catch_unwind`, because `xcap` can *panic* here, not just `Err`.** On some Windows
+    // display/driver configurations `capture_image()` unwinds (an internal DXGI/Graphics-Capture
+    // `unwrap`) rather than returning an error. This capture runs inside a `spawn_blocking` whose
+    // `JoinError` the caller used to discard with `.unwrap_or_default()`, so such a panic became an
+    // empty result with **no log line** — the agent said "the log has the reason" when it did not.
+    // Catching it turns the panic into a logged reason and lets the OTHER monitors still capture,
+    // instead of one bad display sinking the whole cycle.
+    let grabbed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| monitor.capture_image()));
+    let rgba = match grabbed {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             tracing::error!(display_index, error = %e, "capture: display grab failed");
+            return None;
+        }
+        Err(panic) => {
+            let reason = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic with no message".to_string());
+            tracing::error!(
+                display_index,
+                reason,
+                "capture: display grab PANICKED inside xcap (likely a driver/DXGI bug) — skipping this display"
+            );
             return None;
         }
     };

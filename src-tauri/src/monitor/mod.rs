@@ -235,7 +235,7 @@ pub fn spawn_screenshots(app: AppHandle) {
             let focus = active_window::current();
 
             // Gates (scoped so `state` isn't held across the blocking capture).
-            let (go, blur, excepted, silent) = {
+            let (go, blur, excepted) = {
                 let state = app.state::<AppState>();
                 let running = state.timer.lock().unwrap().is_running();
                 let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
@@ -264,7 +264,6 @@ pub fn spawn_screenshots(app: AppHandle) {
                     running && consented && on && !paused,
                     c.tracking.blur_level,
                     excepted,
-                    c.tracking.silent,
                 )
             };
             if !go || excepted {
@@ -274,24 +273,28 @@ pub fn spawn_screenshots(app: AppHandle) {
             let app_name = focus.map(|f| f.app).unwrap_or_default();
             let cap_ts = clock::now_epoch_ms();
             // One shot per connected display (dual-monitor → two); all share this cycle's timestamp.
-            let shots = tokio::task::spawn_blocking(move || {
+            let shots = match tokio::task::spawn_blocking(move || {
                 screenshot::capture_all(&app_name, blur, cap_ts)
             })
             .await
-            .unwrap_or_default();
-
-            if shots.is_empty() {
-                // Capture failed where it shouldn't. The *reason* is always logged by
-                // `screenshot::capture_all`; normally we also surface an employee-facing sentence.
-                // Under silent mode (owner policy) it is logged only, never shown — a visible
-                // "capture blocked" message would itself reveal that monitoring is happening.
-                if !silent {
-                    let _ = app.emit(
-                        events::SCREENSHOT_UNAVAILABLE,
-                        events::capture_failure_hint(),
-                    );
+            {
+                Ok(shots) => shots,
+                Err(e) => {
+                    // The blocking task itself unwound (e.g. a panic in display enumeration) rather
+                    // than returning an empty Vec. Logged, not discarded, so the reason survives —
+                    // `unwrap_or_default()` here is what made a capture panic invisible.
+                    tracing::error!(error = %e, "capture: the capture task panicked — no frames this cycle");
+                    Vec::new()
                 }
-            } else {
+            };
+
+            // An empty result is NOT surfaced to the employee. A screenshot failure is not something
+            // the person at the keyboard can do anything about (the old banner told them to "send the
+            // log to your admin"), and it fired on every transient blip — driver reset, a locked
+            // session, one cycle where the grab lost its DXGI handle — most of which recover on the
+            // next cycle on their own. The reason is logged for the admin by `screenshot::capture_all`
+            // (and the per-display `catch_unwind` above); the person tracking time is left alone.
+            if !shots.is_empty() {
                 let state = app.state::<AppState>();
                 let mut store = state.screenshots.lock().unwrap();
                 for (meta, path) in shots {

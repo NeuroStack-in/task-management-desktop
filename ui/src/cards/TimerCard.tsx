@@ -14,7 +14,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { PanelCard } from "@/components/panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { SubtaskStrip } from "./SubtaskStrip";
+import { TaskWorkspace } from "./TaskWorkspace";
+import { GuideDialog } from "@/components/GuideDialog";
 import { CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
@@ -279,11 +280,14 @@ export function TimerCard({
   return (
     <PanelCard
       className={cn(
-        "border-transparent bg-feature text-feature-foreground shadow-none",
+        "relative border-transparent bg-feature text-feature-foreground shadow-none",
         // One-shot ignite when a session starts (the class appearing replays the keyframe).
         timer.running && "wp-recording-ignite",
       )}
     >
+      {/* How-to tour — tucked into the card's top-right corner, on the surface it explains, rather
+          than in the app header. White-on-fill to match the card's other controls. */}
+      <GuideDialog triggerClassName="absolute right-2 top-2 z-10 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-feature-foreground/70 transition-colors hover:bg-white/15 hover:text-feature-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60" />
       <CardContent className="flex flex-col gap-2.5">
         {/* The clock is the hero's whole point — centred and given the room. */}
         <div className="flex flex-col items-center gap-2 text-center">
@@ -455,20 +459,12 @@ export function TimerCard({
           </Button>
         </div>
 
-        {/* Task status — set it right from the panel instead of leaving to the web board. Shown
-            only once a task is picked (there is no status without a task). The backend enforces who
-            may change it: the assignee, or a project Lead/Manager. */}
-        {task && (
-          <TaskStatusRow
-            status={task.status}
-            onChange={(s) => onSetTaskStatus(projectId, task.id, s)}
-          />
-        )}
-
-        {/* The breakdown under the chosen task. Renders only once a task is picked — before that
-            there is nothing to break down, and an empty strip under an empty picker would read as
-            a second prompt for one decision. */}
-        <SubtaskStrip
+        {/* The chosen task's workspace: its status stepper, its steps (subtasks), and which step the
+            clock is on — one region, each action a single unambiguous control. Renders only once a
+            task is picked (before that there is nothing to break down or move along). The backend
+            enforces who may change task status (assignee, or a project Lead/Manager) and who may
+            change a step's status. */}
+        <TaskWorkspace
           task={task}
           projectName={project?.name ?? ""}
           selectedId={subtaskId}
@@ -484,6 +480,9 @@ export function TimerCard({
           onSetSubtaskDone={(sub, done) =>
             onSetSubtaskDone(projectId, sub.task_id || (task?.id ?? ""), sub.id, done)
           }
+          onSetStatus={(s) => {
+            if (task) onSetTaskStatus(projectId, task.id, s);
+          }}
         />
 
 
@@ -496,81 +495,6 @@ export function TimerCard({
         </p>
       </CardContent>
     </PanelCard>
-  );
-}
-
-/**
- * The statuses an **assignee** may set from their own panel — the desktop is the assignee's tool, so
- * it offers only the transitions their work makes: `todo → in_progress → in_review`.
- *
- * **`done` and `blocked` are deliberately excluded.** `done` is a sign-off the backend gates to a
- * reviewer (Manager/Lead via review), not something the person doing the work awards themselves — an
- * assignee picking it just 403s. `blocked` is an escalation a lead/manager owns, not a self-declared
- * state. **`closed` is likewise absent** — it is the reviewed state, reachable only through review.
- * A task already in any of those shows that state on the trigger (the leading label) and can still be
- * moved back to one of these three.
- */
-const TASK_STATUSES: { value: string; label: string }[] = [
-  { value: "todo", label: "To do" },
-  { value: "in_progress", label: "In progress" },
-  { value: "in_review", label: "In review" },
-];
-
-/** Human labels for **every** status the trigger might have to display — including the ones an
- *  assignee can't set (`done`/`blocked`/`closed`), so a task already in one reads properly rather
- *  than showing the raw slug. The dropdown's *options* are still only the settable `TASK_STATUSES`. */
-const STATUS_LABEL: Record<string, string> = {
-  todo: "To do",
-  in_progress: "In progress",
-  in_review: "In review",
-  done: "Done",
-  blocked: "Blocked",
-  closed: "Closed (reviewed)",
-};
-
-/**
- * A compact status selector for the chosen task — a **custom, themed dropdown** (the Base UI menu the
- * pickers use), not a native `<select>`, so its trigger and options match the panel instead of the
- * OS. The trigger shows the current status (whatever it is); the menu offers only the three an
- * assignee may set (`TASK_STATUSES`) — a task already `done`/`blocked`/`closed` shows that on the
- * trigger but those are never offered as choices.
- */
-function TaskStatusRow({ status, onChange }: { status: string; onChange: (s: string) => void }) {
-  const label = STATUS_LABEL[status] ?? status ?? "—";
-  return (
-    <div className="flex items-center gap-2 text-[11px] text-feature-foreground/70">
-      <span className="shrink-0">Task status</span>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <button
-              type="button"
-              className="group inline-flex min-w-0 flex-1 items-center justify-between gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-            />
-          }
-        >
-          <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-fast ease-standard group-data-[popup-open]:rotate-180" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" sideOffset={6} className="min-w-40 p-1">
-          {TASK_STATUSES.map((s) => (
-            <DropdownMenuItem
-              key={s.value}
-              onClick={() => {
-                if (s.value !== status) onChange(s.value);
-              }}
-              className={cn(
-                "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[12px]",
-                s.value === status && "bg-accent/60",
-              )}
-            >
-              {s.label}
-              {s.value === status && <Check className="size-3.5 shrink-0 text-primary" />}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
   );
 }
 

@@ -55,7 +55,6 @@ export const EVENTS = {
   authExpired: "auth:expired",
   idlePrompt: "monitor:idle-prompt",
   trackingChanged: "monitor:tracking-changed",
-  screenshotUnavailable: "monitor:screenshot-unavailable",
   /** A restricted app/site was focused while tracking; payload = the offending identifier. */
   policyBlocked: "monitor:policy-blocked",
   /**
