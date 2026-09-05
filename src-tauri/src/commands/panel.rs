@@ -73,17 +73,41 @@ pub struct CaptureStateDto {
     pub next_cycle_secs: u32,
 }
 
+/// What the panel's capture indicator reports.
+///
+/// **`capturing` must mirror the gates the capture loops actually use** (`monitor::run` for activity,
+/// `monitor::spawn_screenshots` for frames) — it drives the green `LiveDot`, which PRIVACY.md §5
+/// requires to be lit whenever capture is running.
+///
+/// It used to be derived from the screenshot **cadence** alone, which is not a term in the activity
+/// gate at all. So an org that set cadence to `Off` (a reasonable "no screenshots" policy) while
+/// leaving activity monitoring on captured keystroke/click counts and the foreground app/title/URL
+/// with the indicator **dark** — the employee saw nothing running while their activity shipped in
+/// every batch. That is the precise failure the persistent indicator exists to prevent.
+///
+/// So the flag is the **union**: lit when *anything* is being captured. `screenshots` stays
+/// screenshot-specific (it feeds the cadence countdown), and both now honour the entitlement flags
+/// the loops enforce, not just the cadence.
 #[tauri::command]
 pub fn capture_state(state: State<'_, AppState>) -> CaptureStateDto {
     let running = state.timer.lock().unwrap().is_running();
     let consent = state.consent.load(std::sync::atomic::Ordering::Relaxed);
     let paused = state.pause.lock().unwrap().is_paused(now_ms());
     let cfg = state.config.lock().unwrap();
-    let cadence = cfg.get().tracking.cadence;
-    let screenshots = !matches!(cadence, Cadence::Off);
-    let capturing = running && consent && !paused && screenshots;
+    let c = cfg.get();
+    let cadence = c.tracking.cadence;
+    // The three conditions both loops share.
+    let gated = running && consent && !paused;
+    // Screenshots additionally need a live cadence AND the org's `monitoring.screenshots`
+    // entitlement (monitor/mod.rs:250); activity needs `monitoring.activity` and no cadence at all
+    // (monitor/mod.rs:444).
+    let screenshots = gated && !matches!(cadence, Cadence::Off) && c.tracking.screenshots_enabled;
+    let activity = gated && c.tracking.activity_enabled;
+    let capturing = screenshots || activity;
     let interval = cadence.interval_secs().unwrap_or(0);
-    let next_cycle_secs = if capturing && interval > 0 {
+    // The countdown is the *screenshot* cadence, so it keys off `screenshots` — not `capturing`,
+    // which can now be true on an activity-only policy that never takes a frame.
+    let next_cycle_secs = if screenshots && interval > 0 {
         interval - ((now_ms() / 1000) as u32 % interval)
     } else {
         0
