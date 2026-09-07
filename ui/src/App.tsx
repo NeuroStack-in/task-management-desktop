@@ -11,6 +11,7 @@ import {
 import { LoginCard } from "@/cards/LoginCard";
 import { PauseCard } from "@/cards/PauseCard";
 import { SessionsCard, type ResumeSelection } from "@/cards/SessionsCard";
+import type { TimerSelection } from "@/lib/types";
 import { TimerCard } from "@/cards/TimerCard";
 import { AutostartToggle, IdentityChip, LiveDot, StatusBadge } from "@/components/panel";
 import { Button } from "@/components/ui/button";
@@ -52,7 +53,11 @@ function Panel() {
   } = useAgent();
   // Theme follows the account (web Settings -> Appearance), so there is nothing to toggle here.
   useTheme(Boolean(snapshot?.auth.signedIn));
-  useResumeLastTask(snapshot?.auth.signedIn === true, snapshot?.timer.running === true, refresh);
+  const { notice: resumeNotice, clearNotice } = useResumeLastTask(
+    snapshot?.auth.signedIn === true,
+    snapshot?.timer.running === true,
+    refresh,
+  );
 
   // The monitoring notice has been removed from the panel, but the core still gates activity and
   // screenshot capture on consent (monitor/mod.rs — fails closed). Record it silently once the user
@@ -107,6 +112,7 @@ function Panel() {
    */
   const hasBanner =
     Boolean(actionError) ||
+    Boolean(resumeNotice) ||
     (idleSecs !== null && timer.running) ||
     Boolean(restrictedHit);
 
@@ -219,6 +225,57 @@ function Panel() {
               variant="outline"
               className="h-6 px-2 text-[11px]"
               onClick={dismissActionError}
+            >
+              Dismiss
+            </Button>
+          </div>
+        )}
+
+        {/* **What happened to the timer that was running before this launch.**
+            Said out loud in both directions. The agent stops the clock whenever it exits — a quit, a
+            Windows sign-out, and (the one that hurt) an auto-update firing mid-morning. The panel
+            used to come back silent either way, so an employee whose agent updated itself kept
+            working against a stopped clock and only found out from their timesheet. */}
+        {resumeNotice && (
+          <div
+            role="status"
+            className={
+              resumeNotice.kind === "resumed"
+                ? "flex shrink-0 items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-2.5 py-1.5"
+                : "flex shrink-0 items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-1.5"
+            }
+          >
+            <span className="min-w-0 flex-1 text-[11px]">
+              {resumeNotice.kind === "resumed" ? (
+                <>
+                  <span className="font-semibold">Tracking resumed</span> on{" "}
+                  <span className="truncate">{resumeNotice.label}</span>.
+                </>
+              ) : (
+                <>
+                  <span className="font-semibold">Tracking is stopped.</span> It didn&apos;t pick{" "}
+                  {resumeNotice.label} back up.
+                </>
+              )}
+            </span>
+            {resumeNotice.kind === "stopped" && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => {
+                  toggleTimer(resumeNotice.sel);
+                  clearNotice();
+                }}
+              >
+                Resume
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-[11px]"
+              onClick={clearNotice}
             >
               Dismiss
             </Button>
@@ -441,25 +498,60 @@ function sameLocalDay(a: number, b: number): boolean {
  */
 function useResumeLastTask(signedIn: boolean, running: boolean, refresh: () => void) {
   const claimed = useRef(false);
+  const [notice, setNotice] = useState<ResumeNotice | null>(null);
+
   useEffect(() => {
     if (!signedIn || running || claimed.current) return;
     claimed.current = true;
     void (async () => {
+      let pending: Awaited<ReturnType<typeof takePendingResume>> = null;
       try {
-        const pending = await takePendingResume();
-        if (!pending || !sameLocalDay(pending.stoppedAtMs, Date.now())) return;
-        await startTimer({
-          taskId: pending.taskId || null,
-          // Resume onto the same subtask, not just the parent — otherwise a restart silently moves
-          // the session up a level and the breakdown loses the time.
-          subtaskId: pending.subtaskId || null,
-          projectId: pending.projectId || null,
-          description: pending.description,
-        });
-        refresh();
+        pending = await takePendingResume();
       } catch {
-        // A failed resume must never block the panel: the user can always press Start.
+        return; // nothing was handed over; there is nothing to say
+      }
+      if (!pending) return;
+
+      const sel: TimerSelection = {
+        taskId: pending.taskId || null,
+        // Resume onto the same subtask, not just the parent — otherwise a restart silently moves
+        // the session up a level and the breakdown loses the time.
+        subtaskId: pending.subtaskId || null,
+        projectId: pending.projectId || null,
+        description: pending.description,
+      };
+      const label = pending.description.trim() || "your last task";
+
+      // Yesterday's work is never silently restarted — but staying silent is what let an
+      // update-time stop go unnoticed for hours, so say it instead and offer it back.
+      if (!sameLocalDay(pending.stoppedAtMs, Date.now())) {
+        setNotice({ kind: "stopped", label, sel });
+        return;
+      }
+      try {
+        await startTimer(sel);
+        refresh();
+        setNotice({ kind: "resumed", label });
+      } catch {
+        // A failed resume must never block the panel — but it must not be invisible either.
+        setNotice({ kind: "stopped", label, sel });
       }
     })();
   }, [signedIn, running, refresh]);
+
+  return { notice, clearNotice: useCallback(() => setNotice(null), []) };
 }
+
+/**
+ * What to tell someone about the timer that was running before the agent last closed.
+ *
+ * The panel used to say nothing in either direction. That is fine when the agent closes because the
+ * person went home, and badly wrong when it closes because it updated itself mid-morning: the timer
+ * stopped, the panel came back looking idle, and one employee kept working for about an hour and a
+ * half against a clock that was not running. Whichever way it went, they should be able to see it.
+ */
+type ResumeNotice =
+  /** Picked straight back up — a receipt, not a warning. Auto-clears. */
+  | { kind: "resumed"; label: string }
+  /** Not resumed (a different day, or the start failed). Persistent, with a way to start it. */
+  | { kind: "stopped"; label: string; sel: TimerSelection };

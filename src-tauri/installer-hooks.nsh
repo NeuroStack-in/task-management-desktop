@@ -11,8 +11,17 @@
 ; app_config_dir() resolves for identifier `com.workpulse.agent` — so the paths line up.
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; Never prompt during a silent install — that's how the auto-updater reinstalls (`/S`), and a
-  ; modal here would hang the update. Silent installs simply leave the existing choice untouched.
+  ; Never prompt during an unattended install: a modal here HANGS the update, because the old agent
+  ; has already exited (its timer stopped) and nothing tracks until a human clicks. Unattended
+  ; installs simply leave the existing choice untouched.
+  ;
+  ; This guard was written believing the auto-updater reinstalls with `/S`. It does not by default:
+  ; tauri-plugin-updater's default Windows mode is `passive`, which passes `/P /R`, and `IfSilent`
+  ; is only true for `/S`. So the prompt fired on every auto-update and sat behind whatever the
+  ; employee was working in -- one report lost ~1.5h of tracked time to a dialog nobody saw.
+  ; `plugins.updater.windows.installMode` is now pinned to "quiet" (`/S /R`) in tauri.conf.json, so
+  ; this branch is finally reached. Keep the two together: loosening the install mode without
+  ; teaching this hook about `/P` brings the hang straight back.
   IfSilent autostart_done
     MessageBox MB_YESNO|MB_ICONQUESTION "Launch WorkPulse automatically when you sign in to Windows?$\n$\nRecommended so activity tracking starts with your session." IDNO autostart_no
       StrCpy $0 "1"

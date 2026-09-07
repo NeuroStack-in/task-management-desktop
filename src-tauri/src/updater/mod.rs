@@ -8,8 +8,10 @@
 //! (`TAURI_SIGNING_PRIVATE_KEY`) used to sign the release artifacts. Point releases at **our** repo
 //! (below) — not the sample's.
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::UpdaterExt;
+
+use crate::state::AppState;
 
 /// The running agent version — folds into the heartbeat and gates update checks.
 pub fn current_version() -> &'static str {
@@ -107,6 +109,70 @@ pub async fn install_now(app: &AppHandle) -> Result<String, String> {
     Ok(version)
 }
 
+/// How long an available update may be held back by a running timer before it installs anyway.
+///
+/// The deferral exists so an update never stops a timer mid-work; this bound exists so an employee
+/// who leaves a timer running for days still gets fixes. Three days spans several working sessions —
+/// long enough that the ordinary case (a timer stopped overnight, at lunch, or by the 15-minute idle
+/// stop) always wins, short enough that nobody drifts a release behind.
+const MAX_UPDATE_DEFER_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+
+/// Should this update wait for a moment the employee is not tracking?
+///
+/// **Installing means exiting.** `on_before_exit` stops the timer, the installer runs, and nothing is
+/// tracked until the agent is back — and the employee is given no sign any of it happened. One
+/// report lost about 1.5 hours that way: the update fired mid-morning, the install sat on a dialog
+/// behind their editor, and they kept working against a clock that had stopped.
+///
+/// Pinning the install mode to `quiet` bounds that window to the install itself, but the honest move
+/// is not to interrupt tracked work at all. Every 6-hourly check re-asks, and a timer is stopped far
+/// more often than not — overnight, at lunch, on lock, on lid-close, or by the idle auto-stop — so
+/// the update lands in a gap the employee never notices instead of one they pay for.
+///
+/// Only the automatic path defers. `install_now` is someone pressing "Update now", which is consent.
+fn defer_while_tracking(app: &AppHandle, version: &str) -> bool {
+    let running = app.state::<AppState>().timer.lock().unwrap().is_running();
+    let now = crate::clock::now_epoch_ms();
+
+    if !running {
+        // The clock is free — take it now, and forget any earlier wait.
+        if crate::session_state::load()
+            .update_deferred_since_ms
+            .is_some()
+        {
+            crate::session_state::update(|s| s.update_deferred_since_ms = None);
+        }
+        return false;
+    }
+
+    match crate::session_state::load().update_deferred_since_ms {
+        None => {
+            crate::session_state::update(|s| s.update_deferred_since_ms = Some(now));
+            tracing::info!(version, "update deferred: a timer is running");
+            true
+        }
+        Some(since) if now - since < MAX_UPDATE_DEFER_MS => {
+            tracing::info!(
+                version,
+                waiting_secs = (now - since) / 1000,
+                "update still deferred: a timer is running"
+            );
+            true
+        }
+        Some(since) => {
+            // Held back long enough. An always-on timer must not mean an agent that never updates;
+            // the stop is still clean and the panel offers the task straight back on relaunch.
+            tracing::warn!(
+                version,
+                waited_secs = (now - since) / 1000,
+                "installing despite a running timer: the deferral budget is spent"
+            );
+            crate::session_state::update(|s| s.update_deferred_since_ms = None);
+            false
+        }
+    }
+}
+
 /// Check GitHub Releases for a newer **signed** build. Returns whether an update is available. When
 /// `auto_update` is on, it is downloaded + installed (signature verified by the plugin first). With no
 /// public key configured this refuses to proceed — never an unsigned update.
@@ -137,6 +203,11 @@ pub async fn check_and_maybe_install(app: &AppHandle, auto_update: bool) -> Resu
             "update {} available; auto_update off — not installing",
             update.version
         );
+        return Ok(true);
+    }
+    // Don't stop someone's clock to install. Available is still `true` — the panel's update strip
+    // shows it, and pressing "Update now" installs immediately (`install_now` never defers).
+    if defer_while_tracking(app, &update.version) {
         return Ok(true);
     }
     let handle = app.clone();

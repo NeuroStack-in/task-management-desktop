@@ -72,6 +72,14 @@ pub struct SessionState {
     /// previous run ended without one.
     #[serde(default)]
     pub open: Option<OpenSession>,
+    /// When an available update was first held back because a timer was running.
+    ///
+    /// Installing an update means exiting, which stops the clock — so the updater waits for a moment
+    /// the employee is not tracking (see `updater::defer_while_tracking`). This records how long it
+    /// has been waiting, so a timer left running for days cannot mean an agent that never updates.
+    /// Cleared as soon as an update installs or the timer is found stopped.
+    #[serde(default)]
+    pub update_deferred_since_ms: Option<i64>,
     /// The `released_at` of the last device release this agent has already acted on.
     ///
     /// **This is what lets the employee sign back in.** The fleet row stays released after the fact,
@@ -172,6 +180,7 @@ mod tests {
                 stopped_at_ms,
             }),
             open: None,
+            update_deferred_since_ms: None,
             released_ack_ms: 0,
         }
     }
