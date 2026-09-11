@@ -31,6 +31,10 @@ import { cn } from "@/lib/utils";
 import type { Project, Subtask, Task, TimerSelection, TimerState } from "@/lib/types";
 import { NewTaskItem } from "./NewTaskItem";
 
+/** The card's corner icon buttons (refresh, how-to tour) — one definition so the pair can't drift. */
+const CARD_ICON_BUTTON =
+  "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-feature-foreground/70 transition-colors hover:bg-white/15 hover:text-feature-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 disabled:cursor-default";
+
 /**
  * The timer hero, mirroring the web app's Time Tracking hero
  * (modules/time-tracking/components/timer-hero.tsx): a filled `bg-feature` card with
@@ -285,9 +289,22 @@ export function TimerCard({
         timer.running && "wp-recording-ignite",
       )}
     >
-      {/* How-to tour — tucked into the card's top-right corner, on the surface it explains, rather
-          than in the app header. White-on-fill to match the card's other controls. */}
-      <GuideDialog triggerClassName="absolute right-2 top-2 z-10 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-feature-foreground/70 transition-colors hover:bg-white/15 hover:text-feature-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60" />
+      {/* Card utilities — refresh and the how-to tour, side by side in the top-right corner. One
+          positioned cluster rather than two absolute buttons, so they share a baseline and gap and
+          can never overlap. Both take the same white-on-fill icon treatment. */}
+      <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={refreshing}
+          aria-label="Refresh projects and tasks"
+          title="Refresh projects and tasks"
+          className={CARD_ICON_BUTTON}
+        >
+          <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
+        </button>
+        <GuideDialog triggerClassName={CARD_ICON_BUTTON} />
+      </div>
       <CardContent className="flex flex-col gap-2.5">
         {/* The clock is the hero's whole point — centred and given the room. */}
         <div className="flex flex-col items-center gap-2 text-center">
@@ -430,19 +447,6 @@ export function TimerCard({
                 component stays out of the way of other work in it. */}
             <NewTaskItem projectId={projectId} onCreated={chooseTask} />
           </HeroPicker>
-
-          {/* Same translucent treatment as the pickers either side — a semantic fill would
-              fight the teal surface (see the card's house rules above). */}
-          <Button
-            size="sm"
-            onClick={refresh}
-            disabled={refreshing}
-            aria-label="Refresh projects and tasks"
-            title="Refresh projects and tasks"
-            className="size-8 shrink-0 rounded-xl border-transparent bg-white/15 p-0 text-feature-foreground ring-1 ring-inset ring-white/15 hover:bg-white/25 disabled:opacity-100"
-          >
-            <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} />
-          </Button>
 
           <Button
             size="sm"
