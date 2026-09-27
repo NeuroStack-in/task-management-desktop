@@ -175,12 +175,22 @@ fn rand01(seed: u64) -> f64 {
 /// inside, the random offset is drawn from the **remaining** part of that window, so it stays uniform
 /// and never lands before `now`. Pure and deterministic in its inputs → unit-tested below.
 ///
+/// **A window index only means anything in units of `interval_secs`,** and the owner can change the
+/// interval under a running agent. Raising it (1 min → 5 min) leaves a `next_window` counted in the
+/// old, smaller windows — five times too large — and `max(cur)` then faithfully targets a window
+/// centuries away. That is not hypothetical: it silently stopped capture on every agent that was
+/// running when an org went from 1 min to 5 min, with no log line, until the process restarted. The
+/// upper clamp is what makes a stale index harmless: the only values with any meaning are "the window
+/// we are in" and "the next one", so anything beyond `cur + 1` is nonsense and is treated as such.
+///
 /// Returns `(sleep_ms, shot_window)`; the caller sleeps `sleep_ms`, captures, then sets
 /// `next_window = shot_window + 1` to advance to the following window.
 fn schedule_shot(now_ms: i64, interval_secs: i64, next_window: i64, rand01: f64) -> (i64, i64) {
     let win = (interval_secs * 1000).max(1);
     let cur = now_ms.div_euclid(win);
-    let target_window = next_window.max(cur);
+    // Lower bound: never target the past. Upper bound: never target further than the next window,
+    // whatever `next_window` claims — see the note above.
+    let target_window = next_window.clamp(cur, cur + 1);
     let win_start = target_window * win;
     // Inside the current window, only the time left counts; a full window is available otherwise.
     let (lo, span) = if target_window == cur {
@@ -803,6 +813,49 @@ mod tests {
         let (sleep_ms, shot_window) = schedule_shot(now, MIN10, 0 /* way behind */, 0.5);
         assert_eq!(shot_window, 5, "clamped forward to the current window");
         assert!(now + sleep_ms >= now, "never in the past");
+    }
+
+    /// Raising the cadence under a running agent must not park the loop in the future.
+    ///
+    /// The regression this pins is a real outage, not a hypothetical: an org went from a 1-minute to
+    /// a 5-minute interval, and every agent that happened to be running at the time stopped taking
+    /// screenshots — silently, with no log line and no failed upload, while its timer, batches and
+    /// heartbeats all carried on looking healthy. `next_window` was still counted in one-minute
+    /// windows, so re-read as five-minute windows it pointed 227 years ahead, and `max(cur)` kept it
+    /// there. Only restarting the process cleared it.
+    #[test]
+    fn raising_the_cadence_under_a_running_agent_still_shoots_within_one_window() {
+        const MIN1: i64 = 60;
+        const MIN5: i64 = 300;
+        // Yesterday, on a 1-minute cadence: shoot, then aim at the following 1-minute window.
+        let yesterday = 1_790_000_000_000;
+        let (_, w) = schedule_shot(yesterday, MIN1, -1, 0.5);
+        let stale = w + 1;
+        // The owner raises the interval to 5 minutes. Same process, same `next_window`.
+        let now = yesterday + 20 * 3600 * 1000;
+        let (sleep_ms, shot_window) = schedule_shot(now, MIN5, stale, 0.5);
+        assert!(
+            sleep_ms <= 2 * MIN5 * 1000,
+            "parked {} days into the future instead of shooting within a window",
+            sleep_ms / 86_400_000
+        );
+        assert!(
+            shot_window <= now.div_euclid(MIN5 * 1000) + 1,
+            "targeted a window beyond the next one"
+        );
+    }
+
+    /// Lowering the cadence was always safe (the stale index lands in the past and is clamped up);
+    /// assert it explicitly so a future change to the clamp can't quietly break the easy direction.
+    #[test]
+    fn lowering_the_cadence_keeps_shooting_immediately() {
+        let now = 1_790_000_000_000;
+        let (_, w) = schedule_shot(now, 300, -1, 0.5);
+        let (sleep_ms, _) = schedule_shot(now + 1000, 60, w + 1, 0.5);
+        assert!(
+            sleep_ms <= 60 * 1000,
+            "sleep {sleep_ms}ms exceeds one window"
+        );
     }
 
     #[test]
