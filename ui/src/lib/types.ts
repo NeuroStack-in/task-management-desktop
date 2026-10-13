@@ -137,9 +137,8 @@ export type ActivitySeries = number[];
 /**
  * api/timesheet.rs — SessionDto (`GET /v1/me/timesheet/today`).
  *
- * The server folds this agent's own TimerStarted/Stopped events into time entries and aggregates
- * them per **(project, description)** — not per task. A session therefore has no `task_id`, and
- * the panel must not try to look one up.
+ * The server folds this agent's own TimerStarted/Stopped events into time entries; the core sums
+ * them per **(project, task, subtask, description)** — the grain every row key must use.
  */
 export interface Session {
   project_id: string;
@@ -151,26 +150,27 @@ export interface Session {
   secs: number;
 }
 
-/**
- * privacy_log.rs — `LocalEvent`, served by the `privacy_log` command, newest first.
- *
- * The employee's own record of things done to this machine that they could not otherwise observe —
- * today, admin-triggered on-demand captures (taken **and** refused). PRIVACY.md §5: no silent
- * access. `detail` is a ready-to-render sentence; the panel never composes one from `kind`.
- */
-export interface LocalEvent {
-  /** Epoch ms. */
-  ts: number;
-  /** `admin_capture` | `admin_capture_refused` — more kinds may appear; render `detail`. */
-  kind: string;
-  detail: string;
-}
-
 /** panel.rs — IdentityDto. Name/email come from the ID-token claims, never the `sub` UUID. */
 export interface Identity {
   name: string;
   email: string;
   avatar_url: string;
+  /**
+   * False when the account's role doesn't track its own time (`TimeTrackSelf` — a contributor
+   * permission Owner and Admin don't hold). `start_timer` refuses then, so the panel says so.
+   */
+  can_track_time: boolean;
+}
+
+/**
+ * monitor/session.rs — SessionInfo (**camelCase**), from `session_info`: what this session can
+ * measure. On Wayland idle time and app activity can't be read, so the timer is never stopped for
+ * idleness there.
+ */
+export interface SessionInfo {
+  canTrackWindows: boolean;
+  displayServer: string;
+  limitation: string | null;
 }
 
 /**

@@ -21,9 +21,8 @@ export interface ResumeSelection {
 }
 
 /**
- * Today's totals, as the server folded them: one row per **(project, description)**, not per task.
- * That's the grain `GET /v1/me/timesheet/today` aggregates on (api/timesheet.rs) — a task id never
- * reaches this card, so don't try to resolve one.
+ * Today's totals, as the core aggregated the server's entries: one row per **(project, task,
+ * subtask, description)** (api/timesheet.rs). The row names the task from its id where it can.
  *
  * The server deliberately omits the *running* session (its entry has no `duration_secs` yet), so
  * the live segment is folded in here from the local timer. That's the no-double-count contract in
@@ -243,15 +242,21 @@ export function SessionsCard({
 }
 
 /**
- * Composite key for a `(project, description)` row.
+ * Composite key for a row — **the same four fields the core aggregates on** (project, task, subtask,
+ * description; api/timesheet.rs) and `isCurrent` compares.
  *
- * The separator is `\0` because it is the one character that cannot appear in either half, so
+ * It used to be (project, description) alone. Description is optional once a task is picked, so
+ * task rows mostly carry `""` and collided: the live segment was added to the first row of a
+ * *different* task in the same project, that task's own row never appeared, and sibling rows shared
+ * a React key (QA audit 2026-10-08, WP-211).
+ *
+ * The separator is `\0` because it is the one character that cannot appear in any part, so
  * `("a", "b|c")` and `("a|b", "c")` can never collide. It is written as an **escape**: it used to be
  * a raw NUL byte in the source, which made git and grep classify this file as binary and rendered as
  * an innocent-looking space in most editors.
  */
-const keyOf = (s: { project_id: string; description: string }) =>
-  `${s.project_id}\0${s.description}`;
+const keyOf = (s: Pick<Session, "project_id" | "task_id" | "subtask_id" | "description">) =>
+  `${s.project_id}\0${s.task_id}\0${s.subtask_id}\0${s.description}`;
 
 function isCurrent(s: Session, timer: TimerState): boolean {
   return (
@@ -265,8 +270,8 @@ function isCurrent(s: Session, timer: TimerState): boolean {
 
 /**
  * Add the in-flight segment to its matching row, or introduce a row for it when today's first
- * session on that (project, description) is still running — otherwise starting a timer leaves the
- * list looking empty next to a ticking clock.
+ * session on that (project, task, subtask, description) is still running — otherwise starting a
+ * timer leaves the list looking empty next to a ticking clock.
  */
 function foldLiveSegment(sessions: Session[], timer: TimerState): Session[] {
   const out = sessions.map((s) => ({ ...s }));

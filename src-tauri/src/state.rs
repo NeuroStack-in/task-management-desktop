@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
@@ -14,27 +14,47 @@ use crate::config::ConfigCache;
 use crate::outbox::Outbox;
 use crate::timer::TimerEngine;
 
-/// A captured screenshot awaiting S3-direct upload. Re-declared in each batch (idempotent by `id`)
-/// until the presigned PUT succeeds or `attempts` hits the cap (M5).
+/// A captured screenshot awaiting S3-direct upload. Declared in a batch (idempotent by `id`), and
+/// declared again only once that batch has been acked without the upload succeeding — until the
+/// presigned PUT succeeds or `attempts` hits the cap (M5).
 pub struct PendingShot {
     pub meta: ScreenshotMeta,
     pub path: PathBuf,
     pub attempts: u8,
+    /// The `batch_seq` that last declared this frame. While that batch is still queued the frame is
+    /// not declared again: offline, every new batch used to re-declare every pending frame, so batch
+    /// and outbox size grew quadratically with time offline until the server refused the batch as
+    /// too large — and a refused head batch stopped all ingestion (QA audit 2026-10-08, WP-208).
+    /// In memory only: after a restart each frame is declared once more, which is harmless.
+    pub declared_seq: Option<u64>,
 }
 
+/// The daily privacy-pause allowance, in seconds.
+pub const DAILY_PAUSE_SECS: u64 = 30 * 60;
+
 /// Privacy-pause: a bounded window during which capture is suspended, drawn from a daily budget.
+///
+/// **The day is the user's local day, supplied by the panel.** The core has no local calendar (see
+/// `session_state::ResumeTask`), so the webview passes its `YYYY-MM-DD` with every pause read and
+/// request. The budget used to be an in-memory 30 minutes with no reset at all: restarting the agent
+/// bought another 30, and an agent left running never got its allowance back, while the panel said
+/// "It resets tomorrow" (QA audit 2026-10-08, WP-213). It is persisted (`session_state`) for the
+/// same reason.
 pub struct PauseState {
     /// Epoch ms the current pause ends, or `None` when not paused.
     pub until_ms: Option<i64>,
-    /// Remaining pause budget (seconds).
+    /// Remaining pause budget for [`Self::day`] (seconds).
     pub budget_secs: u64,
+    /// The local date the budget belongs to; empty until the first pause is taken.
+    pub day: String,
 }
 
 impl Default for PauseState {
     fn default() -> Self {
         PauseState {
             until_ms: None,
-            budget_secs: 30 * 60,
+            budget_secs: DAILY_PAUSE_SECS,
+            day: String::new(),
         }
     }
 }
@@ -44,9 +64,29 @@ impl PauseState {
         self.until_ms.is_some_and(|u| u > now_ms)
     }
 
-    /// Grant up to `requested` seconds from the budget and extend the pause window. Returns
+    /// A later local day than the budget's earns the full allowance back. Only *later*: setting the
+    /// clock back a day must not hand out a second allowance for the day already spent, and a
+    /// malformed date is ignored rather than trusted.
+    fn rolls_over(&self, today: &str) -> bool {
+        crate::clock::is_local_date(today) && today > self.day.as_str()
+    }
+
+    /// The budget left on `today`.
+    pub fn budget_on(&self, today: &str) -> u64 {
+        if self.rolls_over(today) {
+            DAILY_PAUSE_SECS
+        } else {
+            self.budget_secs
+        }
+    }
+
+    /// Grant up to `requested` seconds from `today`'s budget and extend the pause window. Returns
     /// `(granted, granted_secs, remaining_budget_secs)`.
-    pub fn request(&mut self, now_ms: i64, requested: u64) -> (bool, u64, u64) {
+    pub fn request(&mut self, now_ms: i64, requested: u64, today: &str) -> (bool, u64, u64) {
+        if self.rolls_over(today) {
+            self.day = today.to_string();
+            self.budget_secs = DAILY_PAUSE_SECS;
+        }
         let granted = requested.min(self.budget_secs);
         if granted > 0 {
             self.budget_secs -= granted;
@@ -54,6 +94,30 @@ impl PauseState {
             self.until_ms = Some(base + (granted as i64) * 1000);
         }
         (granted > 0, granted, self.budget_secs)
+    }
+}
+
+/// The idle stretch the panel's "still working?" banner is about (WP-212).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdleWindow {
+    /// The last input before the idle stretch (epoch ms) — where a "Stop" on the banner ends the
+    /// session, so the idle minutes are not billed.
+    pub since_ms: i64,
+    /// When input came back, if it has.
+    pub returned_ms: Option<i64>,
+}
+
+/// How long after coming back the banner's Stop still means "I wasn't working". Long enough to read
+/// it and click; past this the person has evidently been working again, and the stop is "now".
+pub const IDLE_STOP_GRACE_MS: i64 = 2 * 60 * 1000;
+
+impl IdleWindow {
+    /// Where a banner Stop at `now` should end the session.
+    pub fn stop_at(&self, now_ms: i64) -> i64 {
+        match self.returned_ms {
+            Some(back) if now_ms - back > IDLE_STOP_GRACE_MS => now_ms,
+            _ => self.since_ms,
+        }
     }
 }
 
@@ -100,6 +164,27 @@ pub struct AppState {
     /// keyboard/mouse input. `None` when there is nothing to resume. Per-user, so it's cleared on an
     /// account switch. See `monitor`'s auto-resume block.
     pub auto_resume: Mutex<Option<AutoResume>>,
+    /// Bumped by [`AppState::reset_for_account_switch`] **before** it clears anything. The capture
+    /// loops note it when they open a minute bucket or start a screenshot, and drop that work if it
+    /// moved before they hand it over. A wipe used to clear the queues while the monitor still held
+    /// the open minute and the screenshot loop a frame mid-encode; both landed in the queues a moment
+    /// later and rode the next user's first batch (QA audit 2026-10-08, WP-205, WP-443).
+    pub capture_epoch: AtomicU64,
+    /// The user this process last adopted as the queue's owner — and the lock that serialises
+    /// [`AppState::adopt_signed_in`]. The sign-in command, the sender and the panel's resume claim
+    /// can all reach it in the same second; two of them racing through the reset could stop a timer
+    /// the new user had just started. Held in memory as well as in `session.json`, so a file that
+    /// can't be written never makes every cycle wipe the current user's queue again.
+    adopted_owner: Mutex<Option<String>>,
+    /// An org config has been applied — pulled this run, or the last one restored from disk
+    /// (`api::config::restore`). Capture waits for it, so a first run never captures under the
+    /// contract's built-in defaults before the org's policy is known (WP-209).
+    pub config_known: AtomicBool,
+    /// Bumped to make the MQTT connection drop and re-enrol — the signed-in user belongs to a
+    /// different organization than the device credential was minted for (`mqtt`, WP-215).
+    pub mqtt_rebind: tokio::sync::watch::Sender<u64>,
+    /// The idle stretch the "still working?" prompt is about, while the timer runs (WP-212).
+    pub idle_window: Mutex<Option<IdleWindow>>,
 }
 
 /// A remembered timer target for auto-resume-on-activity (see `AppState::auto_resume`).
@@ -132,40 +217,136 @@ impl AppState {
             auth: AuthManager::new(),
             mqtt: Mutex::new(None),
             auto_resume: Mutex::new(None),
+            capture_epoch: AtomicU64::new(0),
+            adopted_owner: Mutex::new(None),
+            config_known: AtomicBool::new(false),
+            mqtt_rebind: tokio::sync::watch::channel(0).0,
+            idle_window: Mutex::new(None),
         }
+    }
+
+    /// The current [`Self::capture_epoch`].
+    pub fn epoch(&self) -> u64 {
+        self.capture_epoch.load(Ordering::SeqCst)
     }
 }
 
 impl AppState {
-    /// Wipe all **per-user** runtime state on an account switch (sign-out), so one user's timer,
-    /// queued captures, consent and session can never bleed into the next person who signs in on
-    /// this device. Device-level config/idle re-sync from the server/OS and are left alone.
+    /// Stop the timer and **keep** its `TimerStopped`, so the session is filed rather than left open
+    /// on the server. Returns whether a session was running. Capture stops with it — both capture
+    /// loops gate on `timer.is_running()`.
+    pub fn stop_keeping_event(&self, reason: StopReason) -> bool {
+        let stopped = self
+            .timer
+            .lock()
+            .unwrap()
+            .stop(crate::clock::now_epoch_ms(), reason);
+        match stopped {
+            Some(ev) => {
+                self.pending_events.lock().unwrap().push(ev);
+                *self.idle_window.lock().unwrap() = None;
+                crate::session_state::update(|s| s.open = None);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A sign-out, or a session that expired: end what is **personal to the session** — the timer
+    /// (its stop event kept), consent, the pause window, the resume hand-off, the transparency log —
+    /// but keep the queued captures. They belong to `outbox_owner`, and the next sign-in decides:
+    /// the same person sends them, anyone else has them wiped first ([`Self::adopt_signed_in`]).
     ///
-    /// The stopped session's `TimerStopped` event is intentionally **dropped**, not queued: it can no
-    /// longer be sent under the signing-out user's token, and the server's 00:15 close resolves the
-    /// still-open day. Keeping it would only risk folding it under the *next* user.
+    /// The day's pause **budget** is kept with them: signing out and back in used to hand out a
+    /// fresh 30 minutes (WP-213). A different user signing in gets their own
+    /// ([`Self::reset_for_account_switch`]).
+    pub fn end_session_locally(&self) {
+        self.stop_keeping_event(StopReason::Logout);
+        *self.location.lock().unwrap() = None;
+        self.pause.lock().unwrap().until_ms = None;
+        *self.auto_resume.lock().unwrap() = None;
+        crate::privacy_log::clear();
+        self.consent.store(false, Ordering::Relaxed);
+        self.idle.store(false, Ordering::Relaxed);
+    }
+
+    /// After any successful sign-in: keep the queued captures if they are this person's, wipe them
+    /// (and everything else per-user) if they are someone else's, and record the new owner.
+    ///
+    /// Idempotent and cheap when the owner is unchanged (one file read), so it is also called right
+    /// before anything that sends or resumes per-user data — the sender's cycle and the panel's
+    /// resume claim. Calling it only from the sign-in commands left a window between the tokens
+    /// being set and the reset in which the sender could ship, or the panel auto-start, the previous
+    /// user's queue under the new user (QA audit 2026-10-08, WP-206).
+    pub fn adopt_signed_in(&self) {
+        let Some(sub) = self.auth.subject() else {
+            return;
+        };
+        let mut adopted = self.adopted_owner.lock().unwrap();
+        if adopted.as_deref() == Some(sub.as_str()) {
+            return;
+        }
+        // The file is consulted only until this process has adopted someone.
+        let previous = adopted
+            .clone()
+            .or_else(|| crate::session_state::load().outbox_owner);
+        if previous.as_deref() == Some(sub.as_str()) {
+            *adopted = Some(sub);
+            return;
+        }
+        if previous.is_some() {
+            tracing::info!(
+                "a different user signed in; dropping the previous user's queued captures"
+            );
+            self.reset_for_account_switch();
+            // The previous user's org policy must not be confirmed for this one by a matching ETag:
+            // the token is a bare version number, so two orgs can share it (WP-209).
+            crate::api::config::forget_etag(self);
+            crate::session_state::update(|s| {
+                s.consent_granted = false;
+                s.resume = None;
+            });
+        }
+        crate::session_state::update(|s| s.outbox_owner = Some(sub.clone()));
+        *adopted = Some(sub);
+        // The MQTT identity is per organization; a user of another one must not be reachable — or
+        // captured, or signed out — through the previous organization's commands (WP-215).
+        crate::mqtt::rebind_if_tenant_changed(self);
+    }
+
+    /// Wipe all **per-user** runtime state, queued captures included, so one user's timer, data,
+    /// consent and session can never bleed into the next person who signs in on this device.
+    /// Device-level config/idle re-sync from the server/OS and are left alone.
+    ///
+    /// Used when the data must go: a released device (after its final flush), and a sign-in by a
+    /// different user than the one who owns the queue. An ordinary sign-out uses
+    /// [`Self::end_session_locally`] instead, which keeps the queue for its owner.
     pub fn reset_for_account_switch(&self) {
+        // First, before anything is cleared: any capture still in flight (the open minute bucket, a
+        // frame mid-encode) belongs to the previous user and must be dropped, not handed over after
+        // the queues below are emptied (WP-205, WP-443).
+        self.capture_epoch.fetch_add(1, Ordering::SeqCst);
+
         // End the running session locally so the next user never inherits it.
         let _ = self
             .timer
             .lock()
             .unwrap()
             .stop(crate::clock::now_epoch_ms(), StopReason::Logout);
+        *self.idle_window.lock().unwrap() = None;
 
         // Drop buffered-but-unsent captures and any queued batches — all the previous user's data.
         self.pending_events.lock().unwrap().clear();
         self.pending_activity.lock().unwrap().clear();
-        {
-            let mut shots = self.screenshots.lock().unwrap();
-            for s in shots.values() {
-                let _ = std::fs::remove_file(&s.path);
-            }
-            shots.clear();
-        }
+        crate::pending_shots::discard_all(self);
         self.pending_screenshot_meta.lock().unwrap().clear();
         self.outbox.lock().unwrap().clear();
         *self.location.lock().unwrap() = None;
         *self.pause.lock().unwrap() = PauseState::default();
+        crate::session_state::update(|s| {
+            s.pause_day.clear();
+            s.pause_budget_secs = None;
+        });
         // The next person must not have their timer auto-started onto the previous user's task.
         *self.auto_resume.lock().unwrap() = None;
 
@@ -174,14 +355,63 @@ impl AppState {
         crate::privacy_log::clear();
 
         // Re-require consent for the next person: capture fails closed until they accept the notice.
-        self.consent
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.idle.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.consent.store(false, Ordering::Relaxed);
+        self.idle.store(false, Ordering::Relaxed);
     }
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MON: &str = "2026-10-05";
+    const TUE: &str = "2026-10-06";
+
+    /// WP-213: the allowance is per local day — spent today stays spent, tomorrow it is whole again.
+    #[test]
+    fn the_pause_budget_resets_on_the_next_local_day() {
+        let mut p = PauseState::default();
+        assert_eq!(p.request(0, 20 * 60, MON), (true, 20 * 60, 10 * 60));
+        assert_eq!(p.request(0, 20 * 60, MON), (true, 10 * 60, 0));
+        assert_eq!(p.request(0, 60, MON), (false, 0, 0), "spent for Monday");
+        assert_eq!(p.budget_on(MON), 0);
+        assert_eq!(p.budget_on(TUE), DAILY_PAUSE_SECS);
+        assert!(p.request(0, 60, TUE).0, "Tuesday has its own allowance");
+    }
+
+    /// Setting the clock back a day, or a malformed date from the webview, earns nothing back.
+    #[test]
+    fn an_earlier_or_malformed_day_does_not_refill_the_budget() {
+        let mut p = PauseState::default();
+        p.request(0, DAILY_PAUSE_SECS, TUE);
+        assert!(!p.request(0, 60, MON).0);
+        assert!(!p.request(0, 60, "tomorrow").0);
+        assert_eq!(p.budget_on(""), 0);
+    }
+
+    /// WP-212: the banner's Stop ends the session at the last input — unless the person has clearly
+    /// been back at work for a while, when it means "now".
+    #[test]
+    fn an_idle_banner_stop_backdates_only_while_the_stretch_is_current() {
+        let w = IdleWindow {
+            since_ms: 1_000,
+            returned_ms: None,
+        };
+        assert_eq!(w.stop_at(900_000), 1_000);
+        let back = IdleWindow {
+            returned_ms: Some(600_000),
+            ..w
+        };
+        assert_eq!(back.stop_at(600_000 + IDLE_STOP_GRACE_MS), 1_000);
+        assert_eq!(
+            back.stop_at(600_001 + IDLE_STOP_GRACE_MS),
+            600_001 + IDLE_STOP_GRACE_MS
+        );
     }
 }

@@ -69,13 +69,22 @@ impl TimerEngine {
     }
 
     /// Stop the running session (user/idle/logout/shutdown). Carries `started_at` for the fold.
+    ///
+    /// `ts` is clamped to the session's start: a stop backdated to the last input (the idle stop)
+    /// can predate a session that was started without input, and a stop must never describe a
+    /// session that ended before it began.
     pub fn stop(&mut self, ts: i64, reason: StopReason) -> Option<AgentEvent> {
         self.running.take().map(|r| AgentEvent::TimerStopped {
             session_id: r.session_id,
             started_at: r.started_at,
-            ts,
+            ts: ts.max(r.started_at),
             reason,
         })
+    }
+
+    /// When the running session started (epoch ms), or `None`.
+    pub fn started_at(&self) -> Option<i64> {
+        self.running.as_ref().map(|r| r.started_at)
     }
 
     pub fn is_running(&self) -> bool {
@@ -164,6 +173,22 @@ mod tests {
             .is_err());
         assert!(t.stop(2, StopReason::User).is_some());
         assert!(!t.is_running());
+        // A stop dated before the start (a backdated idle stop) ends the session at its start.
+        t.start(
+            "s9".into(),
+            "k9".into(),
+            String::new(),
+            "p1".into(),
+            "d9".into(),
+            100,
+        )
+        .unwrap();
+        match t.stop(40, StopReason::Idle) {
+            Some(AgentEvent::TimerStopped { ts, started_at, .. }) => {
+                assert_eq!((started_at, ts), (100, 100));
+            }
+            other => panic!("expected a stop, got {other:?}"),
+        }
         assert!(t
             .start(
                 "s3".into(),

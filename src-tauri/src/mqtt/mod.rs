@@ -11,10 +11,14 @@
 //! HTTP config poller and the batch-ack version check remain the backstop, so a dropped MQTT
 //! connection degrades to today's polling behaviour, never to silence.
 //!
-//! The credential is **device-level, per-install** (like `agent_id`) — it survives sign-out and
-//! account switches, so `reset_for_account_switch` deliberately leaves it (and this connection)
-//! alone. Enrollment itself needs a signed-in user (the enroll route is user-JWT-authed), so an
-//! unenrolled agent waits for a session and enrolls once.
+//! The credential is **per install and per organization**: the Thing is `<tenant>_<agent_id>`. It
+//! survives sign-out and a switch to another user of the same organization. When someone of a
+//! *different* organization signs in it is discarded and the connection dropped, so the device
+//! re-enrols under them ([`rebind_if_tenant_changed`]). It used to be kept for the life of the
+//! install, leaving the first organization able to capture this screen — and sign the new user out
+//! with `release` — after the device had changed hands (QA audit 2026-10-08, WP-215). Enrollment
+//! itself needs a signed-in user (the enroll route is user-JWT-authed), so an unenrolled agent waits
+//! for a session and enrolls once.
 
 pub mod capture;
 
@@ -253,17 +257,38 @@ async fn run_connection(
 
     let (mqtt, mut eventloop) = AsyncClient::new(opts, 16);
 
-    // Expose the client to the exit hook for the clean-offline publish.
-    {
+    // Expose the client to the exit hook for the clean-offline publish, and watch for the signed-in
+    // organization changing under this credential (`rebind_if_tenant_changed`).
+    let mut rebind = {
         let state = app.state::<AppState>();
         *state.mqtt.lock().unwrap() = Some(MqttHandle {
             client: mqtt.clone(),
             status_topic: cred.status_topic.clone(),
         });
+        state.mqtt_rebind.subscribe()
+    };
+    // A rebind that landed between loading this credential and subscribing above has already
+    // cleared it from the cache: don't connect with it at all.
+    let still_current = CREDENTIAL_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|c| c.thing_name == cred.thing_name);
+    if !still_current {
+        app.state::<AppState>().mqtt.lock().unwrap().take();
+        return Err("mqtt:rebind: the credential was replaced before connecting".into());
     }
 
     let result = loop {
-        match eventloop.poll().await {
+        let event = tokio::select! {
+            event = eventloop.poll() => event,
+            _ = rebind.changed() => {
+                // This credential belongs to the previous organization: stop listening to its
+                // commands now. The supervisor re-enrols under the signed-in user.
+                break Err("mqtt:rebind: the signed-in organization changed".to_string());
+            }
+        };
+        match event {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 tracing::info!(thing = %cred.thing_name, "mqtt: connected");
                 *backoff = Duration::from_secs(BACKOFF_INITIAL_SECS);
@@ -392,11 +417,50 @@ async fn pull_and_apply_config(app: &tauri::AppHandle, http: &reqwest::Client) {
     match config::pull_config(http, &ingest_url, &id_token, etag.as_deref()).await {
         Ok(config::ConfigPull::Fresh { config, etag }) => {
             let v = config.version;
-            state.config.lock().unwrap().apply(*config, etag);
+            config::apply(&state, *config, etag);
             tracing::info!("mqtt: config applied (version {v})");
         }
         Ok(config::ConfigPull::NotModified) => {}
         Err(e) => tracing::warn!("mqtt: config pull failed: {e}"),
+    }
+}
+
+/// The organization a credential was minted for: its Thing is `<tenant>_<agent_id>`
+/// (`fleet::enroll`). `None` if the name isn't that shape — then nothing is assumed.
+fn credential_tenant<'a>(thing_name: &'a str, agent_id: &str) -> Option<&'a str> {
+    thing_name
+        .strip_suffix(agent_id)?
+        .strip_suffix('_')
+        .filter(|t| !t.is_empty())
+}
+
+/// Drop this install's MQTT identity if the signed-in user belongs to a different organization than
+/// the one it was minted for, and make the live connection let go of it — the supervisor then
+/// re-enrols under the signed-in user. Called on every change of signed-in user
+/// (`AppState::adopt_signed_in`). A no-op when the organizations match, or when either can't be read.
+pub fn rebind_if_tenant_changed(state: &AppState) {
+    let Some(tenant) = state.auth.status().tenant_id.filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let cached = CREDENTIAL_CACHE.lock().unwrap().clone();
+    let Some(cred) = cached.or_else(|| {
+        let loaded = load_credential();
+        CREDENTIAL_CACHE.lock().unwrap().clone_from(&loaded);
+        loaded
+    }) else {
+        return; // not enrolled yet: the next enrolment is under this user anyway
+    };
+    let agent_id = state.outbox.lock().unwrap().agent_id().to_string();
+    match credential_tenant(&cred.thing_name, &agent_id) {
+        Some(minted_for) if minted_for != tenant => {
+            tracing::info!(
+                "the signed-in user is in a different organization than this device's MQTT \
+                 identity; discarding it and re-enrolling"
+            );
+            clear_credential();
+            state.mqtt_rebind.send_modify(|generation| *generation += 1);
+        }
+        _ => {}
     }
 }
 
@@ -418,8 +482,9 @@ fn store_credential(cred: &DeviceCredential) -> keyring::Result<()> {
     token_store::store(CREDENTIAL_KEY, &blob)
 }
 
-/// Remove the persisted credential (no caller yet; the revocation path is server-side — cert
-/// deactivation on `workforce.employee_deactivated` — but a local wipe belongs beside store/load).
+/// Remove the persisted credential — when the device changes organization
+/// ([`rebind_if_tenant_changed`]). Revocation itself is server-side (cert deactivation on
+/// `workforce.employee_deactivated`).
 fn clear_credential() {
     let _ = token_store::clear(CREDENTIAL_KEY);
     *CREDENTIAL_CACHE.lock().unwrap() = None;
@@ -498,6 +563,23 @@ mod tests {
         let c: Command = serde_json::from_slice(raw).unwrap();
         assert!(
             matches!(c, Command::CaptureNow { ref requested_by, .. } if requested_by.is_empty())
+        );
+    }
+
+    /// WP-215: the organization is read back off the Thing name the server mints.
+    #[test]
+    fn the_credential_names_its_organization() {
+        let agent = "8dff7416-23c7-480e-98dd-10c959bab9ea";
+        assert_eq!(
+            credential_tenant(&format!("01JTENANTX_{agent}"), agent),
+            Some("01JTENANTX")
+        );
+        assert_eq!(credential_tenant("wp-a1", agent), None, "not that shape");
+        assert_eq!(credential_tenant(&format!("_{agent}"), agent), None);
+        assert_eq!(
+            credential_tenant(&format!("01JTENANTX{agent}"), agent),
+            None,
+            "no separator"
         );
     }
 

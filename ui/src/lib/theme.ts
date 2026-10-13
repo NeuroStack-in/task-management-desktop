@@ -77,9 +77,9 @@ export function readPalette(): string {
  * had an orange web app and a teal panel and no way to reconcile them. index.css now carries all
  * fourteen, scoped by this attribute.
  *
- * An unknown id is ignored rather than stamped: a palette the panel's CSS doesn't define would
- * leave `:root` in force, which is the right outcome, but stamping it would still misreport what
- * the panel is showing to anything that reads the attribute back.
+ * Any non-empty id is stamped (and cached), known or not. One index.css doesn't define simply leaves
+ * `:root` in force — the Slate & Teal fallback — though the attribute then names a palette the
+ * panel isn't showing.
  */
 export function applyPalette(palette: string) {
   const id = palette.trim().toLowerCase();

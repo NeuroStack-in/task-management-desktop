@@ -79,30 +79,10 @@ pub async fn stop_and_sign_out(app: &tauri::AppHandle, released_at: i64) {
 
     let state = app.state::<AppState>();
 
-    // 1 — Stop the clock, and **keep the event**. `reset_for_account_switch` would discard it; here
-    //     it is the employee's last stretch of work and the thing the release dialog promised to
-    //     preserve.
-    let stopped = state
-        .timer
-        .lock()
-        .unwrap()
-        .stop(crate::clock::now_epoch_ms(), StopReason::Logout);
-    if let Some(ev) = stopped {
-        state.pending_events.lock().unwrap().push(ev);
-        // The indicator is showing a running session that no longer exists.
-        let _ = app.emit(crate::events::TRACKING_CHANGED, ());
-    }
-
-    // 2 — Flush under the still-valid token, before anything is cleared. Best-effort and bounded:
-    //     see FLUSH_TIMEOUT.
-    if let Some(id_token) = state.auth.id_token().await {
-        let ingest_url = state.auth.config().ingest_url.clone();
-        crate::cycle::assemble_and_enqueue(&state);
-        let flush = crate::api::flush_outbox(&ingest_url, &id_token, &state);
-        if tokio::time::timeout(FLUSH_TIMEOUT, flush).await.is_err() {
-            tracing::warn!("release: final flush timed out; signing out with an unsent tail");
-        }
-    }
+    // 1 + 2 — Stop the clock keeping the event, and flush under the still-valid token, before
+    //     anything is cleared. `reset_for_account_switch` alone would discard the event; here it is
+    //     the employee's last stretch of work and the thing the release dialog promised to preserve.
+    stop_and_flush(app).await;
 
     // 3 — Tear down exactly as a sign-out does. Anything left in the outbox now has been tried and
     //     is deliberately dropped: this device is released, and holding a released employee's
@@ -119,6 +99,30 @@ pub async fn stop_and_sign_out(app: &tauri::AppHandle, released_at: i64) {
     //     their hours are safe, and that signing in again is the expected next step.
     let _ = app.emit(crate::events::DEVICE_RELEASED, ());
     tracing::info!("release: timer stopped, work flushed, signed out");
+}
+
+/// Stop the timer keeping its `TimerStopped`, then flush what this agent owes under the current
+/// token — bounded by [`FLUSH_TIMEOUT`]. Shared by a release and an ordinary sign-out (`auth_logout`),
+/// which used to discard the stop event and every unsent batch instead (QA audit 2026-10-08, WP-058).
+/// Returns whether the outbox is empty afterwards.
+pub async fn stop_and_flush(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    if state.stop_keeping_event(StopReason::Logout) {
+        // The indicator is showing a running session that no longer exists.
+        let _ = app.emit(crate::events::TRACKING_CHANGED, ());
+    }
+    let Some(id_token) = state.auth.id_token().await else {
+        return false;
+    };
+    let ingest_url = state.auth.config().ingest_url.clone();
+    crate::cycle::assemble_and_enqueue(&state);
+    let flush = crate::api::flush_outbox(&ingest_url, &id_token, &state);
+    if tokio::time::timeout(FLUSH_TIMEOUT, flush).await.is_err() {
+        tracing::warn!("final flush timed out; the unsent tail stays queued for its owner");
+        return false;
+    }
+    let drained = state.outbox.lock().unwrap().next_batch().is_none();
+    drained
 }
 
 #[cfg(test)]

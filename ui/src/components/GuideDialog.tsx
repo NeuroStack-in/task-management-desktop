@@ -156,13 +156,13 @@ const STEPS: Step[] = [
     title: "Pick what you're working on",
     points: [
       <>
-        Choose a <B>project</B> — the only thing required.
+        Choose a <B>project</B>.
       </>,
       <>
-        A <B>task</B> is optional — pick one if you have it.
+        Pick a <B>task</B> in it — or, if there's no task, describe your work.
       </>,
       <>
-        Add a note in <Q>What are you working on?</Q>
+        Add a note in <Q>What are you working on?</Q> (optional once a task is picked).
       </>,
       <>
         Press <B>Start</B>.
@@ -209,13 +209,13 @@ const STEPS: Step[] = [
     title: "Privacy Pause",
     points: [
       <>
-        <B>Privacy Pause</B> suspends screenshot capture briefly.
+        <B>Privacy Pause</B> briefly suspends screenshots, activity and location.
       </>,
       <>
         You get <B>30 minutes a day</B>.
       </>,
       <>
-        Your <B>timer keeps running</B> — only screenshots pause.
+        Your <B>timer keeps running</B> — only capture pauses.
       </>,
       <>Capture resumes on its own when the window ends.</>,
     ],

@@ -93,6 +93,22 @@ pub struct SessionState {
     /// causes and the restart that may follow it.
     #[serde(default)]
     pub released_ack_ms: i64,
+    /// The `sub` of the user whose captures sit in the outbox and the pending queues.
+    ///
+    /// A sign-out, or a session that expired, no longer throws away what is queued: the same person
+    /// signing back in sends it, and anyone else signing in has it dropped before their first batch
+    /// (`AppState::adopt_signed_in`). Before this, an expired session kept capturing behind the
+    /// sign-in screen and the next person to sign in uploaded it as theirs (QA audit 2026-10-08,
+    /// WP-057), and a sign-out discarded every unsent batch (WP-058).
+    #[serde(default)]
+    pub outbox_owner: Option<String>,
+    /// The local date the privacy-pause budget below belongs to (`PauseState::day`). Persisted so a
+    /// restart no longer hands out a fresh 30 minutes (QA audit 2026-10-08, WP-213).
+    #[serde(default)]
+    pub pause_day: String,
+    /// The pause budget left on `pause_day`, in seconds; `None` = nothing drawn yet.
+    #[serde(default)]
+    pub pause_budget_secs: Option<u64>,
 }
 
 impl SessionState {
@@ -136,17 +152,13 @@ pub fn load() -> SessionState {
 /// Write state. Best-effort but **logged**: a silent failure here is exactly the class of bug that
 /// made the refresh token never persist, and the symptom (state lost on the *next* launch) shows up
 /// far from the cause.
-pub fn save(s: &SessionState) {
-    let p = path();
-    if let Some(parent) = p.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("could not create the agent state dir ({e}); session state not saved");
-            return;
-        }
-    }
+///
+/// **Atomic** (temp file + rename): a torn write used to read back as the all-defaults file — which
+/// loses `released_ack_ms` and signs a released-then-returned employee out again (WP-445).
+fn save(s: &SessionState) {
     match serde_json::to_string(s) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&p, json) {
+            if let Err(e) = crate::outbox::write_atomic(&path(), json.as_bytes()) {
                 tracing::warn!("could not persist session state ({e})");
             }
         }
@@ -154,11 +166,22 @@ pub fn save(s: &SessionState) {
     }
 }
 
+/// Serialises every read-modify-write of `session.json` within the process.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Update the stored state through `f`, preserving whatever the caller does not touch.
 ///
 /// Read-modify-write rather than write-whole: consent and the resume task are written by different
 /// code paths at different times, and a blind overwrite from one would erase the other.
+///
+/// **One at a time.** Six threads write this file — the monitor's liveness note, the exit path, the
+/// panel's resume claim, consent, the release latch, the updater — and two unserialised updates lose
+/// one: a claimed resume came back, or a note re-written after a clean exit was "recovered" as a
+/// crash on the next launch, closing an already-closed session again (QA audit 2026-10-08, WP-445).
+/// `f` runs under the lock, so it can read live state (the monitor reads the timer there) without a
+/// later writer overtaking it. It must not call `update` itself.
 pub fn update(f: impl FnOnce(&mut SessionState)) {
+    let _serial = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut s = load();
     f(&mut s);
     save(&s);
@@ -182,6 +205,9 @@ mod tests {
             open: None,
             update_deferred_since_ms: None,
             released_ack_ms: 0,
+            outbox_owner: None,
+            pause_day: String::new(),
+            pause_budget_secs: None,
         }
     }
 

@@ -16,8 +16,10 @@
 //! CoreLocation run loop, and a synchronous D-Bus round trip. `capture()` must therefore be called
 //! from `spawn_blocking`, never on the async runtime thread — [`crate::api::refresh_location`] does.
 //!
-//! Each backend caps its own wait at [`FIX_TIMEOUT`]; a heartbeat that is late is worse than a
-//! heartbeat with no fix, because the cycle it delays also carries the activity rollup.
+//! The macOS and Linux backends cap their own wait at [`FIX_TIMEOUT`]; the Windows one relies on
+//! WinRT's internal timeout (about a minute), so the caller enforces the deadline for all three
+//! (`api::refresh_location`). A heartbeat that is late is worse than a heartbeat with no fix,
+//! because the cycle it delays also carries the activity rollup.
 
 use std::time::Duration;
 
@@ -43,7 +45,6 @@ pub use linux::capture;
 /// A cold GPS/Wi-Fi fix genuinely takes seconds, so this cannot be tight — but it sits inside the
 /// send cycle, so it cannot be generous either. 8 s is comfortably under the shortest cadence (3 min)
 /// and under any sane HTTP timeout downstream.
-#[allow(dead_code)] // Used by the macOS and Linux backends; Windows' WinRT call self-limits.
 pub(crate) const FIX_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A platform's raw reading, before it becomes a contract type. Keeping the conversion here means the

@@ -1,5 +1,5 @@
 //! Event names the core emits to the webview (`listen()` on the JS side). Stable strings the UI
-//! branches on — keep them in sync with `ui/src/lib/ipc.ts`.
+//! branches on — keep them in sync with `EVENTS` in `ui/src/lib/agent.ts`.
 
 /// The session/refresh token expired → the UI must return to the login screen (M1).
 pub const AUTH_EXPIRED: &str = "auth:expired";
@@ -23,10 +23,8 @@ pub const TRACKING_CHANGED: &str = "monitor:tracking-changed";
 // admin by `monitor::screenshot` (every failure path, plus a `catch_unwind` around the grab); there
 // is deliberately no user-facing event for it.
 
-/// An administrator asked for an on-demand screenshot of this machine (`capture_now`). Payload: the
-/// sentence to show the employee — taken **or refused**, and why. Never covert: the same line is
-/// appended to the local privacy log (`privacy_log.rs`), so it survives the banner being dismissed.
-pub const ADMIN_CAPTURE: &str = "privacy:admin-capture";
+// No `privacy:admin-capture` event any more: an admin's on-demand capture is not disclosed on the
+// device (owner policy 2026-09-02, `mqtt::capture`), so nothing emitted it and nothing listened.
 
 /// A restricted (blocked-list) app/site was focused while the timer ran. Payload: the offending
 /// identifier (domain or process). The panel shows the policy warning; the violation itself was

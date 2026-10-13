@@ -2,13 +2,21 @@
 //! (LLD §18). Sent every 300 s while signed in — **auth-gated, not timer-gated** — so the fleet table
 //! stays honest about an agent that is online but not currently tracking (BUILD-PLAN §4, Thread B).
 
+use std::sync::{Mutex, OnceLock};
+
 use sysinfo::System;
 use wp_agent_contract::{ActiveSession, GeoLocation, Heartbeat};
 
-/// Snapshot host health. `cpu_pct` needs two samples to be meaningful, so the very first cycle reads
-/// ~0 (the 300 s loop refreshes across ticks). `outbox_mb`, `idle` and `location` are supplied by the
-/// caller (the outbox knows its backlog; the monitor knows idle; the sender caches the consent-gated
-/// location fix).
+/// One `System` for the life of the process. sysinfo derives CPU usage from the difference between
+/// two refreshes of the **same** `System`; a fresh one per heartbeat had only ever seen one sample,
+/// so every heartbeat reported ~0 % (QA audit 2026-10-08, WP-217). Kept, each heartbeat reports the
+/// average load since the previous one.
+static SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
+
+/// Snapshot host health. `cpu_pct` is the average since the previous heartbeat, so the very first
+/// one after launch reads ~0. `outbox_mb`, `idle` and `location` are supplied by the caller (the
+/// outbox knows its backlog; the monitor knows idle; the sender caches the consent-gated location
+/// fix).
 pub fn collect(
     agent_version: &str,
     outbox_mb: f32,
@@ -16,7 +24,10 @@ pub fn collect(
     location: Option<GeoLocation>,
     active_session: Option<ActiveSession>,
 ) -> Heartbeat {
-    let mut sys = System::new();
+    let mut sys = SYSTEM
+        .get_or_init(|| Mutex::new(System::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     sys.refresh_cpu_usage();
     sys.refresh_memory();
 

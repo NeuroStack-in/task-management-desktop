@@ -7,10 +7,8 @@
 pub mod panel;
 
 use tauri::State;
-use wp_agent_contract::StopReason;
 
 use crate::auth::AuthStatus;
-use crate::clock::now_epoch_ms;
 use crate::state::AppState;
 
 // ---- autostart / launch-at-login (M6) ----
@@ -51,14 +49,16 @@ pub async fn auth_login(
     // wake the sender so it sends the first heartbeat immediately. Harmless if the login returned a
     // new-password challenge — the sender still auth-gates on a real token.
     if status.signed_in {
+        state.adopt_signed_in();
         state.flush.notify_one();
     }
     Ok(status)
 }
 
-/// Sign in with **Google** via the Hosted UI. Opens the system browser and catches the redirect on a
-/// localhost loopback (native OAuth + PKCE); resolves to the same `AuthStatus` a password login does.
-/// Works for an invited user signing in and for a brand-new user (who then lands on onboarding).
+/// Sign in with **Google** via the Hosted UI. Opens the system browser and receives the redirect on
+/// the `workpulse://callback` deep link (native OAuth + PKCE); resolves to the same `AuthStatus` a
+/// password login does. Works for an invited user signing in and for a brand-new user (who then
+/// lands on onboarding).
 #[tauri::command]
 pub async fn auth_login_google(
     app: tauri::AppHandle,
@@ -78,6 +78,7 @@ pub async fn auth_login_google(
         })
         .await?;
     if status.signed_in {
+        state.adopt_signed_in();
         state.flush.notify_one();
     }
     Ok(status)
@@ -104,6 +105,7 @@ pub async fn auth_complete_new_password(
         .complete_new_password(&username, &new_password, &session)
         .await?;
     if status.signed_in {
+        state.adopt_signed_in();
         state.flush.notify_one();
     }
     Ok(status)
@@ -126,23 +128,29 @@ pub async fn auth_complete_mfa(
         .complete_mfa(&challenge, &username, &code, &session)
         .await?;
     if status.signed_in {
+        state.adopt_signed_in();
         state.flush.notify_one();
     }
     Ok(status)
 }
 
 #[tauri::command]
-pub fn auth_logout(state: State<'_, AppState>) {
-    // Full teardown so the next person to sign in on this device starts clean — the timer, queued
-    // captures, consent, pause budget and the resume hand-off are all reset (see state.rs). The
-    // persisted flags that outlive the process are cleared here: the next user must re-consent, and
-    // the previous user's "resume this task" must never auto-start under them.
-    state.reset_for_account_switch();
+pub async fn auth_logout(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // **Stop → flush → end the session**, the order a release uses. The token is still valid, so the
+    // running session's stop and every unsent batch can still be sent as this user — the old code
+    // tore down first and discarded both (QA audit 2026-10-08, WP-058). Whatever the bounded flush
+    // could not send (offline) stays queued for this user and goes out when they sign back in; a
+    // different person signing in has it dropped first (`AppState::adopt_signed_in`).
+    crate::release::stop_and_flush(&app).await;
+    state.end_session_locally();
+    // The persisted flags that outlive the process: the next user must re-consent, and the previous
+    // user's "resume this task" must never auto-start under them.
     crate::session_state::update(|s| {
         s.consent_granted = false;
         s.resume = None;
     });
     state.auth.logout();
+    Ok(())
 }
 
 #[tauri::command]
@@ -174,6 +182,10 @@ pub fn open_website(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Grant or revoke monitoring consent. Capture (activity + screenshots) is gated on this and
 /// **defaults off** — so nothing is captured until the user consents.
+///
+/// No panel control calls it today (the panel records consent through `panel::grant_consent`). It
+/// stays registered as the core's only way to *withdraw* consent, pending the owner's decision on
+/// the consent notice (QA audit 2026-10-08, WP-210/WP-451).
 #[tauri::command]
 pub fn set_consent(state: State<'_, AppState>, granted: bool) {
     state
@@ -184,21 +196,12 @@ pub fn set_consent(state: State<'_, AppState>, granted: bool) {
         // otherwise the last shots keep leaving the device after the user believes capture is off
         // (they are re-declared every cycle until uploaded). Mirrors the location-on-withdrawal
         // behaviour in api/mod.rs.
-        let mut shots = state.screenshots.lock().unwrap();
-        for s in shots.values() {
-            let _ = std::fs::remove_file(&s.path);
-        }
-        shots.clear();
+        crate::pending_shots::discard_all(&state);
     }
     // Persist **both** directions. A revoke that only lived in memory would come back granted on the
     // next launch — silently resuming capture the user had switched off, which is the worst possible
     // direction for this flag to fail in.
     crate::session_state::update(|s| s.consent_granted = granted);
-}
-
-#[tauri::command]
-pub fn consent_status(state: State<'_, AppState>) -> bool {
-    state.consent.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // ---- updater (M7) ----
@@ -244,71 +247,8 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
     crate::updater::install_now(&app).await
 }
 
-/// Manually check for a newer signed release (respects `auto_update` for whether it installs).
-#[tauri::command]
-pub async fn check_for_updates(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let auto = state.config.lock().unwrap().get().tracking.auto_update;
-    crate::updater::check_and_maybe_install(&app, auto).await
-}
-
-// ---- timer (M0) ----
-
-/// Start the timer. M3 threads `description` + optional `task_id`/`project_id` (meeting mode) once
-/// the contract PR lands (§6); today they are required, matching the deployed contract.
-#[tauri::command]
-pub fn timer_start(
-    state: State<'_, AppState>,
-    session_id: String,
-    task_id: String,
-    project_id: String,
-    description: String,
-    // The subtask being worked on. Optional — a task with no breakdown, or a user who picked the
-    // task itself, sends nothing. `task_id` stays the parent either way.
-    subtask_id: Option<String>,
-) -> Result<(), String> {
-    let ts = now_epoch_ms();
-    let event = {
-        let mut timer = state.timer.lock().unwrap();
-        timer
-            .start(
-                session_id,
-                task_id,
-                subtask_id.unwrap_or_default(),
-                project_id,
-                description,
-                ts,
-            )
-            .map_err(|e| format!("timer:{e}"))?
-    };
-    // Buffered for the next cycle's `enqueue_cycle` drain (BUILD-PLAN §4), and flushed now.
-    state.pending_events.lock().unwrap().push(event);
-    state.flush.notify_one(); // immediate flush — the backend learns in seconds, not ~5 min (LLD §4)
-    Ok(())
-}
-
-/// Stop the running timer (user-initiated). Idle/logout/shutdown stops come from the monitor.
-#[tauri::command]
-pub fn timer_stop(state: State<'_, AppState>) -> Result<(), String> {
-    let ts = now_epoch_ms();
-    let event = { state.timer.lock().unwrap().stop(ts, StopReason::User) };
-    if let Some(ev) = event {
-        state.pending_events.lock().unwrap().push(ev);
-        state.flush.notify_one();
-    }
-    Ok(())
-}
-
-/// Whether a session is currently running (drives the UI timer + capture gate).
-#[tauri::command]
-pub fn timer_status(state: State<'_, AppState>) -> bool {
-    state.timer.lock().unwrap().is_running()
-}
-
-/// This install's stable agent id (diagnostics; the fleet row key on the backend).
-#[tauri::command]
-pub fn agent_id(state: State<'_, AppState>) -> String {
-    state.outbox.lock().unwrap().agent_id().to_string()
-}
+// The M0 command surface — `timer_start` (which let the webview choose the session id),
+// `timer_stop`, `timer_status`, `agent_id`, `consent_status`, `check_for_updates` — is gone. The
+// panel never called any of it (it uses `panel::start_timer` / `stop_timer` / `timer_state`, and
+// `update_status` / `update_install`), and every registered command is surface any script in the
+// webview can reach (QA audit 2026-10-08, WP-451).

@@ -43,7 +43,22 @@ pub struct IdClaims {
     pub email: String,
 }
 
+/// `TimeTrackSelf` — the server's contributor-only permission to track one's own time
+/// (`wp-contracts/src/permissions.rs`, bit 110). Owner and Admin deliberately do not hold it.
+pub const TIME_TRACK_SELF_BIT: u32 = 110;
+
 impl IdClaims {
+    /// Whether the `perm` claim (a u128 bitset as a decimal string) carries `bit`. `None` when the
+    /// claim is absent or not a number — the caller then defers to the server rather than guessing.
+    pub fn has_permission_bit(&self, bit: u32) -> Option<bool> {
+        let perm = self.perm.trim();
+        if perm.is_empty() || bit >= 128 {
+            return None;
+        }
+        let bits: u128 = perm.parse().ok()?;
+        Some((bits >> bit) & 1 == 1)
+    }
+
     /// A human display name for the panel: the `name` claim if present, else the email's local-part
     /// title-cased, else the email, else the raw username. **Never** the Cognito `username`/`sub`
     /// UUID when a real name or email exists — that's the hex string bug this avoids.
@@ -164,6 +179,22 @@ mod tests {
             "a1931dda-0041-703c-f41c-300cfaa114dd",
         );
         assert_eq!(c.display_name(), "Jane Doe");
+    }
+
+    /// WP-214: bit 110 is read out of the decimal u128 the server mints, and an unreadable claim
+    /// is "don't know", not "no".
+    #[test]
+    fn the_perm_claim_answers_for_one_bit() {
+        let mut c = claims("", "", "u");
+        c.perm = ((1u128 << TIME_TRACK_SELF_BIT) | 0b101).to_string();
+        assert_eq!(c.has_permission_bit(TIME_TRACK_SELF_BIT), Some(true));
+        assert_eq!(c.has_permission_bit(1), Some(false));
+        c.perm = "5".into(); // an Admin-shaped set: privilege bits only
+        assert_eq!(c.has_permission_bit(TIME_TRACK_SELF_BIT), Some(false));
+        c.perm = String::new();
+        assert_eq!(c.has_permission_bit(TIME_TRACK_SELF_BIT), None);
+        c.perm = "not-a-number".into();
+        assert_eq!(c.has_permission_bit(TIME_TRACK_SELF_BIT), None);
     }
 
     #[test]

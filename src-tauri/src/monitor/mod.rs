@@ -69,6 +69,11 @@ fn last_wake_ms(now: i64, gap: i64) -> i64 {
     now - gap
 }
 
+/// The instant of the last keyboard/mouse input, given `idle_secs` since it.
+fn last_input_ms(now: i64, idle_secs: u64) -> i64 {
+    now - (idle_secs as i64).saturating_mul(1000)
+}
+
 /// Remember the running session's target so the next input can auto-resume it. Called on the paths
 /// that stop the timer **for** the person (idle, suspend/lid, lock) — never on a user stop. A no-op
 /// when nothing is running. `stopped_at` is the instant the session actually ended (backdated to the
@@ -244,21 +249,14 @@ pub fn spawn_screenshots(app: AppHandle) {
             // capture's app label. Fetched before the config lock so no syscall runs under it.
             let focus = active_window::current();
 
-            // Gates (scoped so `state` isn't held across the blocking capture).
-            let (go, blur, excepted) = {
+            // Gates (scoped so `state` isn't held across the blocking capture). The epoch is read
+            // with them: if a sign-out wipes the per-user state while the frame is being taken, it
+            // must not be queued afterwards (WP-443).
+            let (go, blur, excepted, epoch) = {
                 let state = app.state::<AppState>();
-                let running = state.timer.lock().unwrap().is_running();
-                let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
-                // Privacy pause (panel PauseCard) suspends capture until the grant expires.
-                let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
+                let epoch = state.epoch();
                 let cfg = state.config.lock().unwrap();
                 let c = cfg.get();
-                // Screenshots need both a live cadence AND the org's `monitoring.screenshots`
-                // entitlement (mirrored into `screenshots_enabled`). Disabling the feature stops
-                // capture without disturbing the admin's chosen interval; activity/heartbeats are
-                // gated separately and keep running.
-                let on = !matches!(c.tracking.cadence, wp_agent_contract::Cadence::Off)
-                    && c.tracking.screenshots_enabled;
                 // Privacy exceptions carve-out (§14 / PRIVACY.md §2): a focused excepted app/site is
                 // never screenshotted. Match on the full app+title+url haystack, like the span path.
                 let excepted = focus.as_ref().is_some_and(|f| {
@@ -270,11 +268,9 @@ pub fn spawn_screenshots(app: AppHandle) {
                     );
                     crate::rules::is_excepted(&haystack, &c.rules)
                 });
-                (
-                    running && consented && on && !paused,
-                    c.tracking.blur_level,
-                    excepted,
-                )
+                let blur = c.tracking.blur_level;
+                drop(cfg);
+                (screenshot_gate_open(&state), blur, excepted, epoch)
             };
             if !go || excepted {
                 continue;
@@ -306,26 +302,106 @@ pub fn spawn_screenshots(app: AppHandle) {
             // (and the per-display `catch_unwind` above); the person tracking time is left alone.
             if !shots.is_empty() {
                 let state = app.state::<AppState>();
-                let mut store = state.screenshots.lock().unwrap();
+                // **Re-check the gate now the frame exists.** The grab, resize, blur, encode and
+                // hash take seconds, and a stop, a pause or a sign-out in that window used to still
+                // yield an uploadable frame (QA audit 2026-10-08, WP-443). Closed now → the frame is
+                // deleted, never queued.
+                let still_open = screenshot_gate_open(&state);
                 for (meta, path) in shots {
-                    store.insert(
-                        meta.id.clone(),
-                        crate::state::PendingShot {
-                            meta,
-                            path,
-                            attempts: 0,
-                        },
-                    );
+                    if still_open {
+                        // Tracked with a sidecar on disk, so a restart before the upload loses
+                        // nothing — and only if no wipe happened since the epoch was read.
+                        crate::pending_shots::track_if_current(&state, epoch, meta, path);
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                    }
                 }
             }
         }
     });
 }
 
+/// The periodic screenshot gate — timer running, consent, no privacy pause, the org's policy known,
+/// a live cadence and the `monitoring.screenshots` entitlement. Fails closed. Checked before a
+/// capture and again after it (WP-443); `commands::panel::capture_state` mirrors it for the indicator.
+fn screenshot_gate_open(state: &AppState) -> bool {
+    let running = state.timer.lock().unwrap().is_running();
+    let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
+    // Privacy pause (panel PauseCard) suspends capture until the grant expires.
+    let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
+    // No org policy yet (first run, the pull failing): don't capture under the contract's built-in
+    // defaults — no blur, no exceptions — before the org's are known (WP-209).
+    let policy_known = state
+        .config_known
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let cfg = state.config.lock().unwrap();
+    let c = cfg.get();
+    // Screenshots need both a live cadence AND the org's `monitoring.screenshots` entitlement
+    // (mirrored into `screenshots_enabled`). Disabling the feature stops capture without disturbing
+    // the admin's chosen interval; activity/heartbeats are gated separately and keep running.
+    let on = !matches!(c.tracking.cadence, wp_agent_contract::Cadence::Off)
+        && c.tracking.screenshots_enabled;
+    running && consented && !paused && policy_known && on
+}
+
+/// A backward step of the wall clock larger than this (between two 1 s ticks) splits the running
+/// session — see the clock-step block in [`run`]. Small enough to catch an NTP step or a manual
+/// change, large enough that tick jitter never reads as one.
+const CLOCK_STEP_BACK_MS: i64 = 5_000;
+
+/// Did the wall clock step backwards between two ticks `gap` ms apart?
+fn clock_stepped_back(gap: i64) -> bool {
+    gap < -CLOCK_STEP_BACK_MS
+}
+
+/// The wall clock stepped back while a session ran. Its start is on the old clock, so a stop on the
+/// new one would shorten it by the size of the step — or zero it, since the server clamps a negative
+/// duration (QA audit 2026-10-08, WP-448). Close it at the last tick on the old clock, and carry on
+/// with the same work from `now` on the new one: two sessions, each consistent with its own clock,
+/// nothing lost. The contract has no clock-step stop reason; `Idle` is what the forward-jump
+/// (suspend) path reports too.
+fn split_at_clock_step(state: &AppState, last_tick_old: i64, now: i64) -> bool {
+    let mut timer = state.timer.lock().unwrap();
+    let snap = timer.snapshot(last_tick_old);
+    if !snap.running {
+        return false;
+    }
+    let Some(stop) = timer.stop(last_tick_old, StopReason::Idle) else {
+        return false;
+    };
+    let start = timer.start(
+        uuid::Uuid::new_v4().to_string(),
+        snap.task_id.unwrap_or_default(),
+        snap.subtask_id.unwrap_or_default(),
+        snap.project_id.unwrap_or_default(),
+        snap.description,
+        now,
+    );
+    drop(timer);
+    let mut events = state.pending_events.lock().unwrap();
+    events.push(stop);
+    events.extend(start.ok());
+    true
+}
+
 fn run(app: AppHandle) {
     let mut bucketer = Bucketer::new();
     let mut sampler = InputSampler::new();
     let mut tick: u64 = 0;
+    // Wayland reports no idle time, input counts or foreground window (an OS limit — see
+    // `session::session_info`). Rollups there claimed every second active with no app, and the idle
+    // prompt and auto-stop could never fire. Nothing is measured where it can't be: no activity
+    // capture and no idle actions, and the panel tells the person to stop the timer themselves
+    // (QA audit 2026-10-08, WP-216). Screenshots are unaffected.
+    let measurable = session::session_info().can_track_windows;
+    if !measurable {
+        tracing::warn!(
+            "idle and activity can't be measured in this session (Wayland); activity capture and \
+             the idle auto-stop are off"
+        );
+    }
+    // The capture epoch the open minute bucket belongs to (`AppState::capture_epoch`, WP-205).
+    let mut bucket_epoch = app.state::<AppState>().epoch();
     // Was CAPTURE active last tick (all four gate conditions), not "was the timer running" — the
     // two are different, and conflating them is what disabled the idle auto-stop for anyone who
     // hadn't consented. Named for what it actually gates: sealing the open minute bucket.
@@ -346,12 +422,25 @@ fn run(app: AppHandle) {
         thread::sleep(Duration::from_secs(1));
         let state = app.state::<AppState>();
 
+        // A wipe (another user signed in, or a release) since this bucket opened: what it holds is
+        // the previous user's and must not be sealed into the next user's queue (WP-205).
+        let epoch = state.epoch();
+        if epoch != bucket_epoch {
+            bucketer = Bucketer::new();
+            was_capturing = false;
+            bucket_epoch = epoch;
+        }
+
         // Capture only while the timer runs **and** monitoring consent is granted (PRIVACY.md —
         // consent-gated, fails closed). Time tracking can run without consent; activity capture can't.
         let running = state.timer.lock().unwrap().is_running();
         let consented = state.consent.load(std::sync::atomic::Ordering::Relaxed);
         // Privacy pause (panel PauseCard) suspends activity capture until the grant expires.
         let paused = state.pause.lock().unwrap().is_paused(clock::now_epoch_ms());
+        // The org's policy is known (pulled, or restored from disk) — see `screenshot_gate_open`.
+        let policy_known = state
+            .config_known
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         // Idle for the fleet heartbeat is sampled every tick, independent of the capture gate below:
         // a signed-in machine can be idle whether or not a timer is running. Published for
@@ -382,7 +471,9 @@ fn run(app: AppHandle) {
         // on the same pass — the timer is still marked running here, and by the next tick `idle` is
         // still high (it only drops on real input), so nothing resumes until the person is genuinely
         // back. A user stop or a fresh manual start clears the armed target (see the panel commands).
-        if !running {
+        // Not where input can't be measured (`measurable`): idle reads 0 there, which would restart
+        // the timer the instant the machine woke, whether or not anyone came back.
+        if !running && measurable {
             let armed = state.auto_resume.lock().unwrap().clone();
             if let Some(r) = armed {
                 match resume_action(now, r.stopped_at, idle) {
@@ -441,6 +532,7 @@ fn run(app: AppHandle) {
             bucketer.seal();
             was_capturing = false;
             idle_prompted = false;
+            *state.idle_window.lock().unwrap() = None;
             let _ = app.emit(events::TRACKING_CHANGED, ());
             crate::session_state::update(|s| s.open = None);
             noted_session = None;
@@ -451,7 +543,22 @@ fn run(app: AppHandle) {
             continue;
         }
 
-        if running && consented && !paused && activity_enabled {
+        // ── The wall clock stepped backwards ────────────────────────────────────────────────
+        //
+        // The mirror image of the suspend gap above, which already splits a forward jump (stop at
+        // the last tick, resume on input). See `split_at_clock_step` (WP-448).
+        if running && clock_stepped_back(gap) && split_at_clock_step(&state, now - gap, now) {
+            state.flush.notify_one();
+            bucketer.seal();
+            was_capturing = false;
+            let _ = app.emit(events::TRACKING_CHANGED, ());
+            tracing::warn!(
+                step_secs = -gap / 1000,
+                "the clock stepped back; split the session at the step so neither half is shortened"
+            );
+        }
+
+        if running && consented && !paused && activity_enabled && policy_known && measurable {
             let (kb, mouse) = sampler.sample();
             bucketer.tick(now, idle, kb, mouse);
 
@@ -557,15 +664,21 @@ fn run(app: AppHandle) {
         // no activity rows at all: unmonitored timers that should have stopped after 15 minutes.
         //
         // `idle` is read every tick above, outside the gate, so this needs nothing capture provides.
-        match idle_action(running, idle, idle_prompted) {
+        // Not where idle can't be measured (`measurable`): it reads 0 there, forever.
+        match idle_action(running && measurable, idle, idle_prompted) {
             IdleAction::Stop => {
+                // **Backdated to the last input**, like the suspend path above and the managed
+                // agent's idle end: the 15 idle minutes were not worked. Stopping at `now` billed
+                // each walk-away for them (QA audit 2026-10-08, WP-212).
+                let stop_ts = last_input_ms(now, idle);
                 // Remember the task so the next input auto-resumes it (the person came back).
-                arm_auto_resume(&state, now);
-                let ev = state.timer.lock().unwrap().stop(now, StopReason::Idle);
+                arm_auto_resume(&state, stop_ts);
+                let ev = state.timer.lock().unwrap().stop(stop_ts, StopReason::Idle);
                 if let Some(e) = ev {
                     state.pending_events.lock().unwrap().push(e);
                     state.flush.notify_one(); // an idle auto-stop should reflect as fast as a manual one
                 }
+                *state.idle_window.lock().unwrap() = None;
                 // Seal whatever capture had open. A no-op when the gate was shut — there is no
                 // bucket — which is why this is safe to call on a path capture never reached.
                 bucketer.seal();
@@ -574,6 +687,12 @@ fn run(app: AppHandle) {
                 idle_prompted = false;
             }
             IdleAction::Prompt => {
+                // Remember where the idle stretch began, so the banner's Stop can end the session
+                // there rather than at the click (WP-212).
+                *state.idle_window.lock().unwrap() = Some(crate::state::IdleWindow {
+                    since_ms: last_input_ms(now, idle),
+                    returned_ms: None,
+                });
                 let _ = app.emit(events::IDLE_PROMPT, idle);
                 idle_prompted = true;
             }
@@ -582,6 +701,18 @@ fn run(app: AppHandle) {
             IdleAction::None => {
                 if !running || idle < IDLE_PROMPT_SECS {
                     idle_prompted = false;
+                }
+            }
+        }
+        // The person came back from the idle stretch the banner asked about: note when, so a Stop
+        // clicked long after that means "now", not "when I left" (`IdleWindow::stop_at`).
+        {
+            let mut window = state.idle_window.lock().unwrap();
+            if !running {
+                *window = None;
+            } else if let Some(w) = window.as_mut() {
+                if w.returned_ms.is_none() && idle <= RESUME_ON_INPUT_SECS {
+                    w.returned_ms = Some(last_input_ms(now, idle));
                 }
             }
         }
@@ -594,25 +725,41 @@ fn run(app: AppHandle) {
         // instant on the next launch — so an unclean exit costs at most one heartbeat of accuracy
         // instead of leaving the session open indefinitely.
         alive_tick = alive_tick.wrapping_add(1);
-        let active = state.timer.lock().unwrap().active_session(false);
+        let active_id = state
+            .timer
+            .lock()
+            .unwrap()
+            .active_session(false)
+            .map(|a| a.session_id);
         // Written on both edges, and immediately on a CHANGE rather than only on the periodic
         // refresh: a stopped timer must CLEAR the note, or a session that ended cleanly would be
         // "recovered" and closed a second time after a later crash. Waiting up to
         // ALIVE_HEARTBEAT_TICKS to clear it left exactly that window open.
-        let changed = active.as_ref().map(|a| &a.session_id) != noted_session.as_ref();
+        let changed = active_id != noted_session;
         if changed || alive_tick.is_multiple_of(ALIVE_HEARTBEAT_TICKS) {
-            noted_session = active.as_ref().map(|a| a.session_id.clone());
-            let open = active.map(|a| crate::session_state::OpenSession {
-                session_id: a.session_id,
-                started_at: a.started_at,
-                last_alive_ms: now,
+            crate::session_state::update(|s| {
+                // The timer is read **under the state-file lock**, not before it. An exit that
+                // stopped the timer and cleared the note in between would otherwise have it written
+                // back from the stale read — and the next launch would close an already-closed
+                // session a second time (WP-445).
+                let active = state.timer.lock().unwrap().active_session(false);
+                noted_session = active.as_ref().map(|a| a.session_id.clone());
+                s.open = active.map(|a| crate::session_state::OpenSession {
+                    session_id: a.session_id,
+                    started_at: a.started_at,
+                    last_alive_ms: now,
+                });
             });
-            crate::session_state::update(|s| s.open = open);
         }
 
         let sealed = bucketer.take_sealed();
         if !sealed.is_empty() {
-            state.pending_activity.lock().unwrap().extend(sealed);
+            let mut pending = state.pending_activity.lock().unwrap();
+            // Checked under the lock the wipe empties this with, after it moved the epoch: a minute
+            // sealed across a wipe is dropped, never handed to the next user (WP-205).
+            if state.epoch() == bucket_epoch {
+                pending.extend(sealed);
+            }
         }
 
         // Keep the tray tooltip in sync with tracking state (M6).
@@ -675,6 +822,60 @@ mod idle_action_tests {
         assert_eq!(last_wake_ms(now, eight_hours), 1_700_000_000_000);
         // The stop instant must precede the wake, never follow it.
         assert!(last_wake_ms(now, eight_hours) < now);
+    }
+
+    /// WP-212: an idle stop ends the session at the last input, not at the moment it fires.
+    #[test]
+    fn an_idle_stop_is_backdated_to_the_last_input() {
+        let now = 1_700_000_000_000;
+        assert_eq!(last_input_ms(now, AUTO_STOP_SECS), now - 15 * 60 * 1000);
+        assert_eq!(last_input_ms(now, 0), now);
+    }
+
+    /// WP-448: a backward step splits the session; ticks (and slews) never do.
+    #[test]
+    fn only_a_real_backward_step_splits_the_session() {
+        for gap in [1_000, 0, -500, -CLOCK_STEP_BACK_MS] {
+            assert!(!clock_stepped_back(gap), "{gap}");
+        }
+        assert!(clock_stepped_back(-CLOCK_STEP_BACK_MS - 1));
+        assert!(clock_stepped_back(-3_600_000));
+    }
+
+    /// The split keeps the work: the old session closes at the last tick on the old clock, and the
+    /// same target carries on from now.
+    #[test]
+    fn a_clock_step_closes_on_the_old_clock_and_continues_on_the_new() {
+        let state = AppState::new();
+        state
+            .timer
+            .lock()
+            .unwrap()
+            .start(
+                "s1".into(),
+                "k1".into(),
+                String::new(),
+                "p1".into(),
+                "notes".into(),
+                10_000_000,
+            )
+            .unwrap();
+        // Last tick at 10_060_000 on the old clock; the clock then reads an hour earlier.
+        assert!(split_at_clock_step(&state, 10_060_000, 6_461_000));
+        let events = state.pending_events.lock().unwrap();
+        match (&events[0], &events[1]) {
+            (
+                wp_agent_contract::AgentEvent::TimerStopped { ts, started_at, .. },
+                wp_agent_contract::AgentEvent::TimerStarted {
+                    ts: start, task_id, ..
+                },
+            ) => {
+                assert_eq!((*started_at, *ts), (10_000_000, 10_060_000));
+                assert_eq!((*start, task_id.as_str()), (6_461_000, "k1"));
+            }
+            other => panic!("expected stop + start, got {other:?}"),
+        }
+        assert!(state.timer.lock().unwrap().is_running());
     }
 
     /// Normal ticks must never be mistaken for a suspend — a false positive stops a timer while

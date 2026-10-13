@@ -124,7 +124,7 @@ pub async fn create_subtask(
     task_id: &str,
     title: &str,
 ) -> Result<SubtaskDto, String> {
-    let url = subtask_url(ingest_url, project_id, task_id, None);
+    let url = subtask_url("create_subtask", ingest_url, project_id, task_id, None)?;
     let resp = client
         .post(url)
         .bearer_auth(id_token)
@@ -145,7 +145,13 @@ pub async fn set_subtask_status(
     subtask_id: &str,
     status: &str,
 ) -> Result<SubtaskDto, String> {
-    let url = subtask_url(ingest_url, project_id, task_id, Some(subtask_id));
+    let url = subtask_url(
+        "set_subtask_status",
+        ingest_url,
+        project_id,
+        task_id,
+        Some(subtask_id),
+    )?;
     let resp = client
         .patch(url)
         .bearer_auth(id_token)
@@ -156,24 +162,26 @@ pub async fn set_subtask_status(
     read_subtask(resp, "set_subtask_status").await
 }
 
-/// Percent-free path join. Ids are server-minted ULIDs (`k-…`, `s-…`), so there is nothing to
-/// escape — but they are still built in one place so the two callers cannot drift.
+/// The subtask collection's URL, or one subtask's. The ids come from the webview, so each is checked
+/// by [`super::path_id`] before it becomes a path segment (WP-444) — built in one place so the two
+/// callers cannot drift.
 fn subtask_url(
+    op: &str,
     ingest_url: &str,
     project_id: &str,
     task_id: &str,
     subtask_id: Option<&str>,
-) -> String {
+) -> Result<String, String> {
     let base = format!(
         "{}/v1/projects/{}/tasks/{}/subtasks",
         ingest_url.trim_end_matches('/'),
-        project_id,
-        task_id
+        super::path_id(op, project_id)?,
+        super::path_id(op, task_id)?
     );
-    match subtask_id {
-        Some(id) => format!("{base}/{id}"),
+    Ok(match subtask_id {
+        Some(id) => format!("{base}/{}", super::path_id(op, id)?),
         None => base,
-    }
+    })
 }
 
 /// Shared response handling for both writes.
@@ -235,7 +243,7 @@ pub async fn create_task(
     let url = format!(
         "{}/v1/projects/{}/tasks",
         ingest_url.trim_end_matches('/'),
-        project_id
+        super::path_id("create_task", project_id)?
     );
     let mut body = serde_json::json!({ "title": title, "description": fields.description });
     if !fields.assignee_id.is_empty() {
@@ -271,10 +279,11 @@ pub async fn create_task(
 /// `PATCH /v1/projects/{project_id}/tasks/{task_id}` — change a task's **status** from the panel
 /// (To do / In progress / In review / Done / Blocked). Same user Cognito JWT as the reads.
 ///
-/// The backend gates this: a plain project Member may move only a task **they are assigned to**; a
-/// Lead/Manager may move anyone's. A **403** therefore means "not your task to move" — surfaced as a
-/// message the person can act on rather than a raw status. `closed` is not settable here (it's the
-/// reviewed state); the picker never offers it.
+/// The backend gates this by the **target** column (owner decision, 2026-09-01): any project member
+/// may move a task between the working columns, and only a Lead/Manager may mark it **Done** or
+/// **Blocked**. A **403** therefore means "that column needs a lead" — surfaced as a message the
+/// person can act on rather than a raw status. `closed` is not settable here (it's the reviewed
+/// state); the picker never offers it.
 pub async fn set_task_status(
     client: &reqwest::Client,
     ingest_url: &str,
@@ -286,8 +295,8 @@ pub async fn set_task_status(
     let url = format!(
         "{}/v1/projects/{}/tasks/{}",
         ingest_url.trim_end_matches('/'),
-        project_id,
-        task_id
+        super::path_id("set_task_status", project_id)?,
+        super::path_id("set_task_status", task_id)?
     );
     let resp = client
         .patch(url)
@@ -385,12 +394,20 @@ mod tests {
     #[test]
     fn the_subtask_url_addresses_the_collection_and_one_row() {
         assert_eq!(
-            subtask_url("https://api/", "p1", "k1", None),
+            subtask_url("op", "https://api/", "p1", "k1", None).unwrap(),
             "https://api/v1/projects/p1/tasks/k1/subtasks"
         );
         assert_eq!(
-            subtask_url("https://api", "p1", "k1", Some("s1")),
+            subtask_url("op", "https://api", "p1", "k1", Some("s1")).unwrap(),
             "https://api/v1/projects/p1/tasks/k1/subtasks/s1"
         );
+    }
+
+    /// WP-444: an id that would re-target the request never reaches the URL.
+    #[test]
+    fn a_hostile_id_never_becomes_part_of_the_path() {
+        assert!(subtask_url("op", "https://api", "p1/../../me", "k1", None).is_err());
+        assert!(subtask_url("op", "https://api", "p1", "k1?x=1", None).is_err());
+        assert!(subtask_url("op", "https://api", "p1", "k1", Some("..")).is_err());
     }
 }

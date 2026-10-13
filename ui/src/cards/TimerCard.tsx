@@ -60,10 +60,19 @@ export function TimerCard({
   onSetTaskStatus,
   onAdvanceTaskStatus,
   onRefresh,
+  projectsUnavailable = false,
+  canTrackTime = true,
+  limitation = null,
 }: {
   timer: TimerState;
   projects: Project[];
   tasks: Task[];
+  /** The last projects read failed — an empty picker means "couldn't load", not "no projects". */
+  projectsUnavailable?: boolean;
+  /** False when the role doesn't track its own time — `start_timer` would refuse, so Start is off. */
+  canTrackTime?: boolean;
+  /** Why this session can't measure activity (Wayland), or null. */
+  limitation?: string | null;
   onToggle: (sel: TimerSelection) => void;
   onSwitch: (sel: TimerSelection) => void;
   onCreateSubtask: (projectId: string, taskId: string, title: string) => Promise<Subtask | null>;
@@ -73,7 +82,7 @@ export function TimerCard({
     subtaskId: string,
     done: boolean,
   ) => Promise<boolean>;
-  /** Change the chosen task's status. Backend gates it (assignee, or a project Lead/Manager). */
+  /** Change the chosen task's status. Backend gates it (Done/Blocked need a project Lead/Manager). */
   onSetTaskStatus: (projectId: string, taskId: string, status: string) => void;
   /** Silent best-effort status nudge (todo→in_progress on start) — bypasses the busy guard, so it
    *  isn't dropped when fired right after the start action. */
@@ -125,13 +134,26 @@ export function TimerCard({
     timer.description,
   ]);
 
+  // A task just created from the picker, until the refreshed list carries it. It was selected by id
+  // while the list was a poll behind, so the picker read "Select task (optional)" and the workspace
+  // stayed hidden for up to 30 s, while Start would already file against it (QA audit 2026-10-08,
+  // WP-446).
+  const [justCreated, setJustCreated] = useState<Task | null>(null);
+
   const project = projects.find((p) => p.id === projectId) ?? null;
   const inProject = tasks.filter((t) => t.project_id === projectId);
-  // Yours first, then what nobody has taken. Two groups rather than one mixed list: the picker is
-  // scanned, not read, and an unclaimed task sitting between two of your own reads as yours.
+  // Yours first, then any unassigned. Two groups rather than one mixed list: the picker is scanned,
+  // not read, and an unassigned task sitting between two of your own reads as yours.
   const assigned = inProject.filter((t) => !t.unassigned);
   const unclaimed = inProject.filter((t) => t.unassigned);
-  const task = inProject.find((t) => t.id === taskId) ?? null;
+  const task =
+    inProject.find((t) => t.id === taskId) ??
+    (justCreated && justCreated.id === taskId && justCreated.project_id === projectId
+      ? justCreated
+      : null);
+  // While running, the pickers can show a project the clock isn't on yet: picked, but waiting for a
+  // task before the session moves to it (see `chooseProject`).
+  const pendingSwitch = timer.running && projectId !== (timer.project_id ?? "");
 
   const selection = (over: Partial<TimerSelection> = {}): TimerSelection => ({
     taskId,
@@ -143,21 +165,31 @@ export function TimerCard({
 
   const chooseProject = (p: Project) => {
     setProjectId(p.id);
+    if (timer.running && p.id === (timer.project_id ?? "")) {
+      // Back to the project the clock is on: show what it is running again, and change nothing.
+      setTaskId(timer.task_id);
+      setSubtaskId(timer.subtask_id);
+      return;
+    }
     // The old task belongs to the old project; keeping it would misattribute the session.
     setTaskId(null);
     setSubtaskId(null);
-    if (timer.running) {
+    // While running, re-attribute now only if the new project can stand alone: no task, so the
+    // description is its only label (the same rule as `canStart`). Switching with a blank one filed
+    // the time under an unlabelled (project, "") row — exactly what that rule exists to prevent
+    // (QA audit 2026-10-08, WP-450). Otherwise the session moves when a task is picked.
+    if (timer.running && description.trim()) {
       onSwitch(selection({ projectId: p.id, taskId: null, subtaskId: null }));
     }
   };
 
   // Putting the clock on a task means it's being worked now — nudge a still-"todo" task to
   // "In progress" so its status stops contradicting the running timer. Only from `todo` (deliberate
-  // states — in_review/blocked/done — are left alone), and only for a task **assigned to this user**
-  // (`!unassigned`): an unclaimed task isn't theirs to move, and the backend's assignee-gate would
-  // 403 it, popping a spurious error just for pressing Start. The write is otherwise best-effort.
+  // states — in_review/blocked/done — are left alone). Any project member may move a task between
+  // the working columns (since 2026-09-01; only Done/Blocked need a lead), so this no longer skips
+  // unassigned tasks for a gate that is gone. The write is best-effort.
   const advanceTodoToInProgress = (t: Task | null) => {
-    if (t && !t.unassigned && t.status === "todo") {
+    if (t && t.status === "todo") {
       // `onAdvanceTaskStatus`, not `onSetTaskStatus`: this fires right after the start action, which
       // still holds the single-flight busy lock — the run-based setter would be dropped by it.
       onAdvanceTaskStatus(projectId, t.id, "in_progress");
@@ -270,16 +302,34 @@ export function TimerCard({
   // it stays required there. This is what stops the panel demanding a re-typed restatement of the
   // subtask you just picked.
   const described = description.trim().length > 0;
-  const canStart = Boolean(projectId) && (Boolean(taskId) || described);
+  const canStart = canTrackTime && Boolean(projectId) && (Boolean(taskId) || described);
   // Name the missing thing rather than a generic "can't start": the two are fixed in different
   // controls, and "Ready" appearing only when both are done is what teaches the rule.
   const status = timer.running
     ? "Recording"
-    : !projectId
-      ? "Select a project"
-      : canStart
-        ? "Ready"
-        : "Pick a task or describe your work";
+    : !canTrackTime
+      ? "Not available"
+      : !projectId
+        ? "Select a project"
+        : canStart
+          ? "Ready"
+          : "Pick a task or describe your work";
+
+  // The line under the controls. Says what is actually true: a failed read is not "no projects",
+  // and a role that doesn't track time, or a session that can't detect idleness, is said out loud.
+  const footer = !canTrackTime
+    ? "Your role doesn't include tracking your own time. Ask your admin if it should."
+    : pendingSwitch
+      ? "Still recording the previous work — pick a task here to switch to it."
+      : timer.running
+        ? limitation
+          ? "Tracking — idle time can't be detected in this session, so stop the timer when you step away."
+          : "Tracking — switching project or task re-attributes without stopping the clock."
+        : projects.length === 0
+          ? projectsUnavailable
+            ? "Couldn't load your projects. Check your connection, then hit refresh."
+            : "No projects yet. Ask your admin to add you to one, then hit refresh."
+          : "Pick a project, then a task — or describe your work if there's no task.";
 
   return (
     <PanelCard
@@ -424,13 +474,16 @@ export function TimerCard({
             </p>
             {assigned.map((t) => renderTask(t))}
 
+            {/* Tasks with nobody on them. New tasks always get an assignee now (owner decision,
+                2026-09-01), so this only ever holds older ones — labelled for what they are, not
+                offered "up for grabs" as if the server still created that state. */}
             {unclaimed.length > 0 && (
               <>
                 <DropdownMenuSeparator />
                 <p className="flex items-center gap-1.5 px-1.5 pb-1 pt-1 text-xs font-medium text-muted-foreground">
-                  Up for grabs
+                  Unassigned
                   <span className="font-normal text-muted-foreground/70">
-                    · nobody assigned
+                    · nobody on it yet
                   </span>
                 </p>
                 {unclaimed.map((t) => renderTask(t))}
@@ -443,9 +496,16 @@ export function TimerCard({
               </p>
             )}
 
-            {/* Kept to one line here on purpose — the composer lives in its own file so this
-                component stays out of the way of other work in it. */}
-            <NewTaskItem projectId={projectId} onCreated={chooseTask} />
+            {/* The composer lives in its own file so this component stays out of the way of other
+                work in it. The created task is held until the refreshed list carries it. */}
+            <NewTaskItem
+              projectId={projectId}
+              onCreated={(t) => {
+                setJustCreated(t);
+                chooseTask(t);
+                void onRefresh();
+              }}
+            />
           </HeroPicker>
 
           <Button
@@ -466,8 +526,8 @@ export function TimerCard({
         {/* The chosen task's workspace: its status stepper, its steps (subtasks), and which step the
             clock is on — one region, each action a single unambiguous control. Renders only once a
             task is picked (before that there is nothing to break down or move along). The backend
-            enforces who may change task status (assignee, or a project Lead/Manager) and who may
-            change a step's status. */}
+            enforces who may change task status (Done/Blocked need a project Lead/Manager) and who
+            may change a step's status. */}
         <TaskWorkspace
           task={task}
           projectName={project?.name ?? ""}
@@ -490,13 +550,7 @@ export function TimerCard({
         />
 
 
-        <p className="text-[11px] text-feature-foreground/70">
-          {timer.running
-            ? "Tracking — switching project or task re-attributes without stopping the clock."
-            : projects.length === 0
-              ? "No projects yet. Ask your admin to add you to one, then hit refresh."
-              : "Pick a project, then a task — or describe your work if there's no task."}
-        </p>
+        <p className="text-[11px] text-feature-foreground/70">{footer}</p>
       </CardContent>
     </PanelCard>
   );

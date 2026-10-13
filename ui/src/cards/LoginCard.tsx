@@ -186,7 +186,9 @@ export function LoginCard({
     setError(null);
     setPending(true);
     try {
-      const status = await agent.completeMfa(mfa.challenge, email, trimmed, mfa.session);
+      // The same trimmed username the password leg sent. The raw field kept a pasted trailing space,
+      // so the second leg answered for a different username and failed as a wrong password.
+      const status = await agent.completeMfa(mfa.challenge, email.trim(), trimmed, mfa.session);
       if (status.signedIn) {
         onSignedIn();
         return;
@@ -221,7 +223,8 @@ export function LoginCard({
     setError(null);
     setPending(true);
     try {
-      const status = await agent.completeNewPassword(email, newPassword, challenge);
+      // Trimmed exactly as the first leg was (see `completeMfa` above).
+      const status = await agent.completeNewPassword(email.trim(), newPassword, challenge);
       if (status.signedIn) {
         onSignedIn();
         return;
@@ -343,7 +346,7 @@ export function LoginCard({
                 label="New password"
                 type={reveal ? "text" : "password"}
                 autoComplete="new-password"
-                placeholder="At least 12 characters"
+                placeholder="At least 8 characters"
                 value={newPassword}
                 onChange={(v) => {
                   setNewPassword(v);

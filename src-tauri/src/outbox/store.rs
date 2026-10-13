@@ -6,9 +6,32 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use wp_agent_contract::BatchEnvelope;
+
+/// Replace `path` with `bytes` **atomically**: write a sibling temp file, flush it to disk, then
+/// rename it over the target. A crash or power cut leaves either the old file or the new one —
+/// never a truncated mix.
+///
+/// The queue rewrite (every prune) and the `.seq` sidecar used to truncate in place, so a power cut
+/// mid-prune emptied the queue, and a torn `.seq` read back as 0 and restarted seqs at 1 — which the
+/// server de-duplicates away: the very 2026-07-21 loss the sidecar exists to prevent (QA audit
+/// 2026-10-08, WP-445). Shared with `session_state`, whose file had the same flaw.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)
+}
 
 pub struct JsonlStore {
     path: PathBuf,
@@ -39,10 +62,7 @@ impl JsonlStore {
     /// Record the highest assigned seq. Best-effort: a failure here costs a duplicate seq after a
     /// restart, which is exactly the bug this guards, so it is logged loudly by the caller.
     pub fn save_watermark(&self, seq: u64) -> io::Result<()> {
-        if let Some(parent) = self.seq_path().parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(self.seq_path(), seq.to_string())
+        write_atomic(&self.seq_path(), seq.to_string().as_bytes())
     }
 
     /// Read every persisted envelope (empty if the file is absent or a line is corrupt — a corrupt
@@ -73,17 +93,15 @@ impl JsonlStore {
         writeln!(file, "{line}")
     }
 
-    /// Rewrite the file to exactly `remaining` (called after a prune drops acked batches).
+    /// Rewrite the file to exactly `remaining` (called after a prune drops acked batches) —
+    /// atomically, see [`write_atomic`].
     pub fn rewrite(&self, remaining: &VecDeque<BatchEnvelope>) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = File::create(&self.path)?;
+        let mut out = Vec::new();
         for env in remaining {
             let line = serde_json::to_string(env).map_err(io::Error::other)?;
-            writeln!(file, "{line}")?;
+            writeln!(out, "{line}")?;
         }
-        Ok(())
+        write_atomic(&self.path, &out)
     }
 
     /// On-disk backlog size in bytes (feeds `Heartbeat.outbox_mb`).

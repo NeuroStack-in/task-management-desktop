@@ -31,6 +31,19 @@ pub async fn send_batch(
     parse_ack(&text)
 }
 
+/// The HTTP status of a `send_batch` error that means **the server refused this batch's content** —
+/// a validation failure (400), a body the gateway won't accept (413) or can't read (422) — as
+/// opposed to an outage, a 401 or the network, which a retry can fix. `None` for those.
+pub fn rejected_status(err: &str) -> Option<u16> {
+    let status: u16 = err
+        .strip_prefix("api:status:")?
+        .split(':')
+        .next()?
+        .parse()
+        .ok()?;
+    matches!(status, 400 | 413 | 422).then_some(status)
+}
+
 /// Unwrap `{ "data": <ack> }` if the backend `Envelope` wraps it, else parse the ack directly.
 fn parse_ack(text: &str) -> Result<BatchAck, String> {
     let value: serde_json::Value =
@@ -42,6 +55,28 @@ fn parse_ack(text: &str) -> Result<BatchAck, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WP-208: only a content refusal may ever cost a batch; outages, auth and the network retry.
+    #[test]
+    fn only_content_refusals_count_as_rejected() {
+        assert_eq!(
+            rejected_status(r#"api:status:400:{"error":"validation"}"#),
+            Some(400)
+        );
+        assert_eq!(rejected_status("api:status:413:<html>"), Some(413));
+        assert_eq!(rejected_status("api:status:422:bad json"), Some(422));
+        for transient in [
+            "api:status:500:boom",
+            "api:status:503:",
+            "api:status:429:slow down",
+            "api:status:404:no route",
+            "auth:expired",
+            "api:network:dns",
+            "api:parse:eof",
+        ] {
+            assert_eq!(rejected_status(transient), None, "{transient}");
+        }
+    }
 
     #[test]
     fn parses_bare_and_enveloped_acks() {

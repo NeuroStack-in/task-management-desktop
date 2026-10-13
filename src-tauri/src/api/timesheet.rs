@@ -48,6 +48,11 @@ pub async fn fetch_today(
     id_token: &str,
     date: &str,
 ) -> Result<Vec<SessionDto>, String> {
+    // The date comes from the webview and goes into the query verbatim: only a `YYYY-MM-DD` may, so
+    // nothing can append parameters or re-target the request (WP-444).
+    if !crate::clock::is_local_date(date) {
+        return Err("timesheet:invalid_date".into());
+    }
     let url = format!(
         "{}/v1/me/timesheet/today?date={}",
         ingest_url.trim_end_matches('/'),

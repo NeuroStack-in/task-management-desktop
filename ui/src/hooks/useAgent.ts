@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as agent from "@/lib/agent";
 import { EVENTS } from "@/lib/agent";
 import { clearHistory } from "@/lib/descriptionHistory";
-import type { AgentSnapshot, Subtask, TimerSelection } from "@/lib/types";
+import type { AgentSnapshot, SessionInfo, Subtask, TimerSelection } from "@/lib/types";
 
 // The core (timer/pause/consent/capture/config/identity) is cheap local IPC — read it every second
 // so the clock and any out-of-panel transition show up promptly.
@@ -34,11 +34,19 @@ function humanizeActionError(e: unknown): string {
   if (raw.includes("not_running") || raw.includes("no session")) {
     return "No timer is running.";
   }
-  // A task/subtask status change the backend refused because it belongs to someone else and the
-  // caller is only a project Member — `task:status-not-yours` / `subtask:not-yours`. Name the rule
-  // rather than show the raw code, since it is one the person can act on.
-  if (raw.includes("not-yours")) {
-    return "You can only change the status of a task assigned to you. A project lead or manager can change anyone's.";
+  // `start_timer` refused: tracking your own time is a contributor permission the role lacks.
+  if (raw.includes("timer:not-permitted")) {
+    return "Your role doesn't include tracking your own time. Ask your admin if it should.";
+  }
+  // A status change the backend refused (403). Name the rule rather than show the raw code, since it
+  // is one the person can act on — and the rule the server actually applies: since 2026-09-01 any
+  // member moves a task between the working columns and only Done/Blocked need a lead, while a
+  // Member edits only subtasks they added. The old text blamed task assignment for both.
+  if (raw.includes("task:status-not-yours")) {
+    return "Only a project lead or manager can mark a task Done or Blocked.";
+  }
+  if (raw.includes("subtask:not-yours")) {
+    return "You can only change subtasks you added. A project lead or manager can change anyone's.";
   }
   // Strip the `module:` prefix rather than inventing wording for an error we do not know.
   return raw.replace(/^[a-z_]+:/, "");
@@ -65,12 +73,24 @@ export interface Agent {
   actionError: string | null;
   /** True while a write action is in flight — buttons disable / ignore re-clicks. */
   busy: boolean;
+  /**
+   * The last projects read failed (offline, a server error) — an empty picker then means "couldn't
+   * load", and the panel must not tell the person to ask an admin for projects.
+   */
+  projectsUnavailable: boolean;
+  /** What this session can measure; `null` until the core answers. */
+  sessionInfo: SessionInfo | null;
   grantConsent: () => void;
   /** Starts with `sel` when stopped; stops (ignoring `sel`) when running. */
   toggleTimer: (sel: TimerSelection) => void;
+  /**
+   * The idle banner's Stop: ends the session at the last input before the idle stretch, so the idle
+   * minutes aren't billed (the core falls back to "now" if the person has been back a while).
+   */
+  stopIdle: () => void;
   /** Re-attribute a running timer without stopping the clock. */
   switchTo: (sel: TimerSelection) => void;
-  /** Change a task's status. Backend-gated (assignee, or a project Lead/Manager); refreshes after. */
+  /** Change a task's status. Backend-gated (Done/Blocked need a project Lead/Manager); refreshes after. */
   setTaskStatus: (projectId: string, taskId: string, status: string) => void;
   /** Silent best-effort status nudge (e.g. todo→in_progress on start); bypasses the busy guard. */
   advanceTaskStatus: (projectId: string, taskId: string, status: string) => void;
@@ -115,6 +135,8 @@ export function useAgent(): Agent {
   const [actionError, setActionError] = useState<string | null>(null);
   // In-flight flag so buttons can disable / ignore re-clicks while an action is pending.
   const [busy, setBusy] = useState(false);
+  const [projectsUnavailable, setProjectsUnavailable] = useState(false);
+  const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   // Ref mirror of `busy`, checked synchronously so a rapid double-click is dropped before a second
   // call can fire (state updates are async and would let both clicks through).
   const busyRef = useRef(false);
@@ -149,14 +171,15 @@ export function useAgent(): Agent {
   }, []);
 
   // The slow path: the backend-fed lists. Polled on LISTS_POLL_MS and refreshed on demand (focus,
-  // after a write, on a core event) — never per second. Keeps the last-good lists on failure so the
-  // picker never blanks.
+  // after a write, on a core event) — never per second. A list whose read failed is absent from the
+  // result, so its last-good copy stays and the picker never blanks.
   const refreshLists = useCallback(async () => {
     const id = ++listsSeq.current;
     try {
-      const lists = await agent.readLists(signedInRef.current);
+      const { lists, projectsFailed } = await agent.readLists(signedInRef.current);
       if (id !== listsSeq.current) return;
       setSnapshot((prev) => (prev ? { ...prev, ...lists } : prev));
+      setProjectsUnavailable(projectsFailed);
     } catch {
       /* keep the last-good lists */
     }
@@ -183,6 +206,14 @@ export function useAgent(): Agent {
       window.removeEventListener("focus", onFocus);
     };
   }, [refresh, refreshCore, refreshLists]);
+
+  // What this session can measure is fixed for the life of the process, so it is read once.
+  useEffect(() => {
+    agent
+      .sessionInfo()
+      .then(setSessionInfo)
+      .catch(() => {});
+  }, []);
 
   // Core events. Each unlisten is awaited on cleanup so a remount can't double-subscribe.
   useEffect(() => {
@@ -275,6 +306,12 @@ export function useAgent(): Agent {
     [snapshot, run],
   );
 
+  const stopIdle = useCallback(() => {
+    if (!snapshot?.timer.running) return;
+    setIdleSecs(null);
+    run(() => agent.stopTimer(true));
+  }, [snapshot, run]);
+
   const switchTo = useCallback(
     (sel: TimerSelection) => {
       if (!snapshot?.timer.running) return;
@@ -286,7 +323,7 @@ export function useAgent(): Agent {
   // Uses `run` (unlike the subtask writes): the caller doesn't need the result, and `run` gives it
   // the busy-guard, the refused-action error banner, and — crucially — the refresh, so the status
   // dropdown reflects the new value the moment the write lands. A 403 (`task:status-not-yours`)
-  // surfaces through `reportAction` as the assignee-only sentence.
+  // surfaces through `reportAction` as the Done/Blocked-need-a-lead sentence.
   const setTaskStatus = useCallback(
     (projectId: string, taskId: string, status: string) => {
       run(() => agent.setTaskStatus(projectId, taskId, status));
@@ -398,8 +435,11 @@ export function useAgent(): Agent {
     deviceReleased,
     actionError,
     busy,
+    projectsUnavailable,
+    sessionInfo,
     grantConsent,
     toggleTimer,
+    stopIdle,
     switchTo,
     setTaskStatus,
     advanceTaskStatus,

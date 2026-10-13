@@ -71,7 +71,11 @@ min** ends the session. Two seconds without input marks a tick idle (`IDLE_THRES
 are suppressed — nothing about that window is recorded.
 
 All cadence/threshold values are policy, pulled from the server and cached locally — see [CONFIG.md](CONFIG.md).
-The agent uses a monotonic clock for scheduling (no dependence on wall-clock jumps from sleep/resume).
+All timing is the **local wall clock** (`clock::now_epoch_ms`) — not monotonic, and with no server
+offset applied. A suspend shows up as a gap between the monitor's 1 s ticks and ends the session at
+the last tick (a forward clock jump of more than 90 s reads the same way and resumes on the next
+input); a backward step of more than 5 s splits the running session at the step, so neither half is
+shortened.
 
 ---
 

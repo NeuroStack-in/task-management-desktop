@@ -37,8 +37,11 @@ function Panel() {
     restrictedHit,
     deviceReleased,
     actionError,
+    projectsUnavailable,
+    sessionInfo,
     grantConsent,
     toggleTimer,
+    stopIdle,
     switchTo,
     setTaskStatus,
     advanceTaskStatus,
@@ -63,6 +66,10 @@ function Panel() {
   // screenshot capture on consent (monitor/mod.rs — fails closed). Record it silently once the user
   // is signed in so capture keeps running; it's persisted, so this is a one-time write per policy
   // version, not a call on every launch.
+  //
+  // Whether the notice should be shown before this is recorded is an open owner decision (QA audit
+  // 2026-10-08, WP-210). The disclosure the core records (`panel::disclosure`) now names what is
+  // actually captured, window titles included, so a notice built from it would be truthful.
   const signedIn = snapshot?.auth.signedIn === true;
   const consentGranted = snapshot?.consent.granted === true;
   useEffect(() => {
@@ -296,18 +303,14 @@ function Panel() {
             <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={dismissIdle}>
               Keep going
             </Button>
+            {/* Ends the session at the last activity, not at the click: "Stop" here answers "no, I
+                wasn't working", so the idle minutes aren't billed (QA audit 2026-10-08, WP-212). */}
             <Button
               size="sm"
               variant="outline"
               className="h-6 px-2 text-[11px]"
-              onClick={() =>
-                toggleTimer({
-                  taskId: null,
-                  subtaskId: null,
-                  projectId: null,
-                  description: "",
-                })
-              }
+              title="Stops the timer at your last activity, so the idle minutes aren't counted"
+              onClick={stopIdle}
             >
               Stop
             </Button>
@@ -352,6 +355,9 @@ function Panel() {
           onSetTaskStatus={setTaskStatus}
           onAdvanceTaskStatus={advanceTaskStatus}
           onRefresh={refresh}
+          projectsUnavailable={projectsUnavailable}
+          canTrackTime={snapshot.identity?.can_track_time ?? true}
+          limitation={sessionInfo?.limitation ?? null}
         />
 
         {/* Sessions used to share this row with a Status card. That card was removed, so this

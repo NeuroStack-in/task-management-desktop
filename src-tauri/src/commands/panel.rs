@@ -24,12 +24,18 @@ pub struct ConsentStateDto {
     pub captured: Vec<String>,
 }
 
+/// What the agent records, as the consent record states it. **Must match the payload**: the second
+/// line said "Foreground app / website category" while every activity rollup carries the full
+/// foreground window title — document names, mail subjects, chat names (QA audit 2026-10-08,
+/// WP-210). Whether the notice is shown before consent is recorded is the panel's call, and an
+/// owner decision; this list is what it would say.
 fn disclosure() -> Vec<String> {
     [
         "Activity counts (keystroke & mouse totals — never the keys themselves)",
-        "Foreground app / website category",
-        "Periodic screenshots (blurred per your organization's policy)",
-        "Device location (GPS / OS positioning) while monitoring is on",
+        "The app in the foreground and its window title (for example a document, email subject or \
+         chat name), and its category under your organization's rules",
+        "Periodic screenshots while your timer runs (blurred per your organization's policy)",
+        "Device location (GPS / OS positioning) while your timer runs",
         "Attendance and timer events",
     ]
     .iter()
@@ -93,16 +99,21 @@ pub fn capture_state(state: State<'_, AppState>) -> CaptureStateDto {
     let running = state.timer.lock().unwrap().is_running();
     let consent = state.consent.load(std::sync::atomic::Ordering::Relaxed);
     let paused = state.pause.lock().unwrap().is_paused(now_ms());
+    let policy_known = state
+        .config_known
+        .load(std::sync::atomic::Ordering::Relaxed);
     let cfg = state.config.lock().unwrap();
     let c = cfg.get();
     let cadence = c.tracking.cadence;
-    // The three conditions both loops share.
-    let gated = running && consent && !paused;
+    // The conditions both loops share — including that the org's policy is known (WP-209).
+    let gated = running && consent && !paused && policy_known;
     // Screenshots additionally need a live cadence AND the org's `monitoring.screenshots`
-    // entitlement (monitor/mod.rs:250); activity needs `monitoring.activity` and no cadence at all
-    // (monitor/mod.rs:444).
+    // entitlement (`monitor::screenshot_gate_open`); activity needs `monitoring.activity`, no
+    // cadence at all, and a session where it can be measured — none on Wayland (`monitor::run`).
     let screenshots = gated && !matches!(cadence, Cadence::Off) && c.tracking.screenshots_enabled;
-    let activity = gated && c.tracking.activity_enabled;
+    let activity = gated
+        && c.tracking.activity_enabled
+        && crate::monitor::session::session_info().can_track_windows;
     let capturing = screenshots || activity;
     let interval = cadence.interval_secs().unwrap_or(0);
     // The countdown is the *screenshot* cadence, so it keys off `screenshots` — not `capturing`,
@@ -171,6 +182,13 @@ pub fn start_timer(
     // PARENT — see `TimerEngine::start`.
     subtask_id: Option<String>,
 ) -> Result<TimerStateDto, String> {
+    // **Self time tracking is a contributor permission** (`TimeTrackSelf`, bit 110), deliberately
+    // not held by Owner or Admin. `POST /v1/agent/batch` does not check it, so the agent was the
+    // only way past it — any role could record sessions, activity and screenshots for itself (QA
+    // audit 2026-10-08, WP-214). An unreadable claim is not a refusal: the server is the boundary.
+    if state.auth.can_track_time() == Some(false) {
+        return Err("timer:not-permitted".into());
+    }
     let ts = now_ms();
     let session_id = uuid::Uuid::new_v4().to_string();
     // Surface a start that was refused (already running) instead of swallowing it and returning the
@@ -194,9 +212,21 @@ pub fn start_timer(
     Ok(read_timer(&state))
 }
 
+/// Stop the running timer.
+///
+/// `discard_idle` is the idle banner's Stop ("No activity for 5 min — still working?"): the person
+/// is saying they weren't, so the session ends at the last input before the idle stretch rather than
+/// at the click — unless they have evidently been back at work for a while since
+/// (`IdleWindow::stop_at`). Stopping at the click billed the idle minutes (QA audit 2026-10-08,
+/// WP-212).
 #[tauri::command]
-pub fn stop_timer(state: State<'_, AppState>) -> TimerStateDto {
-    let ts = now_ms();
+pub fn stop_timer(state: State<'_, AppState>, discard_idle: Option<bool>) -> TimerStateDto {
+    let now = now_ms();
+    let window = state.idle_window.lock().unwrap().take();
+    let ts = match window {
+        Some(w) if discard_idle == Some(true) => w.stop_at(now),
+        _ => now,
+    };
     let ev = state.timer.lock().unwrap().stop(ts, StopReason::User);
     if let Some(e) = ev {
         state.pending_events.lock().unwrap().push(e);
@@ -230,9 +260,13 @@ pub struct PauseStateDto {
 /// The core owns the authoritative pause window (`state.rs`), but until now only `request_pause`
 /// existed — so a webview reload lost the countdown while the core stayed paused, and the panel
 /// under-reported. The UI must never track this locally: the budget is enforced core-side.
+///
+/// `local_date` is the panel's `YYYY-MM-DD`: the budget is per local day (`PauseState`), and the
+/// core has no local calendar to tell when that day ends.
 #[tauri::command]
-pub fn pause_state(state: State<'_, AppState>) -> PauseStateDto {
+pub fn pause_state(state: State<'_, AppState>, local_date: Option<String>) -> PauseStateDto {
     let now = now_ms();
+    let today = local_date.unwrap_or_default();
     let p = state.pause.lock().unwrap();
     let remaining_secs = p
         .until_ms
@@ -244,17 +278,31 @@ pub fn pause_state(state: State<'_, AppState>) -> PauseStateDto {
     PauseStateDto {
         paused: p.is_paused(now),
         remaining_secs,
-        remaining_budget_secs: p.budget_secs,
+        remaining_budget_secs: p.budget_on(&today),
     }
 }
 
+/// Pause capture — screenshots, activity and location; the timer keeps running — for up to
+/// `requested_secs` of `local_date`'s budget. The remaining budget is persisted, so a restart does
+/// not hand out a fresh allowance (WP-213).
 #[tauri::command]
-pub fn request_pause(state: State<'_, AppState>, requested_secs: u64) -> PauseGrantDto {
-    let (granted, granted_secs, remaining_budget_secs) = state
-        .pause
-        .lock()
-        .unwrap()
-        .request(now_ms(), requested_secs);
+pub fn request_pause(
+    state: State<'_, AppState>,
+    requested_secs: u64,
+    local_date: Option<String>,
+) -> PauseGrantDto {
+    let today = local_date.unwrap_or_default();
+    let (granted, granted_secs, remaining_budget_secs, day) = {
+        let mut p = state.pause.lock().unwrap();
+        let (granted, granted_secs, remaining) = p.request(now_ms(), requested_secs, &today);
+        (granted, granted_secs, remaining, p.day.clone())
+    };
+    if granted {
+        crate::session_state::update(|s| {
+            s.pause_day = day;
+            s.pause_budget_secs = Some(remaining_budget_secs);
+        });
+    }
     PauseGrantDto {
         granted,
         granted_secs,
@@ -262,32 +310,55 @@ pub fn request_pause(state: State<'_, AppState>, requested_secs: u64) -> PauseGr
     }
 }
 
-// ── transparency log (local) ─────────────────────────────────────────────────
+// ── session capabilities ─────────────────────────────────────────────────────
 
-/// The employee's own record of privacy-relevant events on this machine, newest first.
-///
-/// Today it carries the admin-triggered on-demand captures (taken **and** refused) — the one thing
-/// the agent does that the employee could not otherwise observe. PRIVACY.md §5: "no silent access,
-/// everything leaves a trail"; this is the employee's copy of that trail.
+/// What this session can measure — the honest-degradation report `monitor::session` was written
+/// for, which no command exposed until now. On Wayland the panel says idle can't be detected, so
+/// the timer must be stopped by hand (QA audit 2026-10-08, WP-216).
 #[tauri::command]
-pub fn privacy_log(limit: Option<usize>) -> Vec<crate::privacy_log::LocalEvent> {
-    crate::privacy_log::recent(limit.unwrap_or(20))
+pub fn session_info() -> crate::monitor::session::SessionInfo {
+    crate::monitor::session::session_info()
 }
 
 // ── projects (backend-fed) ───────────────────────────────────────────────────
 
+/// A valid ID token for a panel read, or the error the panel keeps its last-good lists on.
+///
+/// The list reads used to answer `Ok([])` here. `id_token()` is also `None` when a refresh merely
+/// couldn't reach Cognito (offline at the 15-minute rotation), so a network blip blanked the project
+/// picker, the task workspace and Today's sessions, and the footer told the employee to ask an admin
+/// for projects (QA audit 2026-10-08, WP-207). An error is what that is; the panel already reads the
+/// lists only while signed in.
+async fn list_token(state: &AppState) -> Result<String, String> {
+    state
+        .auth
+        .id_token()
+        .await
+        .ok_or_else(|| "auth:unavailable".to_string())
+}
+
+/// A 401 on a panel read means the cached ID token is dead whatever its local expiry says — make
+/// the next read refresh it (WP-442).
+fn note_rejection<T>(state: &AppState, result: Result<T, String>) -> Result<T, String> {
+    if matches!(&result, Err(e) if e == "auth:expired") {
+        state.auth.invalidate_id_token();
+    }
+    result
+}
+
 /// The signed-in user's projects for the "Select project" picker — fetched live from
-/// `GET /v1/projects`. Empty (not an error) when signed out, so the panel just shows no projects.
+/// `GET /v1/projects`. An error (signed out, offline, rejected) leaves the panel's last-good list.
 #[tauri::command]
 pub async fn list_projects(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::api::projects::ProjectDto>, String> {
-    let Some(id_token) = state.auth.id_token().await else {
-        return Ok(Vec::new());
-    };
+    let id_token = list_token(&state).await?;
     let ingest_url = state.auth.config().ingest_url.clone();
     let client = crate::api::client::api_client();
-    crate::api::projects::fetch_projects(&client, &ingest_url, &id_token).await
+    note_rejection(
+        &state,
+        crate::api::projects::fetch_projects(&client, &ingest_url, &id_token).await,
+    )
 }
 
 /// The theme the user chose in the web app, so the panel matches it instead of keeping a second,
@@ -314,18 +385,19 @@ pub async fn appearance(
     }
 }
 
-/// The tasks the picker offers — the signed-in user's own, plus the unclaimed work in projects
-/// they belong to (`GET /v1/me/tasks?include_unassigned=true`). Empty when signed out.
+/// The tasks the picker offers — the signed-in user's own, plus any unassigned work in projects
+/// they belong to (`GET /v1/me/tasks?include_unassigned=true`). An error leaves the last-good list.
 #[tauri::command]
 pub async fn list_tasks(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::api::tasks::TaskDto>, String> {
-    let Some(id_token) = state.auth.id_token().await else {
-        return Ok(Vec::new());
-    };
+    let id_token = list_token(&state).await?;
     let ingest_url = state.auth.config().ingest_url.clone();
     let client = crate::api::client::api_client();
-    crate::api::tasks::fetch_tasks(&client, &ingest_url, &id_token).await
+    note_rejection(
+        &state,
+        crate::api::tasks::fetch_tasks(&client, &ingest_url, &id_token).await,
+    )
 }
 
 /// Create a task in `project_id` from the panel and return it, so the picker can offer it (and the
@@ -398,8 +470,9 @@ pub async fn create_subtask(
 
 /// Tick a subtask off, or move it back.
 ///
-/// Fails with `subtask:not-yours` when the caller is a project Member and the subtask is somebody
-/// else's — a rule the person can act on, rather than a raw 403 the panel would have to translate.
+/// Fails with `subtask:not-yours` when the caller is a project Member and someone else added the
+/// subtask (a Member edits only subtasks they created; a Lead/Manager edits any) — a rule the person
+/// can act on, rather than a raw 403 the panel would have to translate.
 #[tauri::command]
 pub async fn set_subtask_status(
     state: State<'_, AppState>,
@@ -427,9 +500,10 @@ pub async fn set_subtask_status(
 
 /// Change a task's **status** from the panel (To do / In progress / In review / Done / Blocked).
 ///
-/// Fails with `task:status-not-yours` when the caller is a project Member and the task is somebody
-/// else's — the backend gate: a Member may move only a task they're assigned to; a Lead/Manager moves
-/// anyone's. The panel turns that into a sentence rather than showing a raw 403.
+/// Fails with `task:status-not-yours` on the backend's 403: since 2026-09-01 any project member may
+/// move a task between the working columns, and only **Done** and **Blocked** need a project
+/// Lead/Manager (`projects::update_task`). The panel turns that into a sentence rather than showing
+/// a raw 403.
 #[tauri::command]
 pub async fn set_task_status(
     state: State<'_, AppState>,
@@ -456,19 +530,21 @@ pub async fn set_task_status(
 // ── today's sessions (backend-fed) ───────────────────────────────────────────
 
 /// The signed-in user's folded time entries for `date` (the client's local `YYYY-MM-DD`), aggregated
-/// per (project, description) — the panel's "Today's sessions". Reads back this agent's own timer
-/// events after they fold server-side (`GET /v1/me/timesheet/today`). Empty when signed out.
+/// per (project, task, subtask, description) — the panel's "Today's sessions". Reads back this
+/// agent's own timer events after they fold server-side (`GET /v1/me/timesheet/today`). An error
+/// leaves the last-good list.
 #[tauri::command]
 pub async fn list_sessions(
     state: State<'_, AppState>,
     date: String,
 ) -> Result<Vec<crate::api::timesheet::SessionDto>, String> {
-    let Some(id_token) = state.auth.id_token().await else {
-        return Ok(Vec::new());
-    };
+    let id_token = list_token(&state).await?;
     let ingest_url = state.auth.config().ingest_url.clone();
     let client = crate::api::client::api_client();
-    crate::api::timesheet::fetch_today(&client, &ingest_url, &id_token, &date).await
+    note_rejection(
+        &state,
+        crate::api::timesheet::fetch_today(&client, &ingest_url, &id_token, &date).await,
+    )
 }
 
 // ── resume after restart ─────────────────────────────────────────────────────
@@ -497,6 +573,10 @@ pub struct PendingResumeDto {
 /// `stopped_at_ms` is still today.
 #[tauri::command]
 pub fn take_pending_resume(state: State<'_, AppState>) -> Option<PendingResumeDto> {
+    // Settle whose state this is first. The panel claims the resume the moment it sees a session,
+    // which can be before the sign-in path has reset a previous user's hand-off — and that would
+    // start the previous user's task on the new user's clock (QA audit 2026-10-08, WP-206).
+    state.adopt_signed_in();
     // Never resume on top of a running timer — a start would be rejected anyway, and this makes the
     // ordering explicit rather than relying on that.
     if state.timer.lock().unwrap().is_running() {
@@ -522,6 +602,9 @@ pub struct IdentityDto {
     pub name: String,
     pub email: String,
     pub avatar_url: String,
+    /// `false` only when the role's permissions are readable and lack `TimeTrackSelf` — the panel
+    /// then says so instead of offering a Start that `start_timer` refuses (WP-214).
+    pub can_track_time: bool,
 }
 
 /// Who this device reports as — the person's name + email from the Cognito ID-token claims (the
@@ -534,5 +617,6 @@ pub fn identity(state: State<'_, AppState>) -> Option<IdentityDto> {
         name,
         email,
         avatar_url: String::new(),
+        can_track_time: state.auth.can_track_time() != Some(false),
     })
 }

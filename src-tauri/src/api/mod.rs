@@ -24,7 +24,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 use wp_agent_contract::PresignedUpload;
 
-use crate::cycle::{self, SCREENSHOT_ATTEMPT_CAP};
+use crate::cycle;
 use crate::monitor::screenshot::is_allowed_upload_host;
 use crate::state::AppState;
 
@@ -56,6 +56,12 @@ pub fn spawn_sender(app: tauri::AppHandle) {
         loop {
             // The heartbeat interval tracks the current screenshot cadence, read fresh each cycle so a
             // policy change takes effect on the next window.
+            //
+            // **Never longer than 5 min**, whatever the cadence. The server's reaper closes a running
+            // session once the user's newest device has been silent for 15 min (three missed 300 s
+            // cycles), so a 20-minute custom cadence had every session "abandoned" between two
+            // healthy heartbeats, and a 10-minute one after a single failed send (QA audit
+            // 2026-10-08, WP-061). Shorter cycles only ship the same captures sooner.
             let cycle_secs = {
                 let cadence = app
                     .state::<AppState>()
@@ -65,18 +71,24 @@ pub fn spawn_sender(app: tauri::AppHandle) {
                     .get()
                     .tracking
                     .cadence;
-                cadence
-                    .interval_secs()
-                    .map(u64::from)
-                    .unwrap_or(DEFAULT_CYCLE_SECS)
+                heartbeat_secs(cadence.interval_secs().map(u64::from))
             };
             // Wake on whichever comes first: the cadence-aligned heartbeat cycle, or a timer transition
-            // asking for an immediate flush. Either way we assemble + drain exactly the same.
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(cycle_secs)) => {}
-                _ = flush.notified() => {}
-            }
+            // asking for an immediate flush. Either way we assemble + drain exactly the same — except
+            // that only the periodic cycle waits for a fresh location fix (see `refresh_location`).
+            let immediate = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(cycle_secs)) => false,
+                _ = flush.notified() => true,
+            };
             let state = app.state::<AppState>();
+
+            // A startup restore that failed on the network (booted before Wi-Fi) used to be the only
+            // attempt, so the agent stayed signed out until someone re-typed a password (WP-059).
+            // Retried here every cycle; with no stored token (an explicit sign-out) it is a no-op.
+            if !state.auth.is_authenticated() && state.auth.restore().await {
+                tracing::info!("session restored on retry");
+                state.adopt_signed_in();
+            }
 
             // Auth-gated: no token → skip (don't grow the outbox while signed out).
             //
@@ -88,6 +100,19 @@ pub fn spawn_sender(app: tauri::AppHandle) {
             let Some(id_token) = state.auth.id_token().await else {
                 if was_signed_in {
                     was_signed_in = false;
+                    // The session is really over (Cognito refused the refresh token — signed out),
+                    // not just unreachable this cycle. Stop the clock, keeping the stop event: both
+                    // capture loops gate on the timer, so this is what stops recording behind the
+                    // sign-in screen. The queue stays this user's (`outbox_owner`) — sent when they
+                    // sign back in, dropped if someone else does (QA audit 2026-10-08, WP-057).
+                    if !state.auth.is_authenticated() {
+                        state.end_session_locally();
+                        crate::session_state::update(|s| {
+                            s.consent_granted = false;
+                            s.resume = None;
+                        });
+                        let _ = app.emit(crate::events::TRACKING_CHANGED, ());
+                    }
                     let _ = app.emit(crate::events::AUTH_EXPIRED, ());
                 }
                 continue;
@@ -95,7 +120,11 @@ pub fn spawn_sender(app: tauri::AppHandle) {
             was_signed_in = true;
             let ingest_url = state.auth.config().ingest_url.clone();
 
-            refresh_location(&app).await;
+            // Whose queue is this? Settled before anything is assembled or sent: the sign-in paths
+            // adopt right after setting the tokens, and this cycle can land in between (WP-206).
+            state.adopt_signed_in();
+
+            refresh_location(&app, !immediate).await;
             cycle::assemble_and_enqueue(&state);
             let released_at = drain(&http, &upload, &ingest_url, &id_token, &state).await;
 
@@ -110,6 +139,14 @@ pub fn spawn_sender(app: tauri::AppHandle) {
             }
         }
     });
+}
+
+/// The heartbeat interval for a screenshot cadence (`None` = screenshots off): the cadence, capped
+/// at [`DEFAULT_CYCLE_SECS`] so the server never sees a gap its 15-minute reaper reads as abandoned.
+fn heartbeat_secs(cadence_secs: Option<u64>) -> u64 {
+    cadence_secs
+        .unwrap_or(DEFAULT_CYCLE_SECS)
+        .clamp(1, DEFAULT_CYCLE_SECS)
 }
 
 /// Spawn the fast config poller — the "reflect settings changes ASAP" rail.
@@ -133,11 +170,19 @@ pub fn spawn_config_poller(app: tauri::AppHandle) {
             match config::pull_config(&http, &ingest_url, &id_token, etag.as_deref()).await {
                 Ok(config::ConfigPull::Fresh { config, etag }) => {
                     let v = config.version;
-                    state.config.lock().unwrap().apply(*config, etag);
+                    config::apply(&state, *config, etag);
                     tracing::info!("config poller applied version {v}");
                 }
-                Ok(config::ConfigPull::NotModified) => {}
-                Err(e) => tracing::debug!("config poll skipped: {e}"),
+                Ok(config::ConfigPull::NotModified) => {
+                    // The cached config *is* the server's — the ETag matched.
+                    state
+                        .config_known
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(e) => {
+                    note_auth_rejection(&state, &e);
+                    tracing::debug!("config poll skipped: {e}");
+                }
             }
         }
     });
@@ -157,7 +202,14 @@ pub fn spawn_config_poller(app: tauri::AppHandle) {
 ///
 /// The privacy pause is honoured for the same reason it suspends screenshots: a bounded window in
 /// which nothing is recorded is worthless if one of the three capture paths keeps going.
-async fn refresh_location(app: &tauri::AppHandle) {
+///
+/// **A new fix only on the periodic cycle (`fresh_fix`), and never longer than `FIX_TIMEOUT`.** Every
+/// wake used to await a fix first — including the immediate flush after a Start or Stop, which LLD
+/// §4 wants on the wire in seconds — and the Windows backend sets no deadline of its own (WinRT's
+/// internal one is about a minute). An immediate flush now carries the last fix, and only re-checks
+/// the gates so a stopped, withdrawn or paused capture still clears it at once (QA audit
+/// 2026-10-08, WP-449).
+async fn refresh_location(app: &tauri::AppHandle, fresh_fix: bool) {
     let state = app.state::<AppState>();
 
     let running = state.timer.lock().unwrap().is_running();
@@ -168,15 +220,26 @@ async fn refresh_location(app: &tauri::AppHandle) {
         .unwrap()
         .is_paused(crate::clock::now_epoch_ms());
 
-    let fix = if running && consented && !paused {
-        tokio::task::spawn_blocking(crate::location::capture)
-            .await
-            .unwrap_or(None)
-    } else {
-        None
-    };
+    if !(running && consented && !paused) {
+        *state.location.lock().unwrap() = None;
+        return;
+    }
+    if !fresh_fix {
+        return;
+    }
+    // A blocking OS call can't be cancelled; past the deadline its answer is simply not waited for.
+    let capture = tokio::task::spawn_blocking(crate::location::capture);
+    let fix = tokio::time::timeout(crate::location::FIX_TIMEOUT + LOCATION_GRACE, capture)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
     *state.location.lock().unwrap() = fix;
 }
+
+/// Slack on top of the backends' own `FIX_TIMEOUT`, so a backend that honours it is never cut off a
+/// moment before its answer.
+const LOCATION_GRACE: Duration = Duration::from_secs(2);
 
 /// Push everything the outbox owes, once, on demand — used by the release teardown to file the
 /// employee's last stretch of work **before** anything is cleared ([`crate::release`]).
@@ -219,19 +282,29 @@ async fn drain(
 
                 // Config rail: the ack advertises the server version; on a mismatch, pull (ETag-conditional)
                 // and apply live — cadence/blur/silent + app/URL rules the monitor threads read each tick.
+                // Also whenever no org policy is known yet (first run, or a new user's sign-in), so
+                // capture is held for as short a time as possible (WP-209).
                 let (stale, etag) = {
                     let c = state.config.lock().unwrap();
-                    (c.needs_pull(ack.config_version), c.etag())
+                    let unknown = !state
+                        .config_known
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    (c.needs_pull(ack.config_version) || unknown, c.etag())
                 };
                 if stale {
                     match config::pull_config(http, ingest_url, id_token, etag.as_deref()).await {
                         Ok(config::ConfigPull::Fresh { config, etag }) => {
                             let v = config.version;
-                            state.config.lock().unwrap().apply(*config, etag);
+                            config::apply(state, *config, etag);
                             tracing::info!("config applied (version {v})");
                         }
-                        Ok(config::ConfigPull::NotModified) => {}
-                        Err(e) => tracing::warn!("config pull failed: {e}"),
+                        Ok(config::ConfigPull::NotModified) => state
+                            .config_known
+                            .store(true, std::sync::atomic::Ordering::Relaxed),
+                        Err(e) => {
+                            note_auth_rejection(state, &e);
+                            tracing::warn!("config pull failed: {e}");
+                        }
                     }
                 }
 
@@ -240,12 +313,84 @@ async fn drain(
                 }
             }
             Err(e) => {
+                // **The server refused this batch's content** (400/413/422). It will refuse it on
+                // every retry, and everything queued behind it — heartbeats, timer events, activity
+                // — used to wait forever: one poisoned batch stopped all ingestion for the device
+                // until someone deleted the queue file (QA audit 2026-10-08, WP-208). It keeps its
+                // place for `REFUSED_BATCH_GRACE_MS` — so a server regression refusing everything is
+                // fixed before any data goes — and is then dropped, loudly. The batch caps in
+                // `cycle` keep the agent from producing the size-based refusals that made this real.
+                if let Some(status) = batch::rejected_status(&e) {
+                    let now = crate::clock::now_epoch_ms();
+                    let give_up =
+                        give_up_on(&mut REFUSED_HEAD.lock().unwrap(), batch.batch_seq, now);
+                    if give_up {
+                        tracing::error!(
+                            batch_seq = batch.batch_seq,
+                            status,
+                            "the server has refused this batch for an hour; dropping it so the \
+                             rest of the queue can go: {e}"
+                        );
+                        state.outbox.lock().unwrap().prune_to(batch.batch_seq);
+                        continue;
+                    }
+                    tracing::error!(batch_seq = batch.batch_seq, status, "batch refused: {e}");
+                    break;
+                }
+                note_auth_rejection(state, &e);
                 tracing::warn!("batch send failed, will retry next cycle: {e}");
                 break;
             }
         }
     }
     released_at
+}
+
+/// How long a batch the server refuses keeps its place at the head of the queue before it is
+/// dropped — long enough that a server-side regression refusing every batch is fixed before any
+/// agent discards data, short enough that a genuinely poisoned batch stops blocking the same day.
+const REFUSED_BATCH_GRACE_MS: i64 = 60 * 60 * 1000;
+
+/// The head batch the server last refused, and since when (epoch ms). In memory: a restart gives a
+/// refused batch a fresh grace period, which only errs toward keeping data.
+static REFUSED_HEAD: std::sync::Mutex<Option<(u64, i64)>> = std::sync::Mutex::new(None);
+
+/// Whether to stop retrying batch `seq`, refused again at `now`.
+fn give_up_on(refused: &mut Option<(u64, i64)>, seq: u64, now: i64) -> bool {
+    match *refused {
+        Some((head, since)) if head == seq => now - since >= REFUSED_BATCH_GRACE_MS,
+        _ => {
+            *refused = Some((seq, now));
+            false
+        }
+    }
+}
+
+/// A 401 means the cached ID token is dead whatever its local expiry says: make the next
+/// `id_token()` refresh instead of re-sending it every cycle (WP-442).
+fn note_auth_rejection(state: &AppState, err: &str) {
+    if err == "auth:expired" {
+        state.auth.invalidate_id_token();
+    }
+}
+
+/// A webview-supplied id, checked before it becomes a URL path segment.
+///
+/// Ids are server-minted ULIDs, but they reach these calls from the webview, and `format!` put them
+/// in the path verbatim — a value with `/../` or `?` in it re-targeted a request carrying the user's
+/// bearer token at another route on the same API (QA audit 2026-10-08, WP-444). Only RFC 3986
+/// unreserved characters pass, and never a dot-only segment.
+pub(crate) fn path_id<'a>(op: &str, id: &'a str) -> Result<&'a str, String> {
+    let ok = !id.is_empty()
+        && !id.chars().all(|c| c == '.')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'));
+    if ok {
+        Ok(id)
+    } else {
+        Err(format!("{op}:invalid_id"))
+    }
 }
 
 /// PUT one screenshot's bytes to its presigned S3 URL (host-pinned). Success deletes the local file;
@@ -279,8 +424,7 @@ async fn upload_screenshot(upload: &reqwest::Client, state: &AppState, pu: &Pres
                     id = %pu.screenshot_id,
                     "screenshot bytes changed on disk since capture — refusing to upload (tampered)"
                 );
-                state.screenshots.lock().unwrap().remove(&pu.screenshot_id);
-                let _ = std::fs::remove_file(&path);
+                crate::pending_shots::discard(state, &pu.screenshot_id);
                 return;
             }
         }
@@ -291,22 +435,10 @@ async fn upload_screenshot(upload: &reqwest::Client, state: &AppState, pu: &Pres
     }
 
     match put_bytes(upload, &pu.url, &path).await {
-        Ok(()) => {
-            state.screenshots.lock().unwrap().remove(&pu.screenshot_id);
-            let _ = std::fs::remove_file(&path);
-        }
+        Ok(()) => crate::pending_shots::discard(state, &pu.screenshot_id),
         Err(e) => {
             tracing::warn!("screenshot upload failed: {e}");
-            let mut shots = state.screenshots.lock().unwrap();
-            if let Some(s) = shots.get_mut(&pu.screenshot_id) {
-                s.attempts += 1;
-                if s.attempts >= SCREENSHOT_ATTEMPT_CAP {
-                    let p = s.path.clone();
-                    shots.remove(&pu.screenshot_id);
-                    drop(shots);
-                    let _ = std::fs::remove_file(p);
-                }
-            }
+            crate::pending_shots::failed_upload(state, &pu.screenshot_id);
         }
     }
 }
@@ -331,5 +463,61 @@ pub(crate) async fn put_bytes(
         Ok(())
     } else {
         Err(format!("status:{}", resp.status().as_u16()))
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::{give_up_on, path_id, REFUSED_BATCH_GRACE_MS};
+
+    /// WP-208: a refused head batch blocks only for the grace period, then gives way; a different
+    /// batch being refused starts its own clock.
+    #[test]
+    fn a_refused_batch_gives_way_after_the_grace_period() {
+        let mut refused = None;
+        assert!(!give_up_on(&mut refused, 7, 1_000), "first refusal: retry");
+        assert!(!give_up_on(
+            &mut refused,
+            7,
+            1_000 + REFUSED_BATCH_GRACE_MS - 1
+        ));
+        assert!(give_up_on(&mut refused, 7, 1_000 + REFUSED_BATCH_GRACE_MS));
+        assert!(
+            !give_up_on(&mut refused, 8, 9_999_999),
+            "a new head starts over"
+        );
+    }
+
+    /// WP-444: ids become path segments only if they can't re-target the request.
+    #[test]
+    fn only_plain_ids_become_path_segments() {
+        for ok in [
+            "01JABCDEF",
+            "k-1",
+            "s_2",
+            "a.b",
+            "8dff7416-23c7-480e-98dd-10c959bab9ea",
+        ] {
+            assert_eq!(path_id("op", ok), Ok(ok));
+        }
+        for bad in [
+            "", ".", "..", "a/b", "../x", "p1?x=1", "p1#f", "a b", "p%2F1",
+        ] {
+            assert!(path_id("op", bad).is_err(), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::heartbeat_secs;
+
+    /// WP-061: a long screenshot cadence must not stretch the heartbeat past the reaper's window.
+    #[test]
+    fn the_heartbeat_never_waits_longer_than_five_minutes() {
+        assert_eq!(heartbeat_secs(Some(180)), 180);
+        assert_eq!(heartbeat_secs(Some(600)), 300);
+        assert_eq!(heartbeat_secs(Some(20 * 60)), 300);
+        assert_eq!(heartbeat_secs(None), 300);
     }
 }

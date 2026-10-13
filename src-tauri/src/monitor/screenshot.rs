@@ -316,8 +316,9 @@ fn process_monitor(
 /// writing relative to the working directory. Started from the Windows `Run` key at login the CWD is
 /// `C:\Windows\System32`, `create_dir_all` is refused, and `capture_all` returns empty.
 ///
-/// Worse, the two paths disagreed *silently*: `lib.rs` prunes and the self-test reports
-/// `state_dir()/screenshots`, so the built-in diagnostic pointed at a directory capture never used.
+/// Worse, the two paths disagreed *silently*: the self-test reported `state_dir()/screenshots`, so
+/// the built-in diagnostic pointed at a directory capture never used. (The spool is pruned at
+/// startup by `pending_shots::restore`, which deletes every frame that can no longer be uploaded.)
 ///
 /// Deriving it here keeps the agent's whole state — identity, queue, session, logs, spool — in one
 /// place, so an install that migrates carries its screenshots with it.

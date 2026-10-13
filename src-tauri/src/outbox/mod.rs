@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use wp_agent_contract::{ActivityRollup, AgentEvent, BatchEnvelope, Heartbeat, ScreenshotMeta};
 
+pub(crate) use store::write_atomic;
 use store::JsonlStore;
 
 pub struct Outbox {
@@ -395,6 +396,25 @@ mod tests {
             4,
             "seq restarted after a full prune — the server would silently drop this batch"
         );
+    }
+
+    /// WP-445: the prune rewrite and the `.seq` sidecar are replaced via a temp file, never truncated
+    /// in place — and leave no temp file behind.
+    #[test]
+    fn prune_and_seq_writes_replace_the_files_whole() {
+        let (store, path) = temp_store();
+        let mut ob = Outbox::with_store("test-agent".into(), store);
+        enqueue(&mut ob);
+        enqueue(&mut ob);
+        ob.prune_to(1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 1, "exactly the un-acked remainder");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("seq")).unwrap(),
+            "2"
+        );
+        assert!(!path.with_file_name("batches.jsonl.tmp").exists());
+        assert!(!path.with_file_name("batches.seq.tmp").exists());
     }
 
     #[test]

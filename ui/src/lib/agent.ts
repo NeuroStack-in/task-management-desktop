@@ -20,6 +20,7 @@ import type {
   PauseState,
   Project,
   Session,
+  SessionInfo,
   Subtask,
   Task,
   TimerSelection,
@@ -109,9 +110,9 @@ async function soft<T>(p: Promise<T>, fallback: T): Promise<T> {
 }
 
 /**
- * The client's **local** `YYYY-MM-DD`, which is what `list_sessions` expects — the Lambda runs in
- * UTC and cannot know the user's day. `toISOString()` would be wrong here: it renders the UTC
- * date, so anyone east or west of UTC gets yesterday's or tomorrow's sessions near midnight.
+ * The client's **local** `YYYY-MM-DD`, which is what `list_sessions` and the pause budget expect —
+ * the core and the Lambda have no local calendar. `toISOString()` would be wrong here: it renders
+ * the UTC date, so anyone east or west of UTC gets yesterday's or tomorrow's day near midnight.
  */
 function localDate(d = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -181,7 +182,8 @@ export async function readCore(): Promise<CoreSnapshot> {
     invoke<AgentSnapshot["capture"]>("capture_state"),
     invoke<AgentSnapshot["config"]>("effective_config"),
     invoke<TimerState>("timer_state"),
-    invoke<PauseState>("pause_state"),
+    // The pause budget is per local day, and only the panel knows which day that is.
+    invoke<PauseState>("pause_state", { localDate: localDate() }),
   ]);
   // Local token decode, not a network call — cheap enough to keep on the per-second path.
   const identity = auth.signedIn ? await soft(invoke<Identity | null>("identity"), null) : null;
@@ -197,6 +199,14 @@ export async function readCore(): Promise<CoreSnapshot> {
   };
 }
 
+/** What one read of the backend-fed lists produced. */
+export interface ListsRead {
+  /** The lists that loaded. A list that failed is **absent**, so the caller keeps its last-good copy. */
+  lists: Partial<SnapshotLists>;
+  /** The projects read failed — an empty picker then means "couldn't load", not "no projects". */
+  projectsFailed: boolean;
+}
+
 /**
  * The backend-fed lists: the user's projects, the tasks the picker offers, and today's folded
  * sessions — three live HTTP reads (`/v1/projects`, `/v1/me/tasks`, `/v1/me/timesheet/today`).
@@ -207,17 +217,30 @@ export async function readCore(): Promise<CoreSnapshot> {
  * panel, 24/7, re-fetching an answer that had not changed — it was ~96% of the API Gateway bill.
  * The caller ({@link useAgent}) reads these slowly and on demand instead, keeping the last-good copy
  * between reads.
+ *
+ * **A failed read leaves its list out** rather than answering `[]`. Each read used to be wrapped to
+ * fall back to an empty list, so one offline poll blanked the project picker, the task workspace and
+ * Today's sessions, and the footer told the employee to ask an admin for projects (QA audit
+ * 2026-10-08, WP-207).
  */
-export async function readLists(signedIn: boolean): Promise<SnapshotLists> {
-  // Signed out, the core commands short-circuit on the missing token and return empty anyway — so
-  // skip the three IPC round-trips rather than spend them to be told nothing.
-  if (!signedIn) return { ...EMPTY_LISTS };
-  const [rows, projects, sessions] = await Promise.all([
-    soft(invoke<TaskRow[]>("list_tasks"), []),
-    soft(invoke<Project[]>("list_projects"), []),
-    soft(invoke<Session[]>("list_sessions", { date: localDate() }), []),
+export async function readLists(signedIn: boolean): Promise<ListsRead> {
+  // Signed out, there is nothing of this user's to show — and nothing to spend three IPC
+  // round-trips on.
+  if (!signedIn) return { lists: { ...EMPTY_LISTS }, projectsFailed: false };
+  const [rows, projects, sessions] = await Promise.allSettled([
+    invoke<TaskRow[]>("list_tasks"),
+    invoke<Project[]>("list_projects"),
+    invoke<Session[]>("list_sessions", { date: localDate() }),
   ]);
-  return { projects, tasks: joinTasks(rows, projects), sessions };
+  const lists: Partial<SnapshotLists> = {};
+  if (projects.status === "fulfilled") lists.projects = projects.value;
+  // Tasks are joined onto projects, so they are replaced only when both reads landed — otherwise
+  // the last-good pair stays together.
+  if (rows.status === "fulfilled" && projects.status === "fulfilled") {
+    lists.tasks = joinTasks(rows.value, projects.value);
+  }
+  if (sessions.status === "fulfilled") lists.sessions = sessions.value;
+  return { lists, projectsFailed: projects.status === "rejected" };
 }
 
 /**
@@ -227,8 +250,13 @@ export async function readLists(signedIn: boolean): Promise<SnapshotLists> {
  */
 export async function readSnapshot(): Promise<AgentSnapshot> {
   const core = await readCore();
-  const lists = await readLists(core.auth.signedIn);
-  return { ...core, ...lists };
+  const read = await readLists(core.auth.signedIn);
+  return { ...core, ...EMPTY_LISTS, ...read.lists };
+}
+
+/** What this session can measure — on Wayland, no idle time or app activity. */
+export function sessionInfo(): Promise<SessionInfo> {
+  return invoke<SessionInfo>("session_info");
 }
 
 // ── auth ─────────────────────────────────────────────────────────────────────
@@ -340,8 +368,13 @@ export async function startTimer(sel: TimerSelection): Promise<void> {
   });
 }
 
-export async function stopTimer(): Promise<void> {
-  await invoke<TimerState>("stop_timer");
+/**
+ * Stop the timer. `discardIdle` is the idle banner's Stop: the core then ends the session at the
+ * last input before the idle stretch, so the idle minutes aren't billed — unless the person has
+ * plainly been back at work for a while, when it stops now.
+ */
+export async function stopTimer(discardIdle = false): Promise<void> {
+  await invoke<TimerState>("stop_timer", { discardIdle });
 }
 
 /**
@@ -461,8 +494,9 @@ export async function switchTo(sel: TimerSelection): Promise<void> {
 
 // ── privacy pause ────────────────────────────────────────────────────────────
 
+/** Draws on today's pause budget — "today" being the user's local day, which the core can't tell. */
 export function requestPause(requestedSecs: number): Promise<PauseGrant> {
-  return invoke<PauseGrant>("request_pause", { requestedSecs });
+  return invoke<PauseGrant>("request_pause", { requestedSecs, localDate: localDate() });
 }
 
 // ── launch at login ────────────────────────────────────────────────────────────

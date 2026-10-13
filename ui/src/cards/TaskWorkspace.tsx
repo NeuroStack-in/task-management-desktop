@@ -11,8 +11,9 @@
  *
  * **This app is the only place subtasks are written.** The web shows them read-only. **Only subtasks
  * carry a done box** — finishing the whole task is a reviewer's sign-off that belongs on the board,
- * and the backend gates it, so an assignee ticking it here would only 403. The task can still be
- * *selected* (to work on it as a whole) and shows struck through when finished elsewhere.
+ * and the backend gates it to a project lead, so a member ticking it here would only 403. The task
+ * can still be *selected* (to work on it as a whole) and shows struck through when finished
+ * elsewhere.
  */
 import { useState } from "react";
 import { Check, Loader2, Plus, Square, SquareCheckBig } from "lucide-react";
@@ -23,10 +24,10 @@ import { cn } from "@/lib/utils";
 import type { Subtask, Task } from "@/lib/types";
 
 /**
- * The statuses an **assignee** may set from their own panel: `todo → in_progress → in_review`.
- * `done` / `closed` are a reviewer's sign-off and `blocked` a lead's escalation — an assignee picking
- * one just 403s — so a task already in one of those shows as a read-only pill, with the three
- * settable steps still offered to move it back.
+ * The statuses **any project member** may set (`projects::update_task`, since 2026-09-01):
+ * `todo → in_progress → in_review`. `done` / `closed` are a reviewer's sign-off and `blocked` a
+ * lead's escalation — a member picking one just 403s — so a task already in one of those shows as a
+ * read-only pill, with the three settable steps still offered to move it back.
  */
 const SETTABLE: { value: string; label: string }[] = [
   { value: "todo", label: "To do" },
@@ -55,7 +56,7 @@ interface TaskWorkspaceProps {
   onPick: (subtaskId: string | null) => void;
   onAdd: (title: string) => Promise<Subtask | null>;
   onSetSubtaskDone: (subtask: Subtask, done: boolean) => Promise<boolean>;
-  /** Change the task's status. Backend-gated (assignee, or a project Lead/Manager). */
+  /** Change the task's status. Backend-gated: Done/Blocked need a project Lead/Manager. */
   onSetStatus: (status: string) => void;
 }
 

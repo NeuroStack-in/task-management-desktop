@@ -14,8 +14,13 @@ import type { PauseState } from "@/lib/types";
 const PAUSE_REQUEST_SECS = 5 * 60;
 
 /**
- * Bounded pause. The panel only *requests* — the core clamps to org policy and records the
- * pause as an auditable event (PRIVACY.md §5: "agency without creating blind spots").
+ * Bounded pause. The panel only *requests* — the core clamps it to the day's allowance (30 minutes
+ * per local day, kept across restarts) and suspends screenshots, activity and location for the
+ * window; the timer keeps running.
+ *
+ * The copy says only that. It used to claim "Your organization is notified that it was paused" —
+ * no pause event exists, and nothing on the server reads the paused flag — and "only screenshots
+ * pause" in the guide, when all three captures do (QA audit 2026-10-08, WP-213).
  *
  * Every number here is read back from the core each poll; nothing is counted down locally, so a
  * reload can't lose a pause that is still in effect.
@@ -63,7 +68,7 @@ export function PauseCard({
               className="bg-warning duration-1000"
             />
             <p className="mt-0.5 text-[11px] text-muted-foreground">
-              Capture is suspended. Your organization is notified that it was paused.
+              Screenshots, activity and location are paused. Your timer keeps running.
             </p>
           </>
         ) : (
@@ -72,7 +77,7 @@ export function PauseCard({
               ? "Pausing isn't available under your organization's policy."
               : budgetSpent
                 ? "You've used today's pause allowance. It resets tomorrow."
-                : `Suspends capture for a bounded window. ${formatCountdown(
+                : `Pauses screenshots, activity and location; your timer keeps running. ${formatCountdown(
                     pause.remaining_budget_secs,
                   )} of pause time left today.`}
           </p>

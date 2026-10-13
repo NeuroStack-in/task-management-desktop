@@ -62,6 +62,38 @@ impl AuthManager {
         self.tokens.read().unwrap().is_some()
     }
 
+    /// The signed-in user's Cognito `sub`, from the ID token. `None` when signed out or undecodable.
+    /// What the outbox's owner is recorded as (`AppState::adopt_signed_in`).
+    pub fn subject(&self) -> Option<String> {
+        let guard = self.tokens.read().unwrap();
+        let t = guard.as_ref()?;
+        token::decode_id_claims(&t.id_token)
+            .map(|c| c.sub)
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Whether the signed-in user's role tracks their own time (`TimeTrackSelf`, bit 110 of the
+    /// `perm` claim). `None` when signed out or the claim can't be read — the server stays the
+    /// boundary, so an unreadable claim is never treated as a refusal.
+    pub fn can_track_time(&self) -> Option<bool> {
+        let guard = self.tokens.read().unwrap();
+        let t = guard.as_ref()?;
+        token::decode_id_claims(&t.id_token)?.has_permission_bit(token::TIME_TRACK_SELF_BIT)
+    }
+
+    /// The server answered 401 to the cached ID token: treat it as expired so the next
+    /// [`Self::id_token`] refreshes instead of re-sending it.
+    ///
+    /// Freshness used to be judged only by the locally computed `expires_at`, so after a backward
+    /// clock step (or a token the server revoked early) every call 401'd until the local clock
+    /// caught up (QA audit 2026-10-08, WP-442). The refresh token is untouched — only Cognito
+    /// rejecting *that* signs the user out.
+    pub fn invalidate_id_token(&self) {
+        if let Some(t) = self.tokens.write().unwrap().as_mut() {
+            t.expires_at = 0;
+        }
+    }
+
     /// Restore a session at startup from the keyring's refresh token. Returns whether it worked.
     ///
     /// **Never clobbers a live session.** `restore` is spawned async at launch and its Cognito
@@ -80,10 +112,11 @@ impl AuthManager {
         match cognito::refresh(&self.http, &self.cfg, &rt, now_secs()).await {
             Ok(t) => {
                 // Re-check after the network round-trip: a login may have landed while we refreshed.
-                if self.is_authenticated() {
-                    return true;
+                // Checked and stored under one write lock, so a login cannot slip in between.
+                let mut guard = self.tokens.write().unwrap();
+                if guard.is_none() {
+                    store(&mut guard, t);
                 }
-                self.set(t);
                 true
             }
             Err(e) => {
@@ -268,7 +301,10 @@ impl AuthManager {
     }
 
     pub fn logout(&self) {
-        *self.tokens.write().unwrap() = None;
+        // The keyring is cleared under the same write lock that drops the tokens, so a refresh
+        // finishing concurrently can't write the departing user's refresh token back in between.
+        let mut guard = self.tokens.write().unwrap();
+        *guard = None;
         let _ = token_store::clear(REFRESH_KEY);
     }
 
@@ -293,16 +329,21 @@ impl AuthManager {
             }
             t.refresh_token.clone()
         };
+        // Both outcomes below apply only if the stored session is still the one we refreshed. A
+        // sign-out — or a sign-in as someone else — can land during the round-trip, and writing the
+        // result back regardless restored the previous user's tokens to memory and the keyring about
+        // a second after they signed out (QA audit 2026-10-08, WP-441). `restore` already re-checked
+        // for this; this path did not.
         match cognito::refresh(&self.http, &self.cfg, &refresh_token, now_secs()).await {
             Ok(t) => {
                 let id = t.id_token.clone();
-                self.set(t);
-                Some(id)
+                self.replace_if_current(&refresh_token, Some(t))
+                    .then_some(id)
             }
             Err(e) if refresh_failure_is_terminal(&e) => {
                 // Cognito rejected the token: the session really is over.
                 tracing::warn!("session refresh was rejected ({e}) — signing out");
-                self.logout();
+                self.replace_if_current(&refresh_token, None);
                 None
             }
             Err(e) => {
@@ -363,18 +404,42 @@ impl AuthManager {
     }
 
     fn set(&self, t: Tokens) {
-        // **Logged, not discarded.** A failed keyring write is not cosmetic: it is the difference
-        // between "stay signed in" and "ask for a password on every launch", and it is otherwise
-        // completely silent — the session works fine until the next restart, so the symptom shows up
-        // far from the cause. This was `let _ = …` while every write was failing on Windows for an
-        // oversized chunk (see `token_store::CHUNK`), and nothing anywhere said so.
-        if let Err(e) = token_store::store(REFRESH_KEY, t.refresh_token.as_bytes()) {
-            tracing::error!(
-                "could not persist the refresh token ({e}) — sign-in will not survive a restart"
-            );
-        }
-        *self.tokens.write().unwrap() = Some(t);
+        store(&mut self.tokens.write().unwrap(), t);
     }
+
+    /// Store `new` — or sign out, for `None` — **only if** the stored session is still the one whose
+    /// refresh token is `expected_refresh`. Returns whether it was (WP-441).
+    fn replace_if_current(&self, expected_refresh: &str, new: Option<Tokens>) -> bool {
+        let mut guard = self.tokens.write().unwrap();
+        if guard.as_ref().map(|t| t.refresh_token.as_str()) != Some(expected_refresh) {
+            return false;
+        }
+        match new {
+            Some(t) => store(&mut guard, t),
+            None => {
+                *guard = None;
+                let _ = token_store::clear(REFRESH_KEY);
+            }
+        }
+        true
+    }
+}
+
+/// Persist the refresh token and install `t` as the session, **under the caller's write lock** — so a
+/// login, a refresh and a sign-out can never interleave their keyring and memory writes and leave the
+/// two naming different users.
+fn store(slot: &mut Option<Tokens>, t: Tokens) {
+    // **Logged, not discarded.** A failed keyring write is not cosmetic: it is the difference
+    // between "stay signed in" and "ask for a password on every launch", and it is otherwise
+    // completely silent — the session works fine until the next restart, so the symptom shows up
+    // far from the cause. This was `let _ = …` while every write was failing on Windows for an
+    // oversized chunk (see `token_store::CHUNK`), and nothing anywhere said so.
+    if let Err(e) = token_store::store(REFRESH_KEY, t.refresh_token.as_bytes()) {
+        tracing::error!(
+            "could not persist the refresh token ({e}) — sign-in will not survive a restart"
+        );
+    }
+    *slot = Some(t);
 }
 
 impl Default for AuthManager {
@@ -506,6 +571,47 @@ mod tests {
         assert!(!refresh_failure_is_terminal(
             "auth:cognito:TooManyRequestsException:Rate exceeded"
         ));
+    }
+
+    fn tokens(refresh: &str) -> Tokens {
+        Tokens {
+            id_token: "id".into(),
+            access_token: "ac".into(),
+            refresh_token: refresh.into(),
+            expires_at: i64::MAX,
+        }
+    }
+
+    /// WP-441: a refresh that finishes after the session changed must not touch the new state — not
+    /// write the old tokens back, and not sign the new session out on the old one's rejection.
+    #[test]
+    fn a_stale_refresh_leaves_a_changed_session_alone() {
+        let m = AuthManager::new();
+        assert!(!m.replace_if_current("old", Some(tokens("old"))));
+        assert!(
+            !m.is_authenticated(),
+            "signed out meanwhile: stays signed out"
+        );
+
+        *m.tokens.write().unwrap() = Some(tokens("new"));
+        assert!(!m.replace_if_current("old", None));
+        assert_eq!(
+            m.tokens.read().unwrap().as_ref().unwrap().refresh_token,
+            "new",
+            "another user signed in meanwhile: their session survives"
+        );
+    }
+
+    /// WP-442: a 401 makes the next `id_token()` refresh rather than resend the same token.
+    #[test]
+    fn a_server_rejection_expires_the_cached_token() {
+        let m = AuthManager::new();
+        *m.tokens.write().unwrap() = Some(tokens("rt"));
+        m.invalidate_id_token();
+        let guard = m.tokens.read().unwrap();
+        let t = guard.as_ref().unwrap();
+        assert!(t.is_expired(now_secs(), 60));
+        assert_eq!(t.refresh_token, "rt", "the refresh token is kept");
     }
 
     /// UI-read DTO: the serialized names must be camelCase (the boundary the TS side reads).

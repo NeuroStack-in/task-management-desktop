@@ -25,6 +25,7 @@ pub mod location;
 pub mod monitor;
 pub mod mqtt;
 pub mod outbox;
+pub mod pending_shots;
 pub mod privacy_log;
 pub mod release;
 pub mod rules;
@@ -204,12 +205,6 @@ pub fn run() {
             commands::auth_status,
             commands::open_website,
             commands::set_consent,
-            commands::consent_status,
-            commands::timer_start,
-            commands::timer_stop,
-            commands::timer_status,
-            commands::agent_id,
-            commands::check_for_updates,
             commands::update_status,
             commands::update_install,
             commands::set_auto_start,
@@ -234,7 +229,7 @@ pub fn run() {
             commands::panel::set_task_status,
             commands::panel::list_sessions,
             commands::panel::take_pending_resume,
-            commands::panel::privacy_log,
+            commands::panel::session_info,
         ])
         // Minimize-to-tray: closing the panel hides it; the agent keeps running behind the tray.
         .on_window_event(|window, event| {
@@ -272,7 +267,8 @@ pub fn run() {
             // the first cycle) — and, worse, would race the panel into showing the notice again.
             {
                 let persisted = crate::session_state::load();
-                app.state::<AppState>().consent.store(
+                let state = app.state::<AppState>();
+                state.consent.store(
                     persisted.restore_consent(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
@@ -280,6 +276,15 @@ pub fn run() {
                     "consent restored at startup: {}",
                     persisted.restore_consent()
                 );
+                // The day's privacy-pause budget, so a restart doesn't refill it (WP-213).
+                if let Some(budget) = persisted.pause_budget_secs {
+                    let mut pause = state.pause.lock().unwrap();
+                    pause.day = persisted.pause_day.clone();
+                    pause.budget_secs = budget.min(crate::state::DAILY_PAUSE_SECS);
+                }
+                // The org policy last applied, so a restart enforces it from the first second
+                // instead of the contract's defaults until a pull succeeds (WP-209).
+                crate::api::config::restore(&state);
             }
 
             // Close any session the previous run left open — a crash, a force-kill, a power cut.
@@ -288,12 +293,25 @@ pub fn run() {
             // two sessions in the outbox and leave the server to guess the order.
             crate::lifecycle::recover_open_session(app.handle());
 
+            // Pending screenshot uploads from the previous run (WP-060). Before the capture and
+            // sender threads start, so nothing in the spool is mid-write.
+            let restored = crate::pending_shots::restore(
+                &app.state::<AppState>(),
+                &monitor::screenshot::screenshots_dir(),
+                clock::now_epoch_ms(),
+            );
+            if restored > 0 {
+                tracing::info!(restored, "restored pending screenshot uploads from the spool");
+            }
+
             tauri::async_runtime::spawn(async move {
                 let restored = handle.state::<AppState>().auth.restore().await;
                 tracing::info!("auth restore at startup: {restored}");
                 // Send the first heartbeat right after a resumed session so the device reappears in the
-                // fleet within seconds of launch, not after a full cadence interval.
+                // fleet within seconds of launch, not after a full cadence interval. A failed restore is
+                // retried by the sender every cycle (WP-059).
                 if restored {
+                    handle.state::<AppState>().adopt_signed_in();
                     handle.state::<AppState>().flush.notify_one();
                 }
             });
