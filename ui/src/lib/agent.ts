@@ -499,6 +499,11 @@ export function requestPause(requestedSecs: number): Promise<PauseGrant> {
   return invoke<PauseGrant>("request_pause", { requestedSecs, localDate: localDate() });
 }
 
+/** Ends the pause now; the unused part goes back to today's allowance. */
+export function resumePause(): Promise<PauseState> {
+  return invoke<PauseState>("resume_pause", { localDate: localDate() });
+}
+
 // ── launch at login ────────────────────────────────────────────────────────────
 
 /**

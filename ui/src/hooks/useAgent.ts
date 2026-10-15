@@ -104,6 +104,8 @@ export interface Agent {
     done: boolean,
   ) => Promise<boolean>;
   requestPause: (secs: number) => void;
+  /** End the pause now; the unused part goes back to today's allowance. */
+  resumePause: () => void;
   signOut: () => void;
   /** Dismiss the idle prompt, keeping the timer running. */
   dismissIdle: () => void;
@@ -411,6 +413,21 @@ export function useAgent(): Agent {
     [refresh, reportAction],
   );
 
+  const resumePause = useCallback(() => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setActionError(null);
+    void agent
+      .resumePause()
+      .then(() => void refresh())
+      .catch(reportAction)
+      .finally(() => {
+        busyRef.current = false;
+        setBusy(false);
+      });
+  }, [refresh, reportAction]);
+
   const signOut = useCallback(() => {
     // Clear the device-global description MRU + every ephemeral per-session banner, so the next
     // person who signs in on this device inherits none of the previous user's UI state.
@@ -446,6 +463,7 @@ export function useAgent(): Agent {
     createSubtask,
     setSubtaskDone,
     requestPause,
+    resumePause,
     signOut,
     dismissIdle,
     dismissRestricted,

@@ -218,6 +218,7 @@ pub fn run() {
             commands::panel::start_timer,
             commands::panel::stop_timer,
             commands::panel::request_pause,
+            commands::panel::resume_pause,
             commands::panel::pause_state,
             commands::panel::identity,
             commands::panel::appearance,
@@ -276,11 +277,21 @@ pub fn run() {
                     "consent restored at startup: {}",
                     persisted.restore_consent()
                 );
-                // The day's privacy-pause budget, so a restart doesn't refill it (WP-213).
-                if let Some(budget) = persisted.pause_budget_secs {
-                    let mut pause = state.pause.lock().unwrap();
-                    pause.day = persisted.pause_day.clone();
-                    pause.budget_secs = budget.min(crate::state::DAILY_PAUSE_SECS);
+                // The day's privacy-pause use, so a restart doesn't refill it (WP-213), and a pause
+                // still running, so a restart mid-pause stays paused.
+                {
+                    let used = persisted.pause_used_secs.or_else(|| {
+                        // Older builds stored what was LEFT of a fixed 30 minutes.
+                        persisted.pause_budget_secs.map(|left| {
+                            crate::state::LEGACY_DAILY_PAUSE_SECS.saturating_sub(left)
+                        })
+                    });
+                    if let Some(used) = used {
+                        let mut pause = state.pause.lock().unwrap();
+                        pause.day = persisted.pause_day.clone();
+                        pause.used_secs = used;
+                        pause.until_ms = persisted.pause_until_ms;
+                    }
                 }
                 // The org policy last applied, so a restart enforces it from the first second
                 // instead of the contract's defaults until a pull succeeds (WP-209).

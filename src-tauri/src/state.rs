@@ -29,8 +29,14 @@ pub struct PendingShot {
     pub declared_seq: Option<u64>,
 }
 
-/// The daily privacy-pause allowance, in seconds.
-pub const DAILY_PAUSE_SECS: u64 = 30 * 60;
+/// The daily privacy-pause allowance until the org's config says otherwise — the contract default
+/// (15 minutes). The live value is `TrackingConfig::pause_allowance_secs`, set by an owner or admin.
+pub const DEFAULT_PAUSE_ALLOWANCE_SECS: u64 =
+    wp_agent_contract::config::DEFAULT_PAUSE_ALLOWANCE_SECS as u64;
+
+/// The allowance used to be a fixed 30 minutes; a persisted budget from those builds is converted with
+/// it once (see `lib.rs` startup).
+pub const LEGACY_DAILY_PAUSE_SECS: u64 = 30 * 60;
 
 /// Privacy-pause: a bounded window during which capture is suspended, drawn from a daily budget.
 ///
@@ -40,23 +46,24 @@ pub const DAILY_PAUSE_SECS: u64 = 30 * 60;
 /// bought another 30, and an agent left running never got its allowance back, while the panel said
 /// "It resets tomorrow" (QA audit 2026-10-08, WP-213). It is persisted (`session_state`) for the
 /// same reason.
+///
+/// **Taken in pieces** (owner request 2026-10-15): a pause is granted up to the rest of the day's
+/// allowance and ends when the person resumes — the unused part is given back — or when the
+/// allowance runs out. So 5 seconds, then 50, then … all draw on one daily total. It used to be a
+/// fixed "Pause 5 min" with no resume: five minutes were spent whether the pause lasted five minutes
+/// or five seconds.
+///
+/// **What is tracked is time used, not time left**, so an admin's change to the allowance applies at
+/// once: remaining = allowance − used.
+#[derive(Default)]
 pub struct PauseState {
-    /// Epoch ms the current pause ends, or `None` when not paused.
+    /// Epoch ms the current pause ends at the latest, or `None` when not paused.
     pub until_ms: Option<i64>,
-    /// Remaining pause budget for [`Self::day`] (seconds).
-    pub budget_secs: u64,
-    /// The local date the budget belongs to; empty until the first pause is taken.
+    /// Seconds of [`Self::day`]'s allowance spent — including the whole of a pause still running,
+    /// whose unused part [`Self::resume`] gives back.
+    pub used_secs: u64,
+    /// The local date `used_secs` belongs to; empty until the first pause is taken.
     pub day: String,
-}
-
-impl Default for PauseState {
-    fn default() -> Self {
-        PauseState {
-            until_ms: None,
-            budget_secs: DAILY_PAUSE_SECS,
-            day: String::new(),
-        }
-    }
 }
 
 impl PauseState {
@@ -71,29 +78,60 @@ impl PauseState {
         crate::clock::is_local_date(today) && today > self.day.as_str()
     }
 
-    /// The budget left on `today`.
-    pub fn budget_on(&self, today: &str) -> u64 {
+    /// Seconds of the allowance spent on `today`.
+    fn used_on(&self, today: &str) -> u64 {
         if self.rolls_over(today) {
-            DAILY_PAUSE_SECS
+            0
         } else {
-            self.budget_secs
+            self.used_secs
         }
     }
 
-    /// Grant up to `requested` seconds from `today`'s budget and extend the pause window. Returns
-    /// `(granted, granted_secs, remaining_budget_secs)`.
-    pub fn request(&mut self, now_ms: i64, requested: u64, today: &str) -> (bool, u64, u64) {
+    /// The allowance left on `today`, given the org's daily `allowance`.
+    pub fn budget_on(&self, today: &str, allowance: u64) -> u64 {
+        allowance.saturating_sub(self.used_on(today))
+    }
+
+    /// Grant up to `requested` seconds of `today`'s remaining allowance and extend the pause window.
+    /// Returns `(granted, granted_secs, remaining_budget_secs)`.
+    pub fn request(
+        &mut self,
+        now_ms: i64,
+        requested: u64,
+        today: &str,
+        allowance: u64,
+    ) -> (bool, u64, u64) {
         if self.rolls_over(today) {
             self.day = today.to_string();
-            self.budget_secs = DAILY_PAUSE_SECS;
+            self.used_secs = 0;
         }
-        let granted = requested.min(self.budget_secs);
+        let granted = requested.min(allowance.saturating_sub(self.used_secs));
         if granted > 0 {
-            self.budget_secs -= granted;
+            self.used_secs += granted;
             let base = self.until_ms.filter(|u| *u > now_ms).unwrap_or(now_ms);
             self.until_ms = Some(base + (granted as i64) * 1000);
         }
-        (granted > 0, granted, self.budget_secs)
+        (
+            granted > 0,
+            granted,
+            allowance.saturating_sub(self.used_secs),
+        )
+    }
+
+    /// End the pause now and give back the part not used. Returns the seconds given back.
+    ///
+    /// Whole seconds only, rounded down: a fraction of a second paused is spent, never gained, so
+    /// pausing and resuming cannot add to the allowance.
+    pub fn resume(&mut self, now_ms: i64) -> u64 {
+        let Some(until) = self.until_ms.take() else {
+            return 0;
+        };
+        if until <= now_ms {
+            return 0;
+        }
+        let refund = ((until - now_ms) / 1000) as u64;
+        self.used_secs = self.used_secs.saturating_sub(refund);
+        refund
     }
 }
 
@@ -346,6 +384,8 @@ impl AppState {
         crate::session_state::update(|s| {
             s.pause_day.clear();
             s.pause_budget_secs = None;
+            s.pause_used_secs = None;
+            s.pause_until_ms = None;
         });
         // The next person must not have their timer auto-started onto the previous user's task.
         *self.auto_resume.lock().unwrap() = None;
@@ -373,26 +413,86 @@ mod tests {
     const MON: &str = "2026-10-05";
     const TUE: &str = "2026-10-06";
 
+    const ALLOW: u64 = 15 * 60;
+    const SEC: i64 = 1000;
+
     /// WP-213: the allowance is per local day — spent today stays spent, tomorrow it is whole again.
     #[test]
     fn the_pause_budget_resets_on_the_next_local_day() {
         let mut p = PauseState::default();
-        assert_eq!(p.request(0, 20 * 60, MON), (true, 20 * 60, 10 * 60));
-        assert_eq!(p.request(0, 20 * 60, MON), (true, 10 * 60, 0));
-        assert_eq!(p.request(0, 60, MON), (false, 0, 0), "spent for Monday");
-        assert_eq!(p.budget_on(MON), 0);
-        assert_eq!(p.budget_on(TUE), DAILY_PAUSE_SECS);
-        assert!(p.request(0, 60, TUE).0, "Tuesday has its own allowance");
+        assert_eq!(p.request(0, 10 * 60, MON, ALLOW), (true, 10 * 60, 5 * 60));
+        p.until_ms = None; // that pause ran out
+        assert_eq!(p.request(0, 10 * 60, MON, ALLOW), (true, 5 * 60, 0));
+        p.until_ms = None;
+        assert_eq!(
+            p.request(0, 60, MON, ALLOW),
+            (false, 0, 0),
+            "spent for Monday"
+        );
+        assert_eq!(p.budget_on(MON, ALLOW), 0);
+        assert_eq!(p.budget_on(TUE, ALLOW), ALLOW);
+        assert!(
+            p.request(0, 60, TUE, ALLOW).0,
+            "Tuesday has its own allowance"
+        );
     }
 
     /// Setting the clock back a day, or a malformed date from the webview, earns nothing back.
     #[test]
     fn an_earlier_or_malformed_day_does_not_refill_the_budget() {
         let mut p = PauseState::default();
-        p.request(0, DAILY_PAUSE_SECS, TUE);
-        assert!(!p.request(0, 60, MON).0);
-        assert!(!p.request(0, 60, "tomorrow").0);
-        assert_eq!(p.budget_on(""), 0);
+        p.request(0, ALLOW, TUE, ALLOW);
+        p.until_ms = None;
+        assert!(!p.request(0, 60, MON, ALLOW).0);
+        assert!(!p.request(0, 60, "tomorrow", ALLOW).0);
+        assert_eq!(p.budget_on("", ALLOW), 0);
+    }
+
+    /// The owner's example: 5 s, then 50 s, … — only the time actually paused is spent, until the
+    /// day's 15 minutes are used.
+    #[test]
+    fn a_pause_can_be_taken_in_pieces() {
+        let mut p = PauseState::default();
+        // Pause (asks for the rest of the allowance), resume after 5 s.
+        assert!(p.request(0, ALLOW, MON, ALLOW).0);
+        assert_eq!(p.resume(5 * SEC), ALLOW - 5);
+        assert_eq!(p.budget_on(MON, ALLOW), ALLOW - 5);
+        assert!(!p.is_paused(6 * SEC));
+        // Again for 50 s.
+        assert!(p.request(100 * SEC, ALLOW, MON, ALLOW).0);
+        p.resume(150 * SEC);
+        assert_eq!(p.budget_on(MON, ALLOW), ALLOW - 55);
+        // A last pause runs to the end of the allowance and stops by itself.
+        let (_, granted, left) = p.request(200 * SEC, ALLOW, MON, ALLOW);
+        assert_eq!((granted, left), (ALLOW - 55, 0));
+        assert!(p.is_paused(200 * SEC + (granted as i64 - 1) * SEC));
+        assert!(!p.is_paused(200 * SEC + granted as i64 * SEC));
+        assert_eq!(
+            p.resume(10_000 * SEC),
+            0,
+            "nothing to give back once it has run out"
+        );
+    }
+
+    /// A fraction of a second paused is spent, never gained back.
+    #[test]
+    fn resuming_never_adds_to_the_allowance() {
+        let mut p = PauseState::default();
+        p.request(0, ALLOW, MON, ALLOW);
+        p.resume(400); // 0.4 s in: 899.6 s unused, 899 given back — the part-second is spent
+        assert_eq!(p.budget_on(MON, ALLOW), ALLOW - 1);
+        assert_eq!(p.resume(500), 0, "resuming twice gives nothing");
+    }
+
+    /// An admin's change applies at once, in either direction; 0 turns pausing off.
+    #[test]
+    fn the_allowance_comes_from_the_org_and_applies_at_once() {
+        let mut p = PauseState::default();
+        p.request(0, 60, MON, ALLOW);
+        p.resume(60 * SEC);
+        assert_eq!(p.budget_on(MON, 30 * 60), 29 * 60, "raised to 30 min");
+        assert_eq!(p.budget_on(MON, 30), 0, "lowered below what was used");
+        assert_eq!(p.request(0, 60, TUE, 0), (false, 0, 0), "0 = no pausing");
     }
 
     /// WP-212: the banner's Stop ends the session at the last input — unless the person has clearly

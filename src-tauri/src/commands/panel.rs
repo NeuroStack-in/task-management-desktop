@@ -253,6 +253,48 @@ pub struct PauseStateDto {
     /// Seconds left on the current pause, 0 when not paused.
     pub remaining_secs: u64,
     pub remaining_budget_secs: u64,
+    /// The org's daily allowance, so the panel can say "of 15 min" (0 = pausing is off).
+    pub allowance_secs: u64,
+}
+
+/// The org's daily pause allowance from the applied config (owner request 2026-10-15).
+fn pause_allowance(state: &AppState) -> u64 {
+    u64::from(
+        state
+            .config
+            .lock()
+            .unwrap()
+            .get()
+            .tracking
+            .pause_allowance_secs,
+    )
+}
+
+/// Save the pause day, use and window so a restart neither refills the allowance nor drops a pause.
+fn persist_pause(p: &crate::state::PauseState) {
+    let (day, used, until) = (p.day.clone(), p.used_secs, p.until_ms);
+    crate::session_state::update(|s| {
+        s.pause_day = day;
+        s.pause_used_secs = Some(used);
+        s.pause_until_ms = until;
+        s.pause_budget_secs = None;
+    });
+}
+
+fn pause_dto(p: &crate::state::PauseState, now: i64, today: &str, allowance: u64) -> PauseStateDto {
+    let remaining_secs = p
+        .until_ms
+        .filter(|u| *u > now)
+        // Round up: a 500 ms remainder is still a paused second, and truncating would report 0
+        // while capture is genuinely still suspended.
+        .map(|u| ((u - now) as f64 / 1000.0).ceil() as u64)
+        .unwrap_or(0);
+    PauseStateDto {
+        paused: p.is_paused(now),
+        remaining_secs,
+        remaining_budget_secs: p.budget_on(today, allowance),
+        allowance_secs: allowance,
+    }
 }
 
 /// Read the current pause without consuming budget.
@@ -267,24 +309,15 @@ pub struct PauseStateDto {
 pub fn pause_state(state: State<'_, AppState>, local_date: Option<String>) -> PauseStateDto {
     let now = now_ms();
     let today = local_date.unwrap_or_default();
+    let allowance = pause_allowance(&state);
     let p = state.pause.lock().unwrap();
-    let remaining_secs = p
-        .until_ms
-        .filter(|u| *u > now)
-        // Round up: a 500 ms remainder is still a paused second, and truncating would report 0
-        // while capture is genuinely still suspended.
-        .map(|u| ((u - now) as f64 / 1000.0).ceil() as u64)
-        .unwrap_or(0);
-    PauseStateDto {
-        paused: p.is_paused(now),
-        remaining_secs,
-        remaining_budget_secs: p.budget_on(&today),
-    }
+    pause_dto(&p, now, &today, allowance)
 }
 
 /// Pause capture — screenshots, activity and location; the timer keeps running — for up to
-/// `requested_secs` of `local_date`'s budget. The remaining budget is persisted, so a restart does
-/// not hand out a fresh allowance (WP-213).
+/// `requested_secs` of `local_date`'s remaining allowance. The panel asks for all of it: the pause
+/// lasts until the person resumes (`resume_pause` gives the unused part back) or the allowance runs
+/// out. Use is persisted, so a restart does not hand out a fresh allowance (WP-213).
 #[tauri::command]
 pub fn request_pause(
     state: State<'_, AppState>,
@@ -292,22 +325,33 @@ pub fn request_pause(
     local_date: Option<String>,
 ) -> PauseGrantDto {
     let today = local_date.unwrap_or_default();
-    let (granted, granted_secs, remaining_budget_secs, day) = {
+    let allowance = pause_allowance(&state);
+    let (granted, granted_secs, remaining_budget_secs) = {
         let mut p = state.pause.lock().unwrap();
-        let (granted, granted_secs, remaining) = p.request(now_ms(), requested_secs, &today);
-        (granted, granted_secs, remaining, p.day.clone())
+        let out = p.request(now_ms(), requested_secs, &today, allowance);
+        if out.0 {
+            persist_pause(&p);
+        }
+        out
     };
-    if granted {
-        crate::session_state::update(|s| {
-            s.pause_day = day;
-            s.pause_budget_secs = Some(remaining_budget_secs);
-        });
-    }
     PauseGrantDto {
         granted,
         granted_secs,
         remaining_budget_secs,
     }
+}
+
+/// End the privacy pause now, giving the unused part back to today's allowance — so a pause can be
+/// taken in as many pieces as the person likes (owner request 2026-10-15).
+#[tauri::command]
+pub fn resume_pause(state: State<'_, AppState>, local_date: Option<String>) -> PauseStateDto {
+    let now = now_ms();
+    let today = local_date.unwrap_or_default();
+    let allowance = pause_allowance(&state);
+    let mut p = state.pause.lock().unwrap();
+    p.resume(now);
+    persist_pause(&p);
+    pause_dto(&p, now, &today, allowance)
 }
 
 // ── session capabilities ─────────────────────────────────────────────────────

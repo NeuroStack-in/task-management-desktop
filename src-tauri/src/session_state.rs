@@ -106,9 +106,18 @@ pub struct SessionState {
     /// restart no longer hands out a fresh 30 minutes (QA audit 2026-10-08, WP-213).
     #[serde(default)]
     pub pause_day: String,
-    /// The pause budget left on `pause_day`, in seconds; `None` = nothing drawn yet.
+    /// The pause budget left on `pause_day` under the old fixed 30-minute allowance. Read once at
+    /// startup to convert (see `pause_used_secs`); no longer written.
     #[serde(default)]
     pub pause_budget_secs: Option<u64>,
+    /// Seconds of `pause_day`'s allowance used; `None` = nothing drawn yet. Used rather than left,
+    /// because the allowance is the org's and can change (owner request 2026-10-15).
+    #[serde(default)]
+    pub pause_used_secs: Option<u64>,
+    /// Epoch ms a pause still running ends at the latest, so a restart mid-pause stays paused and
+    /// Resume can still give back the unused part.
+    #[serde(default)]
+    pub pause_until_ms: Option<i64>,
 }
 
 impl SessionState {
@@ -208,6 +217,8 @@ mod tests {
             outbox_owner: None,
             pause_day: String::new(),
             pause_budget_secs: None,
+            pause_used_secs: None,
+            pause_until_ms: None,
         }
     }
 

@@ -48,6 +48,7 @@ function Panel() {
     createSubtask,
     setSubtaskDone,
     requestPause,
+    resumePause,
     signOut,
     dismissIdle,
     dismissRestricted,
@@ -372,7 +373,12 @@ function Panel() {
           capped={!hasBanner}
         />
 
-        <PauseCard pause={pause} refused={pauseRefused} onRequest={requestPause} />
+        <PauseCard
+          pause={pause}
+          refused={pauseRefused}
+          onRequest={requestPause}
+          onResume={resumePause}
+        />
       </div>
     </>
   );

@@ -55,6 +55,8 @@ export interface PauseState {
   paused: boolean;
   remaining_secs: number;
   remaining_budget_secs: number;
+  /** The org's daily allowance (0 = pausing is off). Absent from an older core. */
+  allowance_secs?: number;
 }
 
 /**
